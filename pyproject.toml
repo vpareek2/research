@@ -1,0 +1,10 @@
+[project]
+name = "data-research"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "flax>=0.12.7",
+    "jax[cuda13]>=0.10.0",
+    "optax>=0.2.8",
+    "torch>=2.11.0",
+]
