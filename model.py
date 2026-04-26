@@ -1,5 +1,5 @@
 """
-Qwen3-style language model.
+Language Model Definition.
 """
 
 import jax
