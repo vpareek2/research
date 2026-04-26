@@ -2,6 +2,8 @@
 Pretrain a language model.
 """
 
+import argparse
+
 import jax
 from flax import nnx
 import optax
@@ -23,7 +25,11 @@ def train_step(model: Model, optimizer: nnx.Optimizer, input_ids: jax.Array) -> 
 
 
 def main():
-    config = load_config("config.toml")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("config", help="Path to a run config TOML file.")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
     train_config = config.train
     model_config = config.model
 
