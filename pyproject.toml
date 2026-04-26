@@ -19,11 +19,11 @@ dependencies = [
 [project.scripts]
 pretrain = "pretrain:main"
 prepare-data = "prepare_data:main"
-inspect-batch = "utils:main"
+inspect-batch = "inspect_batch:main"
 
 [build-system]
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["checkpoint", "config", "data", "model", "prepare_data", "pretrain", "run", "sample", "utils"]
+py-modules = ["checkpoint", "config", "data", "model", "prepare_data", "pretrain", "logs", "sample", "inspect_batch"]

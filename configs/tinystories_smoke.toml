@@ -1,0 +1,46 @@
+[experiment]
+name = "tinystories_smoke"
+out_dir = "runs"
+
+[model]
+vocab_size = 50257
+hidden_size = 256
+intermediate_size = 768
+n_layers = 2
+n_heads = 4
+n_kv_heads = 1
+seq_len = 128
+theta = 1000000.0
+eps = 0.000001
+tied = false
+
+[train]
+seed = 0
+batch_size = 8
+seq_len = 128
+steps = 20
+lr = 0.001
+decay = 0.1
+log_every = 1
+eval_every = 10
+eval_steps = 10
+checkpoint_every = 20
+keep_last = 3
+
+[data]
+source = "tokens"
+path = "data/tinystories_gpt2"
+tokenizer = "gpt2"
+
+[sampling]
+enabled = true
+prompt = "Once upon a time"
+max_new_tokens = 64
+temperature = 0.8
+top_k = 50
+
+[wandb]
+enabled = true
+project = "data-research"
+entity = ""
+tags = ["tinystories", "smoke"]

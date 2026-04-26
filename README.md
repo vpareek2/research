@@ -168,5 +168,5 @@ uv run pytest -q
 Compile check:
 
 ```bash
-uv run python -m py_compile config.py data.py model.py prepare_data.py pretrain.py run.py checkpoint.py sample.py utils.py
+uv run python -m py_compile config.py data.py model.py prepare_data.py pretrain.py logs.py checkpoint.py sample.py inspect_batch.py
 ```

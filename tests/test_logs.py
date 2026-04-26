@@ -14,7 +14,7 @@ from config import (
     SamplingConfig,
     TrainConfig,
 )
-from run import setup_run
+from logs import setup_run
 
 
 def make_config(out_dir, *, wandb=False):

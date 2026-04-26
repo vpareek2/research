@@ -15,7 +15,7 @@ from checkpoint import create_checkpoint_manager, restore_latest_checkpoint, sav
 from config import RunConfig, load_config
 from data import make_dataloaders, make_val_dataloader
 from model import Model
-from run import setup_run
+from logs import setup_run
 from sample import generate, write_sample
 
 
