@@ -49,6 +49,7 @@ Main sections:
 - `[experiment]`: run name and output directory
 - `[model]`: model size, heads, context length, RoPE theta
 - `[precision]`: compute, parameter, and loss dtypes
+- `[distributed]`: replicated data-parallel device mesh settings
 - `[train]`: batch size, steps, peak learning rate, eval/checkpoint cadence
 - `[train.lr_schedule]`: optional LR schedule; defaults to linear warmup + cosine decay
 - `[data]`: either raw text data or prepared token data
@@ -89,6 +90,22 @@ loss_dtype = "fp32"
 
 Supported dtype names are `fp32` and `bf16`. The intended mixed-precision path
 uses bf16 forward compute with fp32 parameters and fp32 cross entropy.
+
+Distributed config:
+
+```toml
+[distributed]
+enabled = true
+device_count = "auto"
+axis_name = "data"
+```
+
+Training uses one replicated data-parallel path for 1 or more local devices. (For our model size, comms cost for more complex distributed setups need to be tested to see if its worth it.)
+Model parameters and optimizer state are replicated, and batch arrays are
+sharded over the `axis_name` mesh axis. `train.batch_size` is always the global
+batch size, so it must divide evenly by the selected device count. Use
+`device_count = "auto"` to use all visible JAX devices, or set a positive
+integer to use a prefix of local devices.
 
 ## Data
 
@@ -258,8 +275,14 @@ W&B receives scalar metrics and a text table of generated samples. Local files a
 uv run pytest -q
 ```
 
+To exercise fake 4-device CPU sharding locally:
+
+```bash
+XLA_FLAGS=--xla_force_host_platform_device_count=4 JAX_PLATFORMS=cpu uv run pytest tests/test_distributed.py -q
+```
+
 Compile check:
 
 ```bash
-uv run python -m py_compile config.py data.py model.py prepare_data.py pretrain.py logs.py checkpoint.py sample.py lr_schedule.py utils/inspect_batch.py utils/param_count.py utils/train_budget.py
+uv run python -m py_compile config.py data.py distributed.py model.py prepare_data.py pretrain.py logs.py checkpoint.py sample.py lr_schedule.py utils/inspect_batch.py utils/param_count.py utils/train_budget.py
 ```

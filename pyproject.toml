@@ -28,5 +28,5 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["checkpoint", "config", "data", "model", "prepare_data", "pretrain", "logs", "sample", "lr_schedule"]
+py-modules = ["checkpoint", "config", "data", "distributed", "model", "prepare_data", "pretrain", "logs", "sample", "lr_schedule"]
 packages = ["utils"]

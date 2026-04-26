@@ -14,6 +14,7 @@ import tiktoken
 from checkpoint import create_checkpoint_manager, restore_latest_checkpoint, save_checkpoint
 from config import RunConfig, load_config
 from data import make_dataloaders, make_val_dataloader
+from distributed import DistributedContext, create_distributed_context, place_replicated_state, shard_batch
 from lr_schedule import build_lr_schedule, describe_lr_schedule
 from model import Model
 from logs import setup_run
@@ -69,12 +70,12 @@ def eval_step(model: Model, input_ids: jax.Array) -> jax.Array:
     return loss(model, input_ids)
 
 
-def evaluate(model: Model, val_iter, eval_steps: int) -> jax.Array:
-    losses = [eval_step(model, next(val_iter)["input_ids"]) for _ in range(eval_steps)]
+def evaluate(model: Model, val_iter, eval_steps: int, distributed: DistributedContext) -> jax.Array:
+    losses = [eval_step(model, shard_batch(next(val_iter), distributed)["input_ids"]) for _ in range(eval_steps)]
     return jnp.mean(jnp.asarray(losses))
 
 
-def print_startup(config: RunConfig, *, resume: bool):
+def print_startup(config: RunConfig, *, resume: bool, distributed: DistributedContext | None = None):
     line = "=" * 72
     mode = "resume" if resume else "new run"
     tokens_per_step = config.train.batch_size * config.train.seq_len
@@ -88,6 +89,13 @@ def print_startup(config: RunConfig, *, resume: bool):
     print(f"model:      layers={config.model.n_layers} hidden={config.model.hidden_size} heads={config.model.n_heads} kv_heads={config.model.n_kv_heads}")
     print(f"context:    seq_len={config.model.seq_len} vocab={config.model.vocab_size}")
     print(f"train:      steps={config.train.steps} batch={config.train.batch_size} seq_len={config.train.seq_len} tokens={total_tokens}")
+    if distributed is not None:
+        print(
+            f"distributed: devices={distributed.device_count} "
+            f"global_batch={distributed.global_batch_size} "
+            f"per_device_batch={distributed.per_device_batch_size} "
+            f"axis={distributed.axis_name}"
+        )
     print(f"optimizer:  muon peak_lr={config.train.lr} weight_decay={config.train.decay}")
     print(f"schedule:   {describe_lr_schedule(config.train)}")
     print(f"precision:  compute={config.precision.compute_dtype} params={config.precision.param_dtype} loss={config.precision.loss_dtype}")
@@ -125,7 +133,8 @@ def main():
     train_config = config.train
     model_config = config.model
     lr_schedule = build_lr_schedule(train_config)
-    print_startup(config, resume=args.resume)
+    distributed = create_distributed_context(config.distributed, train_config)
+    print_startup(config, resume=args.resume, distributed=distributed)
     logger = setup_run(args.config, config, resume=args.resume)
     print("Compiling first step, then training...\n")
     printed_metric_header = False
@@ -138,6 +147,7 @@ def main():
         muon_weight_dimension_numbers=make_muon_dimension_numbers(model_config),
     )
     optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+    place_replicated_state(model, optimizer, distributed)
     train_iter, _ = make_dataloaders(config.data, train_config)
     checkpoint_manager = create_checkpoint_manager(logger.run_dir, train_config.keep_last)
 
@@ -149,15 +159,17 @@ def main():
             optimizer=optimizer,
             train_iter=train_iter,
         )
+        place_replicated_state(model, optimizer, distributed)
         print(f"resumed from checkpoint; starting at step {start_step}")
 
     try:
         for step in range(start_step, train_config.steps):
             batch = next(train_iter)
             logger.log_batch(step, batch)
+            sharded_batch = shard_batch(batch, distributed)
 
             start_time = time.perf_counter()
-            loss_value, train_metrics = train_step(model, optimizer, batch["input_ids"])
+            loss_value, train_metrics = train_step(model, optimizer, sharded_batch["input_ids"])
             step_sec = time.perf_counter() - start_time
 
             if step % train_config.log_every == 0:
@@ -177,7 +189,7 @@ def main():
 
                 if step % train_config.eval_every == 0:
                     val_iter = make_val_dataloader(config.data, train_config)
-                    val_loss = evaluate(model, val_iter, train_config.eval_steps)
+                    val_loss = evaluate(model, val_iter, train_config.eval_steps, distributed)
                     val_loss_float = float(val_loss)
                     metrics["val/loss"] = val_loss_float
                     metrics["val/ppl"] = float(jnp.exp(val_loss))

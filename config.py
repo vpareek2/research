@@ -55,6 +55,22 @@ def dtype_from_name(name: str):
 
 
 @dataclass
+class DistributedConfig:
+    enabled: bool = True
+    device_count: int | str = "auto"
+    axis_name: str = "data"
+
+    def __post_init__(self):
+        if not isinstance(self.enabled, bool):
+            raise ValueError(f"distributed.enabled must be a bool, got {self.enabled!r}")
+        if self.device_count != "auto":
+            if not isinstance(self.device_count, int) or self.device_count <= 0:
+                raise ValueError(f"distributed.device_count must be 'auto' or a positive integer, got {self.device_count!r}")
+        if not isinstance(self.axis_name, str) or not self.axis_name:
+            raise ValueError("distributed.axis_name must be a non-empty string")
+
+
+@dataclass
 class LRScheduleConfig:
     type: str = "cosine"
     warmup_ratio: float = 0.01
@@ -141,6 +157,7 @@ class RunConfig:
     train: TrainConfig
     data: DataConfig
     sampling: SamplingConfig
+    distributed: DistributedConfig = field(default_factory=DistributedConfig)
     precision: PrecisionConfig = field(default_factory=PrecisionConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
@@ -178,6 +195,7 @@ def load_config(path: str | Path) -> RunConfig:
         train=TrainConfig(**train_data),
         data=DataConfig(**data["data"]),
         sampling=SamplingConfig(**data.get("sampling", {})),
+        distributed=DistributedConfig(**data.get("distributed", {})),
         precision=PrecisionConfig(**data.get("precision", {})),
         wandb=WandbConfig(**data.get("wandb", {})),
     )

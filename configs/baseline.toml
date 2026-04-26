@@ -19,6 +19,11 @@ compute_dtype = "bf16"
 param_dtype = "fp32"
 loss_dtype = "fp32"
 
+[distributed]
+enabled = true
+device_count = "auto"
+axis_name = "data"
+
 [train]
 seed = 0
 batch_size = 2

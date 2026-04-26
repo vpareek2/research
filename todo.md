@@ -14,13 +14,13 @@ Main things that look missing for a serious ~100M / 2B-token pretraining repo:
 4. **Multi-device / sharding story**
    Training is single-process/simple JIT via [pretrain.py](/home/veer/Master/projects/research/pretrain.py:55). If you intend 2B tokens on multiple GPUs, you’ll want explicit data parallel/sharding guidance or implementation.
 
-5. **Data scale ergonomics**
+5. **Data scale ergonomics**Done
    Prepared token mmap support is good, and provenance logging is strong. But `prepare_data.py` can materialize text collections before writing tokens in [prepare_data.py](/home/veer/Master/projects/research/prepare_data.py:167), which may become painful at larger scale. I’d also add manifest validation on load: dtype, tokenizer name, checksum optional, split sanity.
 
 6. **Run reproducibility metadata**
    Metadata logs library versions/devices, but not git commit, command line, hostname, env knobs, or lockfile hash. That would strengthen [logs.py](/home/veer/Master/projects/research/logs.py:136) for comparing research runs.
 
-7. **Config validation**
+7. **Config validation**Done
    `model.seq_len` and `train.seq_len` can diverge. The model only rejects overlong sequences at runtime in [model.py](/home/veer/Master/projects/research/model.py:112). I’d validate consistency at config load.
 
 8. **Evaluation beyond val loss**

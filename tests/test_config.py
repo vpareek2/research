@@ -3,10 +3,17 @@ from pathlib import Path
 import jax.numpy as jnp
 import pytest
 
-from config import DataConfig, LRScheduleConfig, PrecisionConfig, dtype_from_name, load_config
+from config import DataConfig, DistributedConfig, LRScheduleConfig, PrecisionConfig, dtype_from_name, load_config
 
 
-def write_config(path: Path, *, include_wandb: bool = True, lr_schedule_section: str = "", precision_section: str = ""):
+def write_config(
+    path: Path,
+    *,
+    include_wandb: bool = True,
+    lr_schedule_section: str = "",
+    precision_section: str = "",
+    distributed_section: str = "",
+):
     wandb_section = """
 [wandb]
 enabled = true
@@ -32,6 +39,7 @@ theta = 10000.0
 eps = 0.000001
 tied = false
 {precision_section}
+{distributed_section}
 
 [train]
 seed = 0
@@ -81,6 +89,9 @@ def test_load_config(tmp_path):
     assert config.precision.compute_dtype == "fp32"
     assert config.precision.param_dtype == "fp32"
     assert config.precision.loss_dtype == "fp32"
+    assert config.distributed.enabled is True
+    assert config.distributed.device_count == "auto"
+    assert config.distributed.axis_name == "data"
     assert config.data.val_fraction == 0.25
     assert config.sampling.enabled is True
     assert config.sampling.prompt == "ROMEO:"
@@ -141,6 +152,43 @@ loss_dtype = "fp32"
     assert config.precision.compute_dtype == "bf16"
     assert config.precision.param_dtype == "fp32"
     assert config.precision.loss_dtype == "fp32"
+
+
+def test_explicit_distributed_config(tmp_path):
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        distributed_section="""
+[distributed]
+enabled = true
+device_count = "auto"
+axis_name = "data"
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.distributed.enabled is True
+    assert config.distributed.device_count == "auto"
+    assert config.distributed.axis_name == "data"
+
+
+def test_distributed_can_be_disabled(tmp_path):
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        distributed_section="""
+[distributed]
+enabled = false
+device_count = 8
+axis_name = "data"
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.distributed.enabled is False
+    assert config.distributed.device_count == 8
 
 
 def test_mismatched_model_and_train_seq_len_raises(tmp_path):
@@ -228,6 +276,21 @@ def test_invalid_lr_schedule_config_raises(kwargs):
 def test_invalid_precision_config_raises(kwargs):
     with pytest.raises(ValueError):
         PrecisionConfig(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"enabled": "yes"},
+        {"device_count": 0},
+        {"device_count": -1},
+        {"device_count": "all"},
+        {"axis_name": ""},
+    ],
+)
+def test_invalid_distributed_config_raises(kwargs):
+    with pytest.raises(ValueError):
+        DistributedConfig(**kwargs)
 
 
 def test_dtype_from_name():

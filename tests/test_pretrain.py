@@ -3,7 +3,8 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 
-from config import DataConfig, ExperimentConfig, ModelConfig, PrecisionConfig, RunConfig, SamplingConfig, TrainConfig, WandbConfig
+from config import DataConfig, DistributedConfig, ExperimentConfig, ModelConfig, PrecisionConfig, RunConfig, SamplingConfig, TrainConfig, WandbConfig
+from distributed import create_distributed_context
 from lr_schedule import build_lr_schedule
 from model import Model
 from pretrain import format_metrics_row, loss, make_muon_dimension_numbers, metric_header, print_startup, train_step, tree_l2_norm
@@ -140,16 +141,19 @@ def test_print_startup_outputs_run_summary(capsys):
         ),
         data=DataConfig(path="input.txt", tokenizer="gpt2", val_fraction=0.25),
         sampling=SamplingConfig(enabled=True),
+        distributed=DistributedConfig(enabled=False),
         precision=PrecisionConfig(compute_dtype="bf16", param_dtype="fp32", loss_dtype="fp32"),
         wandb=WandbConfig(enabled=True, project="unit"),
     )
+    distributed = create_distributed_context(config.distributed, config.train)
 
-    print_startup(config, resume=True)
+    print_startup(config, resume=True, distributed=distributed)
 
     output = capsys.readouterr().out
     assert "Pretraining" in output
     assert "run:        unit (resume)" in output
     assert "model:" in output
+    assert "distributed: devices=1 global_batch=2 per_device_batch=2 axis=data" in output
     assert "schedule:   cosine" in output
     assert "precision:  compute=bf16 params=fp32 loss=fp32" in output
     assert "wandb:      on" in output
