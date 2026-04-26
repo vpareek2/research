@@ -1,4 +1,4 @@
-# Random LM Research
+# LM Research
 
 A small JAX/Flax NNX language-model research repo focused on reproducible experiments, fast iteration, and easy inspection when training behavior looks strange.
 
