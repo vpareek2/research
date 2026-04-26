@@ -35,12 +35,16 @@ class TrainConfig:
     decay: float
     log_every: int
 
+@dataclass
+class DataConfig:
+    path: str
+    tokenizer: str
 
 @dataclass
 class RunConfig:
     model: ModelConfig
     train: TrainConfig
-
+    data: DataConfig
 
 def load_config(path: str | Path) -> RunConfig:
     with open(path, "rb") as f:
@@ -49,4 +53,5 @@ def load_config(path: str | Path) -> RunConfig:
     return RunConfig(
         model=ModelConfig(**data["model"]),
         train=TrainConfig(**data["train"]),
+        data=DataConfig(**data["data"]),
     )
