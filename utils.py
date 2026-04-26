@@ -6,9 +6,11 @@ import argparse
 import json
 from pathlib import Path
 
+import numpy as np
 import tiktoken
 
 from config import load_config
+from data import load_token_manifest
 
 
 def _load_batch_record(run_dir: Path, step: int) -> dict:
@@ -29,9 +31,14 @@ def _format_batch_text(run_dir: Path, step: int) -> str:
     config = load_config(run_dir / "config.toml")
     record = _load_batch_record(run_dir, step)
 
-    text = Path(config.data.path).read_text(encoding="utf-8")
     tokenizer = tiktoken.get_encoding(config.data.tokenizer)
-    tokens = tokenizer.encode(text)
+    if config.data.source == "tokens":
+        data_dir = Path(config.data.path)
+        manifest = load_token_manifest(data_dir)
+        tokens = np.memmap(data_dir / manifest["files"]["tokens"]["path"], dtype=np.uint32, mode="r")
+    else:
+        text = Path(config.data.path).read_text(encoding="utf-8")
+        tokens = tokenizer.encode(text)
 
     lines = [
         f"run: {run_dir}",

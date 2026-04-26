@@ -1,5 +1,8 @@
 import json
 
+import numpy as np
+import tiktoken
+
 from config import DataConfig, ExperimentConfig, ModelConfig, RunConfig, SamplingConfig, TrainConfig
 from utils import inspect_batch
 
@@ -127,3 +130,68 @@ def test_inspect_batch_writes_explicit_file(tmp_path):
 
     assert result == out_file
     assert "hello" in out_file.read_text()
+
+
+def test_inspect_batch_reads_prepared_token_data(tmp_path):
+    tokenizer = tiktoken.get_encoding("gpt2")
+    data_dir = tmp_path / "prepared"
+    data_dir.mkdir()
+    tokens = np.asarray(tokenizer.encode("prepared hello world"), dtype=np.uint32)
+    tokens.tofile(data_dir / "tokens.bin")
+    (data_dir / "manifest.json").write_text(json.dumps({
+        "files": {"tokens": {"path": "tokens.bin"}},
+        "splits": {
+            "train": {"start": 0, "end": len(tokens), "tokens": len(tokens)},
+            "val": {"start": len(tokens), "end": len(tokens), "tokens": 0},
+        },
+    }))
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "samples").mkdir()
+    config_text = f"""
+[experiment]
+name = "unit"
+out_dir = "{tmp_path}"
+
+[model]
+vocab_size = 128
+hidden_size = 32
+intermediate_size = 64
+n_layers = 1
+n_heads = 4
+n_kv_heads = 1
+seq_len = 8
+theta = 10000.0
+eps = 0.000001
+tied = false
+
+[train]
+seed = 0
+batch_size = 1
+seq_len = 4
+steps = 1
+lr = 0.001
+decay = 0.1
+log_every = 1
+eval_every = 1
+eval_steps = 1
+checkpoint_every = 1
+keep_last = 1
+
+[data]
+source = "tokens"
+path = "{data_dir}"
+tokenizer = "gpt2"
+
+[sampling]
+enabled = false
+""".strip()
+    (run_dir / "config.toml").write_text(config_text)
+    (run_dir / "batches.jsonl").write_text(
+        json.dumps({"step": 0, "chunk_idx": [0], "token_start": [0], "token_end": [len(tokens)]}) + "\n"
+    )
+
+    out_file = inspect_batch(run_dir, 0)
+
+    assert "prepared hello world" in out_file.read_text()

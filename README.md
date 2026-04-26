@@ -8,6 +8,7 @@ A small JAX/Flax NNX language-model research repo focused on reproducible experi
 - Uses JAX + Flax NNX for the model and training step.
 - Uses Optax Muon for hidden 2D matrices, with vocab matrices routed to AdamW.
 - Uses Grain for deterministic data loading and checkpointable train iteration.
+- Supports local text data and offline prepared token datasets from Hugging Face.
 - Logs local run artifacts first: metrics, batch provenance, samples, configs, and checkpoints.
 - Optionally mirrors scalar metrics and generated samples to W&B.
 
@@ -48,9 +49,46 @@ Main sections:
 - `[experiment]`: run name and output directory
 - `[model]`: model size, heads, context length, RoPE theta
 - `[train]`: batch size, steps, learning rate, eval/checkpoint cadence
-- `[data]`: local text path, tokenizer, validation split
+- `[data]`: either raw text data or prepared token data
 - `[sampling]`: optional deterministic prompt sampling during eval
 - `[wandb]`: optional online logging
+
+## Data
+
+Raw text configs use a single local text file and split tokens deterministically:
+
+```toml
+[data]
+source = "text"
+path = "data/tiny_shakespeare/input.txt"
+tokenizer = "gpt2"
+val_fraction = 0.1
+```
+
+Prepared token configs read offline `.bin` files with `np.memmap`:
+
+```toml
+[data]
+source = "tokens"
+path = "data/tinystories_gpt2"
+tokenizer = "gpt2"
+```
+
+Prepared token directories contain:
+
+```text
+data/<name>/
+  tokens.bin
+  manifest.json
+```
+
+To prepare a Hugging Face dataset once, then train fully offline:
+
+```bash
+uv run prepare-data configs/data/tinystories.toml
+```
+
+The prep step tokenizes the dataset once, inserts EOT between documents by default, writes one `uint32` `tokens.bin`, and records train/val split offsets plus source/tokenizer metadata in `manifest.json`. For HF datasets, `prepare-data` uses `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` if set, then falls back to saved Hugging Face Hub credentials from `hf auth login`, and only prompts if no token is available. Blank prompt input uses anonymous downloads. Tokens are never written to the manifest.
 
 ## Run Training
 
@@ -130,5 +168,5 @@ uv run pytest -q
 Compile check:
 
 ```bash
-uv run python -m py_compile config.py data.py model.py pretrain.py run.py checkpoint.py sample.py utils.py
+uv run python -m py_compile config.py data.py model.py prepare_data.py pretrain.py run.py checkpoint.py sample.py utils.py
 ```

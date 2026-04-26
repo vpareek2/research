@@ -50,11 +50,17 @@ class TrainConfig:
 class DataConfig:
     path: str
     tokenizer: str
-    val_fraction: float
+    val_fraction: float | None = None
+    source: str = "text"
 
     def __post_init__(self):
-        if not 0.0 < self.val_fraction < 1.0:
-            raise ValueError(f"val_fraction must be between 0 and 1, got {self.val_fraction}")
+        if self.source not in {"text", "tokens"}:
+            raise ValueError(f"data source must be 'text' or 'tokens', got {self.source}")
+        if self.source == "text":
+            if self.val_fraction is None:
+                raise ValueError("text data source requires val_fraction")
+            if not 0.0 < self.val_fraction < 1.0:
+                raise ValueError(f"val_fraction must be between 0 and 1, got {self.val_fraction}")
 
 
 @dataclass

@@ -4,6 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "chex>=0.1.91",
+    "datasets>=4.8.4",
     "flax>=0.12.7",
     "grain>=0.2.16",
     "jax[cuda13]>=0.10.0",
@@ -11,11 +12,13 @@ dependencies = [
     "orbax-checkpoint>=0.11.36",
     "pytest>=9.0.3",
     "tiktoken>=0.12.0",
+    "tqdm>=4.67.3",
     "wandb>=0.26.1",
 ]
 
 [project.scripts]
 pretrain = "pretrain:main"
+prepare-data = "prepare_data:main"
 inspect-batch = "utils:main"
 
 [build-system]
@@ -23,4 +26,4 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["checkpoint", "config", "data", "model", "pretrain", "run", "sample", "utils"]
+py-modules = ["checkpoint", "config", "data", "model", "prepare_data", "pretrain", "run", "sample", "utils"]

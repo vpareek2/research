@@ -28,6 +28,7 @@ checkpoint_every = 100
 keep_last = 3
 
 [data]
+source = "text"
 path = "data/tiny_shakespeare/input.txt"
 tokenizer = "gpt2"
 val_fraction = 0.1

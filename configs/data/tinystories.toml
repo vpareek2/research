@@ -1,0 +1,18 @@
+[source]
+type = "hf"
+dataset = "roneneldan/TinyStories"
+split = "train"
+text_column = "text"
+
+[hf]
+prompt_for_token = true
+token_env = "HF_TOKEN"
+
+[tokenizer]
+name = "gpt2"
+append_eot = true
+
+[output]
+path = "data/tinystories_gpt2"
+dtype = "uint32"
+val_fraction = 0.001
