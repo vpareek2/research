@@ -4,7 +4,7 @@ import numpy as np
 import tiktoken
 
 from config import DataConfig, ExperimentConfig, ModelConfig, RunConfig, SamplingConfig, TrainConfig
-from inspect_batch import inspect_batch
+from utils.inspect_batch import inspect_batch
 
 
 def _write_run_config(run_dir, data_path):

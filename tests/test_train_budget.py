@@ -3,7 +3,7 @@ import json
 import pytest
 
 from config import load_config
-from train_budget import build_budget, format_budget, steps_for_tokens, steps_per_epoch, tokens_per_step
+from utils.train_budget import build_budget, format_budget, steps_for_tokens, steps_per_epoch, tokens_per_step
 
 
 def write_config(path):

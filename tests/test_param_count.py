@@ -5,7 +5,7 @@ from flax import nnx
 
 from config import ModelConfig
 from model import Model
-from param_count import config_from_args, count_params, format_breakdown
+from utils.param_count import config_from_args, count_params, format_breakdown
 
 
 def tiny_model_config(**overrides):

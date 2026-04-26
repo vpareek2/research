@@ -19,13 +19,14 @@ dependencies = [
 [project.scripts]
 pretrain = "pretrain:main"
 prepare-data = "prepare_data:main"
-inspect-batch = "inspect_batch:main"
-param-count = "param_count:main"
-train-budget = "train_budget:main"
+inspect-batch = "utils.inspect_batch:main"
+param-count = "utils.param_count:main"
+train-budget = "utils.train_budget:main"
 
 [build-system]
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["checkpoint", "config", "data", "model", "prepare_data", "pretrain", "logs", "sample", "inspect_batch", "param_count", "lr_schedule", "train_budget"]
+py-modules = ["checkpoint", "config", "data", "model", "prepare_data", "pretrain", "logs", "sample", "lr_schedule"]
+packages = ["utils"]
