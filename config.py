@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import tomllib
 
+import jax.numpy as jnp
+
 
 @dataclass
 class ModelConfig:
@@ -29,6 +31,27 @@ class ModelConfig:
 class ExperimentConfig:
     name: str
     out_dir: str
+
+
+@dataclass
+class PrecisionConfig:
+    compute_dtype: str = "fp32"
+    param_dtype: str = "fp32"
+    loss_dtype: str = "fp32"
+
+    def __post_init__(self):
+        for field_name in ("compute_dtype", "param_dtype", "loss_dtype"):
+            value = getattr(self, field_name)
+            if value not in {"fp32", "bf16"}:
+                raise ValueError(f"{field_name} must be 'fp32' or 'bf16', got {value}")
+
+
+def dtype_from_name(name: str):
+    if name == "fp32":
+        return jnp.float32
+    if name == "bf16":
+        return jnp.bfloat16
+    raise ValueError(f"Unknown dtype name: {name}")
 
 
 @dataclass
@@ -118,6 +141,7 @@ class RunConfig:
     train: TrainConfig
     data: DataConfig
     sampling: SamplingConfig
+    precision: PrecisionConfig = field(default_factory=PrecisionConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
 
@@ -134,5 +158,6 @@ def load_config(path: str | Path) -> RunConfig:
         train=TrainConfig(**train_data),
         data=DataConfig(**data["data"]),
         sampling=SamplingConfig(**data.get("sampling", {})),
+        precision=PrecisionConfig(**data.get("precision", {})),
         wandb=WandbConfig(**data.get("wandb", {})),
     )

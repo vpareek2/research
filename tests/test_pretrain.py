@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 
-from config import DataConfig, ExperimentConfig, ModelConfig, RunConfig, SamplingConfig, TrainConfig, WandbConfig
+from config import DataConfig, ExperimentConfig, ModelConfig, PrecisionConfig, RunConfig, SamplingConfig, TrainConfig, WandbConfig
 from lr_schedule import build_lr_schedule
 from model import Model
 from pretrain import format_metrics_row, loss, make_muon_dimension_numbers, metric_header, print_startup, train_step, tree_l2_norm
@@ -32,6 +32,19 @@ def test_loss_is_scalar_and_finite():
     value = loss(model, input_ids)
 
     assert value.shape == ()
+    assert bool(jnp.isfinite(value))
+
+
+def test_loss_is_scalar_and_finite_with_bf16_compute():
+    cfg = tiny_model_config()
+    precision = PrecisionConfig(compute_dtype="bf16", param_dtype="fp32", loss_dtype="fp32")
+    model = Model(cfg, precision=precision, rngs=nnx.Rngs(0))
+    input_ids = jax.random.randint(jax.random.key(1), (2, 8), 0, cfg.vocab_size)
+
+    value = loss(model, input_ids)
+
+    assert value.shape == ()
+    assert value.dtype == jnp.float32
     assert bool(jnp.isfinite(value))
 
 
@@ -127,6 +140,7 @@ def test_print_startup_outputs_run_summary(capsys):
         ),
         data=DataConfig(path="input.txt", tokenizer="gpt2", val_fraction=0.25),
         sampling=SamplingConfig(enabled=True),
+        precision=PrecisionConfig(compute_dtype="bf16", param_dtype="fp32", loss_dtype="fp32"),
         wandb=WandbConfig(enabled=True, project="unit"),
     )
 
@@ -137,6 +151,7 @@ def test_print_startup_outputs_run_summary(capsys):
     assert "run:        unit (resume)" in output
     assert "model:" in output
     assert "schedule:   cosine" in output
+    assert "precision:  compute=bf16 params=fp32 loss=fp32" in output
     assert "wandb:      on" in output
     assert "Starting training" not in output
     assert "step |" not in output

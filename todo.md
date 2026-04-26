@@ -5,7 +5,7 @@ Main things that look missing for a serious ~100M / 2B-token pretraining repo:
 1. **A real scale config** Done
    Only smoke configs exist. I’d add a checked-in `configs/100m_2b.toml` with model size, global batch, context length, total steps, checkpoint cadence, and expected tokens. Right now the core config shape is there in [config.py](/home/veer/Master/projects/research/config.py:35), but no production-ish example.
 
-2. **LR schedule / warmup**
+2. **LR schedule / warmup** Done
    Training uses a constant `train.lr` through Muon in [pretrain.py](/home/veer/Master/projects/research/pretrain.py:130), and logs it statically at [pretrain.py](/home/veer/Master/projects/research/pretrain.py:168). For 2B tokens, I’d expect warmup + cosine/linear decay + min LR.
 
 3. **Precision controls**

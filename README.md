@@ -48,6 +48,7 @@ Main sections:
 
 - `[experiment]`: run name and output directory
 - `[model]`: model size, heads, context length, RoPE theta
+- `[precision]`: compute, parameter, and loss dtypes
 - `[train]`: batch size, steps, peak learning rate, eval/checkpoint cadence
 - `[train.lr_schedule]`: optional LR schedule; defaults to linear warmup + cosine decay
 - `[data]`: either raw text data or prepared token data
@@ -76,6 +77,18 @@ warmup_ratio = 0.01
 stable_ratio = 0.80
 min_lr_ratio = 0.1
 ```
+
+Precision config:
+
+```toml
+[precision]
+compute_dtype = "bf16"
+param_dtype = "fp32"
+loss_dtype = "fp32"
+```
+
+Supported dtype names are `fp32` and `bf16`. The intended mixed-precision path
+uses bf16 forward compute with fp32 parameters and fp32 cross entropy.
 
 ## Data
 

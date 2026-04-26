@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from config import ModelConfig
+from config import ModelConfig, PrecisionConfig, dtype_from_name
 
 def _precompute_rope(seq_len, head_dim, theta, dtype):
     """
@@ -36,10 +36,12 @@ class SwiGLU(nnx.Module):
     """
     SwiGLU activated MLP.
     """
-    def __init__(self, config: ModelConfig,  rngs: nnx.Rngs):
-        self.gate = nnx.Linear(config.hidden_size, config.intermediate_size, use_bias=False, rngs=rngs,)
-        self.up = nnx.Linear(config.hidden_size, config.intermediate_size, use_bias=False, rngs=rngs,)
-        self.down = nnx.Linear(config.intermediate_size, config.hidden_size, use_bias=False, rngs=rngs,)
+    def __init__(self, config: ModelConfig, precision: PrecisionConfig, rngs: nnx.Rngs):
+        dtype = dtype_from_name(precision.compute_dtype)
+        param_dtype = dtype_from_name(precision.param_dtype)
+        self.gate = nnx.Linear(config.hidden_size, config.intermediate_size, use_bias=False, dtype=dtype, param_dtype=param_dtype, rngs=rngs,)
+        self.up = nnx.Linear(config.hidden_size, config.intermediate_size, use_bias=False, dtype=dtype, param_dtype=param_dtype, rngs=rngs,)
+        self.down = nnx.Linear(config.intermediate_size, config.hidden_size, use_bias=False, dtype=dtype, param_dtype=param_dtype, rngs=rngs,)
     
     def __call__(self, x: jax.Array) -> jax.Array:
         return self.down(jax.nn.silu(self.gate(x)) * self.up(x))
@@ -48,19 +50,21 @@ class GQA(nnx.Module):
     """
     Grouped Query Attention.
     """
-    def __init__(self, config: ModelConfig,  rngs: nnx.Rngs):
+    def __init__(self, config: ModelConfig, precision: PrecisionConfig, rngs: nnx.Rngs):
         self.hidden_size = config.hidden_size
         self.n_heads = config.n_heads
         self.n_kv_heads = config.n_kv_heads
         self.head_dim = config.hidden_size // config.n_heads
+        dtype = dtype_from_name(precision.compute_dtype)
+        param_dtype = dtype_from_name(precision.param_dtype)
 
-        self.q = nnx.Linear(config.hidden_size, config.n_heads * self.head_dim, use_bias=False, rngs=rngs,)
-        self.k = nnx.Linear(config.hidden_size, config.n_kv_heads * self.head_dim, use_bias=False, rngs=rngs,)
-        self.v = nnx.Linear(config.hidden_size, config.n_kv_heads * self.head_dim, use_bias=False, rngs=rngs,)
-        self.o = nnx.Linear(config.hidden_size, config.hidden_size, use_bias=False, rngs=rngs,)
+        self.q = nnx.Linear(config.hidden_size, config.n_heads * self.head_dim, use_bias=False, dtype=dtype, param_dtype=param_dtype, rngs=rngs,)
+        self.k = nnx.Linear(config.hidden_size, config.n_kv_heads * self.head_dim, use_bias=False, dtype=dtype, param_dtype=param_dtype, rngs=rngs,)
+        self.v = nnx.Linear(config.hidden_size, config.n_kv_heads * self.head_dim, use_bias=False, dtype=dtype, param_dtype=param_dtype, rngs=rngs,)
+        self.o = nnx.Linear(config.hidden_size, config.hidden_size, use_bias=False, dtype=dtype, param_dtype=param_dtype, rngs=rngs,)
 
-        self.q_norm = nnx.RMSNorm(self.head_dim, epsilon=config.eps, rngs=rngs,)
-        self.k_norm = nnx.RMSNorm(self.head_dim, epsilon=config.eps, rngs=rngs,)
+        self.q_norm = nnx.RMSNorm(self.head_dim, epsilon=config.eps, dtype=dtype, param_dtype=param_dtype, rngs=rngs,)
+        self.k_norm = nnx.RMSNorm(self.head_dim, epsilon=config.eps, dtype=dtype, param_dtype=param_dtype, rngs=rngs,)
     
     def __call__(self, x: jax.Array, cos: jax.Array, sin: jax.Array) -> jax.Array:
         batch_size, seq_len, _ = x.shape
@@ -79,11 +83,13 @@ class Block(nnx.Module):
     """
     Single Transformer Block.
     """
-    def __init__(self, config: ModelConfig, rngs: nnx.Rngs):
-        self.pre_norm = nnx.RMSNorm(config.hidden_size, epsilon=config.eps, rngs=rngs,)
-        self.attn = GQA(config, rngs,)
-        self.post_norm = nnx.RMSNorm(config.hidden_size, epsilon=config.eps, rngs=rngs,)
-        self.mlp = SwiGLU(config, rngs,)
+    def __init__(self, config: ModelConfig, precision: PrecisionConfig, rngs: nnx.Rngs):
+        dtype = dtype_from_name(precision.compute_dtype)
+        param_dtype = dtype_from_name(precision.param_dtype)
+        self.pre_norm = nnx.RMSNorm(config.hidden_size, epsilon=config.eps, dtype=dtype, param_dtype=param_dtype, rngs=rngs,)
+        self.attn = GQA(config, precision, rngs,)
+        self.post_norm = nnx.RMSNorm(config.hidden_size, epsilon=config.eps, dtype=dtype, param_dtype=param_dtype, rngs=rngs,)
+        self.mlp = SwiGLU(config, precision, rngs,)
     
     def __call__(self, x: jax.Array, cos: jax.Array, sin: jax.Array) -> jax.Array:
         x = x + self.attn(self.pre_norm(x), cos, sin)
@@ -94,13 +100,17 @@ class Model(nnx.Module):
     """
     Language Model class.
     """
-    def __init__(self, config: ModelConfig, rngs: nnx.Rngs):
+    def __init__(self, config: ModelConfig, rngs: nnx.Rngs, precision: PrecisionConfig | None = None):
         self.config = config
+        self.precision = precision or PrecisionConfig()
+        dtype = dtype_from_name(self.precision.compute_dtype)
+        param_dtype = dtype_from_name(self.precision.param_dtype)
+        self.loss_dtype = dtype_from_name(self.precision.loss_dtype)
 
-        self.embed = nnx.Embed(config.vocab_size, config.hidden_size, rngs=rngs,)
-        self.layers = nnx.List([Block(config, rngs=rngs,) for _ in range(config.n_layers)])
-        self.norm = nnx.RMSNorm(config.hidden_size, epsilon=config.eps, rngs=rngs,)
-        self.lm_head = nnx.Linear(config.hidden_size, config.vocab_size, use_bias=False, rngs=rngs,)
+        self.embed = nnx.Embed(config.vocab_size, config.hidden_size, dtype=dtype, param_dtype=param_dtype, rngs=rngs,)
+        self.layers = nnx.List([Block(config, self.precision, rngs=rngs,) for _ in range(config.n_layers)])
+        self.norm = nnx.RMSNorm(config.hidden_size, epsilon=config.eps, dtype=dtype, param_dtype=param_dtype, rngs=rngs,)
+        self.lm_head = nnx.Linear(config.hidden_size, config.vocab_size, use_bias=False, dtype=dtype, param_dtype=param_dtype, rngs=rngs,)
 
         # Temp
         if config.tied:

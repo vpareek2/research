@@ -1,11 +1,12 @@
 from pathlib import Path
 
+import jax.numpy as jnp
 import pytest
 
-from config import DataConfig, LRScheduleConfig, load_config
+from config import DataConfig, LRScheduleConfig, PrecisionConfig, dtype_from_name, load_config
 
 
-def write_config(path: Path, *, include_wandb: bool = True, lr_schedule_section: str = ""):
+def write_config(path: Path, *, include_wandb: bool = True, lr_schedule_section: str = "", precision_section: str = ""):
     wandb_section = """
 [wandb]
 enabled = true
@@ -30,6 +31,7 @@ seq_len = 8
 theta = 10000.0
 eps = 0.000001
 tied = false
+{precision_section}
 
 [train]
 seed = 0
@@ -76,6 +78,9 @@ def test_load_config(tmp_path):
     assert config.train.lr_schedule.warmup_ratio == 0.01
     assert config.train.lr_schedule.min_lr_ratio == 0.1
     assert config.train.lr_schedule.stable_ratio == 0.80
+    assert config.precision.compute_dtype == "fp32"
+    assert config.precision.param_dtype == "fp32"
+    assert config.precision.loss_dtype == "fp32"
     assert config.data.val_fraction == 0.25
     assert config.sampling.enabled is True
     assert config.sampling.prompt == "ROMEO:"
@@ -119,6 +124,25 @@ min_lr_ratio = 0.05
     assert config.train.lr_schedule.min_lr_ratio == 0.05
 
 
+def test_explicit_precision_config(tmp_path):
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        precision_section="""
+[precision]
+compute_dtype = "bf16"
+param_dtype = "fp32"
+loss_dtype = "fp32"
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.precision.compute_dtype == "bf16"
+    assert config.precision.param_dtype == "fp32"
+    assert config.precision.loss_dtype == "fp32"
+
+
 @pytest.mark.parametrize("val_fraction", [0.0, 1.0, -0.1, 1.1])
 def test_invalid_val_fraction_raises(val_fraction):
     with pytest.raises(ValueError):
@@ -140,3 +164,23 @@ def test_invalid_val_fraction_raises(val_fraction):
 def test_invalid_lr_schedule_config_raises(kwargs):
     with pytest.raises(ValueError):
         LRScheduleConfig(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"compute_dtype": "fp16"},
+        {"param_dtype": "float32"},
+        {"loss_dtype": "int32"},
+    ],
+)
+def test_invalid_precision_config_raises(kwargs):
+    with pytest.raises(ValueError):
+        PrecisionConfig(**kwargs)
+
+
+def test_dtype_from_name():
+    assert jnp.dtype(dtype_from_name("fp32")) == jnp.dtype(jnp.float32)
+    assert jnp.dtype(dtype_from_name("bf16")) == jnp.dtype(jnp.bfloat16)
+    with pytest.raises(ValueError):
+        dtype_from_name("fp16")

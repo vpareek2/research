@@ -22,7 +22,7 @@ from sample import generate, write_sample
 
 def loss(model: Model, input_ids: jax.Array) -> jax.Array:
     logits = model(input_ids)
-    shift_logits = logits[:, :-1, :]
+    shift_logits = logits[:, :-1, :].astype(model.loss_dtype)
     shift_labels = input_ids[:, 1:]
     return optax.softmax_cross_entropy_with_integer_labels(
         shift_logits,
@@ -90,6 +90,7 @@ def print_startup(config: RunConfig, *, resume: bool):
     print(f"train:      steps={config.train.steps} batch={config.train.batch_size} seq_len={config.train.seq_len} tokens={total_tokens}")
     print(f"optimizer:  muon peak_lr={config.train.lr} weight_decay={config.train.decay}")
     print(f"schedule:   {describe_lr_schedule(config.train)}")
+    print(f"precision:  compute={config.precision.compute_dtype} params={config.precision.param_dtype} loss={config.precision.loss_dtype}")
     print(f"eval:       every={config.train.eval_every} steps={config.train.eval_steps}")
     print(f"data:       {config.data.path} tokenizer={config.data.tokenizer} val_fraction={config.data.val_fraction}")
     print(f"samples:    {'on' if config.sampling.enabled else 'off'}")
@@ -129,7 +130,7 @@ def main():
     print("Compiling first step, then training...\n")
     printed_metric_header = False
 
-    model = Model(model_config, rngs=nnx.Rngs(train_config.seed))
+    model = Model(model_config, precision=config.precision, rngs=nnx.Rngs(train_config.seed))
     tx = optax.contrib.muon(
         learning_rate=lr_schedule,
         weight_decay=train_config.decay,

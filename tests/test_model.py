@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import pytest
 from flax import nnx
 
-from config import ModelConfig
+from config import ModelConfig, PrecisionConfig
 from model import Model, _precompute_rope, rope
 
 
@@ -42,6 +42,22 @@ def test_model_forward_shape_and_finite():
     logits = model(input_ids)
 
     chex.assert_shape(logits, (2, 8, cfg.vocab_size))
+    assert bool(jnp.all(jnp.isfinite(logits)))
+
+
+def test_model_bf16_compute_keeps_params_fp32():
+    cfg = tiny_model_config()
+    precision = PrecisionConfig(compute_dtype="bf16", param_dtype="fp32", loss_dtype="fp32")
+    model = Model(cfg, precision=precision, rngs=nnx.Rngs(0))
+    input_ids = jax.random.randint(jax.random.key(0), (2, 8), 0, cfg.vocab_size)
+
+    logits = model(input_ids)
+    params = jax.tree.leaves(nnx.state(model, nnx.Param))
+
+    assert logits.dtype == jnp.bfloat16
+    assert params
+    assert {param.dtype for param in params} == {jnp.dtype(jnp.float32)}
+    assert model.loss_dtype == jnp.float32
     assert bool(jnp.all(jnp.isfinite(logits)))
 
 
