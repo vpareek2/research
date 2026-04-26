@@ -27,6 +27,11 @@ eval_steps = 10
 checkpoint_every = 100
 keep_last = 3
 
+[train.lr_schedule]
+type = "cosine"
+warmup_ratio = 0.01
+min_lr_ratio = 0.1
+
 [data]
 source = "text"
 path = "data/tiny_shakespeare/input.txt"

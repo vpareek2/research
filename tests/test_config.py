@@ -2,10 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from config import DataConfig, load_config
+from config import DataConfig, LRScheduleConfig, load_config
 
 
-def write_config(path: Path, *, include_wandb: bool = True):
+def write_config(path: Path, *, include_wandb: bool = True, lr_schedule_section: str = ""):
     wandb_section = """
 [wandb]
 enabled = true
@@ -43,6 +43,7 @@ eval_every = 1
 eval_steps = 1
 checkpoint_every = 2
 keep_last = 2
+{lr_schedule_section}
 
 [data]
 path = "input.txt"
@@ -71,6 +72,10 @@ def test_load_config(tmp_path):
     assert config.train.eval_steps == 1
     assert config.train.checkpoint_every == 2
     assert config.train.keep_last == 2
+    assert config.train.lr_schedule.type == "cosine"
+    assert config.train.lr_schedule.warmup_ratio == 0.01
+    assert config.train.lr_schedule.min_lr_ratio == 0.1
+    assert config.train.lr_schedule.stable_ratio == 0.80
     assert config.data.val_fraction == 0.25
     assert config.sampling.enabled is True
     assert config.sampling.prompt == "ROMEO:"
@@ -93,7 +98,45 @@ def test_wandb_config_defaults_to_disabled(tmp_path):
     assert config.wandb.tags == []
 
 
+def test_explicit_lr_schedule_config(tmp_path):
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        lr_schedule_section="""
+[train.lr_schedule]
+type = "wsd"
+warmup_ratio = 0.02
+stable_ratio = 0.75
+min_lr_ratio = 0.05
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.train.lr_schedule.type == "wsd"
+    assert config.train.lr_schedule.warmup_ratio == 0.02
+    assert config.train.lr_schedule.stable_ratio == 0.75
+    assert config.train.lr_schedule.min_lr_ratio == 0.05
+
+
 @pytest.mark.parametrize("val_fraction", [0.0, 1.0, -0.1, 1.1])
 def test_invalid_val_fraction_raises(val_fraction):
     with pytest.raises(ValueError):
         DataConfig(path="input.txt", tokenizer="gpt2", val_fraction=val_fraction)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"type": "linear"},
+        {"warmup_ratio": -0.1},
+        {"warmup_ratio": 1.0},
+        {"min_lr_ratio": -0.1},
+        {"min_lr_ratio": 1.1},
+        {"stable_ratio": -0.1},
+        {"stable_ratio": 1.0},
+    ],
+)
+def test_invalid_lr_schedule_config_raises(kwargs):
+    with pytest.raises(ValueError):
+        LRScheduleConfig(**kwargs)

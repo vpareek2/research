@@ -48,10 +48,34 @@ Main sections:
 
 - `[experiment]`: run name and output directory
 - `[model]`: model size, heads, context length, RoPE theta
-- `[train]`: batch size, steps, learning rate, eval/checkpoint cadence
+- `[train]`: batch size, steps, peak learning rate, eval/checkpoint cadence
+- `[train.lr_schedule]`: optional LR schedule; defaults to linear warmup + cosine decay
 - `[data]`: either raw text data or prepared token data
 - `[sampling]`: optional deterministic prompt sampling during eval
 - `[wandb]`: optional online logging
+
+Learning-rate schedules are step-based. `train.lr` is the peak LR. If
+`[train.lr_schedule]` is omitted, training uses cosine decay with
+`warmup_ratio = 0.01` and `min_lr_ratio = 0.1`.
+
+Cosine schedule:
+
+```toml
+[train.lr_schedule]
+type = "cosine"
+warmup_ratio = 0.01
+min_lr_ratio = 0.1
+```
+
+Warmup-stable-decay schedule:
+
+```toml
+[train.lr_schedule]
+type = "wsd"
+warmup_ratio = 0.01
+stable_ratio = 0.80
+min_lr_ratio = 0.1
+```
 
 ## Data
 
@@ -144,6 +168,22 @@ uv run param-count \
 
 The report includes total parameters plus splits for token embeddings, LM head, attention, MLP, and norms.
 
+## Plan Training Budget
+
+Use `train-budget` to convert config batch shape into steps, tokens, and approximate epochs:
+
+```bash
+uv run train-budget configs/smoke.toml --tokens 2000000000
+```
+
+The utility always reports `tokens_per_step`, configured steps, and configured tokens. For prepared token datasets, it reads `manifest.json` and also reports train tokens, steps per epoch, usable epoch tokens, and configured/target epochs:
+
+```bash
+uv run train-budget configs/tinystories_smoke.toml
+```
+
+Raw text configs do not infer dataset token counts; pass `--tokens` when you only need target-step math.
+
 ## Resume
 
 ```bash
@@ -197,5 +237,5 @@ uv run pytest -q
 Compile check:
 
 ```bash
-uv run python -m py_compile config.py data.py model.py prepare_data.py pretrain.py logs.py checkpoint.py sample.py inspect_batch.py param_count.py
+uv run python -m py_compile config.py data.py model.py prepare_data.py pretrain.py logs.py checkpoint.py sample.py inspect_batch.py param_count.py lr_schedule.py train_budget.py
 ```

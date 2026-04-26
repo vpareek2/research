@@ -32,6 +32,24 @@ class ExperimentConfig:
 
 
 @dataclass
+class LRScheduleConfig:
+    type: str = "cosine"
+    warmup_ratio: float = 0.01
+    min_lr_ratio: float = 0.1
+    stable_ratio: float = 0.80
+
+    def __post_init__(self):
+        if self.type not in {"cosine", "wsd"}:
+            raise ValueError(f"lr_schedule.type must be 'cosine' or 'wsd', got {self.type}")
+        if not 0.0 <= self.warmup_ratio < 1.0:
+            raise ValueError(f"warmup_ratio must be in [0, 1), got {self.warmup_ratio}")
+        if not 0.0 <= self.min_lr_ratio <= 1.0:
+            raise ValueError(f"min_lr_ratio must be in [0, 1], got {self.min_lr_ratio}")
+        if not 0.0 <= self.stable_ratio < 1.0:
+            raise ValueError(f"stable_ratio must be in [0, 1), got {self.stable_ratio}")
+
+
+@dataclass
 class TrainConfig:
     seed: int
     batch_size: int
@@ -44,6 +62,7 @@ class TrainConfig:
     eval_steps: int
     checkpoint_every: int
     keep_last: int
+    lr_schedule: LRScheduleConfig = field(default_factory=LRScheduleConfig)
 
 
 @dataclass
@@ -106,10 +125,13 @@ def load_config(path: str | Path) -> RunConfig:
     with open(path, "rb") as f:
         data = tomllib.load(f)
 
+    train_data = data["train"].copy()
+    train_data["lr_schedule"] = LRScheduleConfig(**train_data.get("lr_schedule", {}))
+
     return RunConfig(
         experiment=ExperimentConfig(**data["experiment"]),
         model=ModelConfig(**data["model"]),
-        train=TrainConfig(**data["train"]),
+        train=TrainConfig(**train_data),
         data=DataConfig(**data["data"]),
         sampling=SamplingConfig(**data.get("sampling", {})),
         wandb=WandbConfig(**data.get("wandb", {})),

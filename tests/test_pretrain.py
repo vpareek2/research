@@ -4,6 +4,7 @@ import optax
 from flax import nnx
 
 from config import DataConfig, ExperimentConfig, ModelConfig, RunConfig, SamplingConfig, TrainConfig, WandbConfig
+from lr_schedule import build_lr_schedule
 from model import Model
 from pretrain import format_metrics_row, loss, make_muon_dimension_numbers, metric_header, print_startup, train_step, tree_l2_norm
 
@@ -75,6 +76,38 @@ def test_train_step_returns_classic_train_metrics():
     assert bool(jnp.isfinite(metrics["train/param_norm"]))
 
 
+def test_muon_optimizer_accepts_lr_schedule():
+    cfg = tiny_model_config()
+    train_cfg = TrainConfig(
+        seed=0,
+        batch_size=2,
+        seq_len=8,
+        steps=4,
+        lr=1e-3,
+        decay=0.1,
+        log_every=1,
+        eval_every=1,
+        eval_steps=1,
+        checkpoint_every=2,
+        keep_last=2,
+    )
+    model = Model(cfg, rngs=nnx.Rngs(0))
+    tx = optax.contrib.muon(
+        learning_rate=build_lr_schedule(train_cfg),
+        weight_decay=train_cfg.decay,
+        adam_weight_decay=train_cfg.decay,
+        muon_weight_dimension_numbers=make_muon_dimension_numbers(cfg),
+    )
+    optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+    input_ids = jax.random.randint(jax.random.key(1), (2, 8), 0, cfg.vocab_size)
+
+    value, metrics = train_step(model, optimizer, input_ids)
+
+    assert value.shape == ()
+    assert bool(jnp.isfinite(value))
+    assert bool(jnp.isfinite(metrics["train/grad_norm"]))
+
+
 def test_print_startup_outputs_run_summary(capsys):
     config = RunConfig(
         experiment=ExperimentConfig(name="unit", out_dir="runs"),
@@ -103,6 +136,7 @@ def test_print_startup_outputs_run_summary(capsys):
     assert "Pretraining" in output
     assert "run:        unit (resume)" in output
     assert "model:" in output
+    assert "schedule:   cosine" in output
     assert "wandb:      on" in output
     assert "Starting training" not in output
     assert "step |" not in output

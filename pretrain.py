@@ -14,6 +14,7 @@ import tiktoken
 from checkpoint import create_checkpoint_manager, restore_latest_checkpoint, save_checkpoint
 from config import RunConfig, load_config
 from data import make_dataloaders, make_val_dataloader
+from lr_schedule import build_lr_schedule, describe_lr_schedule
 from model import Model
 from logs import setup_run
 from sample import generate, write_sample
@@ -87,7 +88,8 @@ def print_startup(config: RunConfig, *, resume: bool):
     print(f"model:      layers={config.model.n_layers} hidden={config.model.hidden_size} heads={config.model.n_heads} kv_heads={config.model.n_kv_heads}")
     print(f"context:    seq_len={config.model.seq_len} vocab={config.model.vocab_size}")
     print(f"train:      steps={config.train.steps} batch={config.train.batch_size} seq_len={config.train.seq_len} tokens={total_tokens}")
-    print(f"optimizer:  muon lr={config.train.lr} weight_decay={config.train.decay}")
+    print(f"optimizer:  muon peak_lr={config.train.lr} weight_decay={config.train.decay}")
+    print(f"schedule:   {describe_lr_schedule(config.train)}")
     print(f"eval:       every={config.train.eval_every} steps={config.train.eval_steps}")
     print(f"data:       {config.data.path} tokenizer={config.data.tokenizer} val_fraction={config.data.val_fraction}")
     print(f"samples:    {'on' if config.sampling.enabled else 'off'}")
@@ -119,16 +121,17 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
+    train_config = config.train
+    model_config = config.model
+    lr_schedule = build_lr_schedule(train_config)
     print_startup(config, resume=args.resume)
     logger = setup_run(args.config, config, resume=args.resume)
     print("Compiling first step, then training...\n")
     printed_metric_header = False
-    train_config = config.train
-    model_config = config.model
 
     model = Model(model_config, rngs=nnx.Rngs(train_config.seed))
     tx = optax.contrib.muon(
-        learning_rate=train_config.lr,
+        learning_rate=lr_schedule,
         weight_decay=train_config.decay,
         adam_weight_decay=train_config.decay,
         muon_weight_dimension_numbers=make_muon_dimension_numbers(model_config),
@@ -166,7 +169,7 @@ def main():
                     "train/grad_norm": float(train_metrics["train/grad_norm"]),
                     "train/param_norm": float(train_metrics["train/param_norm"]),
                     "train/tokens_seen": (step + 1) * train_config.batch_size * train_config.seq_len,
-                    "optim/lr": train_config.lr,
+                    "optim/lr": float(lr_schedule(step)),
                     "time/step_sec": step_sec,
                     "time/tokens_per_sec": tokens_per_sec,
                 }
