@@ -1,6 +1,6 @@
 # LM Research
 
-A small JAX/Flax NNX language-model research repo focused on reproducible experiments, fast iteration, and easy inspection when training behavior looks strange.
+A small JAX/Flax NNX opinionated language-model research repo focused on reproducible experiments, fast iteration, and easy inspection when training behavior looks strange. Goal: Best model trained with only 2B tokens.
 
 ## What It Does
 
@@ -115,6 +115,35 @@ Important files:
 
 If the run directory already exists, startup fails by design. Use a new `[experiment].name` or resume.
 
+## Count Parameters
+
+Use `param-count` to size model configs before launching a run:
+
+```bash
+uv run param-count configs/smoke.toml
+```
+
+You can override individual dimensions from a config:
+
+```bash
+uv run param-count configs/smoke.toml --hidden-size 768 --layers 12 --heads 12 --kv-heads 4
+```
+
+Or provide the model shape directly:
+
+```bash
+uv run param-count \
+  --vocab-size 50257 \
+  --hidden-size 768 \
+  --intermediate-size 2048 \
+  --layers 12 \
+  --heads 12 \
+  --kv-heads 4 \
+  --seq-len 2048
+```
+
+The report includes total parameters plus splits for token embeddings, LM head, attention, MLP, and norms.
+
 ## Resume
 
 ```bash
@@ -168,5 +197,5 @@ uv run pytest -q
 Compile check:
 
 ```bash
-uv run python -m py_compile config.py data.py model.py prepare_data.py pretrain.py logs.py checkpoint.py sample.py inspect_batch.py
+uv run python -m py_compile config.py data.py model.py prepare_data.py pretrain.py logs.py checkpoint.py sample.py inspect_batch.py param_count.py
 ```

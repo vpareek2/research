@@ -1,0 +1,47 @@
+[experiment]
+name = "baseline"
+out_dir = "runs"
+
+[model]
+vocab_size = 50257
+hidden_size = 768
+intermediate_size = 3072
+n_layers = 12
+n_heads = 12
+n_kv_heads = 12
+seq_len = 1024
+theta = 1000000.0
+eps = 0.000001
+tied = true
+
+[train]
+seed = 0
+batch_size = 2
+seq_len = 1024
+steps = 102
+lr = 0.001
+decay = 0.1
+log_every = 1
+eval_every = 20
+eval_steps = 10
+checkpoint_every = 100
+keep_last = 3
+
+[data]
+source = "text"
+path = "data/tiny_shakespeare/input.txt"
+tokenizer = "gpt2"
+val_fraction = 0.1
+
+[sampling]
+enabled = true
+prompt = "ROMEO:"
+max_new_tokens = 128
+temperature = 0.8
+top_k = 50
+
+[wandb]
+enabled = true
+project = "data-research"
+entity = ""
+tags = []
