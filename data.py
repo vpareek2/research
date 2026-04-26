@@ -5,6 +5,7 @@ Data loading utilities.
 from pathlib import Path
 from typing import Iterator
 import json
+import hashlib
 
 import grain
 import jax
@@ -96,6 +97,90 @@ def load_token_manifest(path: str | Path) -> dict:
         return json.load(f)
 
 
+def validate_token_manifest(
+    data_dir: str | Path,
+    manifest: dict,
+    data_config: DataConfig,
+    *,
+    verify_checksum: bool = False,
+) -> dict:
+    data_dir = Path(data_dir)
+    if manifest.get("dtype") != "uint32":
+        raise ValueError(f"Prepared token manifest dtype must be uint32, got {manifest.get('dtype')}")
+
+    manifest_tokenizer = manifest.get("tokenizer", {}).get("name")
+    if manifest_tokenizer != data_config.tokenizer:
+        raise ValueError(
+            f"Prepared token manifest tokenizer {manifest_tokenizer!r} does not "
+            f"match config tokenizer {data_config.tokenizer!r}"
+        )
+
+    token_file = manifest.get("files", {}).get("tokens", {})
+    token_path_value = token_file.get("path")
+    if not token_path_value:
+        raise ValueError("Prepared token manifest is missing files.tokens.path")
+    token_path = data_dir / token_path_value
+    if not token_path.exists():
+        raise FileNotFoundError(f"Prepared token file does not exist: {token_path}")
+
+    itemsize = np.dtype(np.uint32).itemsize
+    token_file_bytes = token_path.stat().st_size
+    if token_file_bytes % itemsize != 0:
+        raise ValueError(f"Prepared token file size is not divisible by uint32 size: {token_path}")
+    file_tokens = token_file_bytes // itemsize
+    manifest_tokens = manifest.get("num_tokens")
+    if manifest_tokens != file_tokens:
+        raise ValueError(f"Prepared token manifest num_tokens={manifest_tokens} does not match token file length={file_tokens}")
+
+    splits = manifest.get("splits", {})
+    train_split = _validate_manifest_split(splits, "train", file_tokens)
+    val_split = _validate_manifest_split(splits, "val", file_tokens)
+    if train_split["start"] < val_split["end"] and val_split["start"] < train_split["end"]:
+        raise ValueError(f"Prepared token train/val splits overlap: train={train_split}, val={val_split}")
+
+    expected_sha256 = token_file.get("sha256")
+    if verify_checksum and expected_sha256:
+        actual_sha256 = _sha256(token_path)
+        if actual_sha256 != expected_sha256:
+            raise ValueError(f"Prepared token checksum mismatch for {token_path}")
+
+    return manifest
+
+
+def load_validated_token_manifest(
+    data_config: DataConfig,
+    *,
+    verify_checksum: bool = False,
+) -> dict:
+    data_dir = Path(data_config.path)
+    manifest = load_token_manifest(data_dir)
+    return validate_token_manifest(data_dir, manifest, data_config, verify_checksum=verify_checksum)
+
+
+def _validate_manifest_split(splits: dict, name: str, num_tokens: int) -> dict:
+    if name not in splits:
+        raise ValueError(f"Prepared token manifest is missing splits.{name}")
+    split = splits[name]
+    start = split.get("start")
+    end = split.get("end")
+    tokens = split.get("tokens")
+    if not isinstance(start, int) or not isinstance(end, int) or not isinstance(tokens, int):
+        raise ValueError(f"Prepared token split {name} must contain integer start, end, and tokens")
+    if not 0 <= start <= end <= num_tokens:
+        raise ValueError(f"Prepared token split {name} has invalid bounds start={start}, end={end}, num_tokens={num_tokens}")
+    if tokens != end - start:
+        raise ValueError(f"Prepared token split {name} tokens={tokens} does not equal end-start={end - start}")
+    return split
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def split_tokens(tokens: np.ndarray, val_fraction: float) -> tuple[np.ndarray, np.ndarray]:
     split_idx = int(len(tokens) * (1.0 - val_fraction))
     return tokens[:split_idx], tokens[split_idx:]
@@ -109,7 +194,7 @@ def build_datasets(data_config: DataConfig, train_config: TrainConfig) -> tuple[
 
     if data_config.source == "tokens":
         data_dir = Path(data_config.path)
-        manifest = load_token_manifest(data_dir)
+        manifest = load_validated_token_manifest(data_config)
         token_path = data_dir / manifest["files"]["tokens"]["path"]
         train_split = manifest["splits"]["train"]
         val_split = manifest["splits"]["val"]

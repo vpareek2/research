@@ -144,6 +144,26 @@ class RunConfig:
     precision: PrecisionConfig = field(default_factory=PrecisionConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
+    def __post_init__(self):
+        positive_train_fields = {
+            "batch_size": self.train.batch_size,
+            "seq_len": self.train.seq_len,
+            "steps": self.train.steps,
+            "log_every": self.train.log_every,
+            "eval_every": self.train.eval_every,
+            "eval_steps": self.train.eval_steps,
+            "keep_last": self.train.keep_last,
+        }
+        for name, value in positive_train_fields.items():
+            if value <= 0:
+                raise ValueError(f"train.{name} must be positive, got {value}")
+
+        if self.model.seq_len != self.train.seq_len:
+            raise ValueError(
+                f"model.seq_len ({self.model.seq_len}) must equal "
+                f"train.seq_len ({self.train.seq_len})"
+            )
+
 
 def load_config(path: str | Path) -> RunConfig:
     with open(path, "rb") as f:

@@ -125,7 +125,18 @@ To prepare a Hugging Face dataset once, then train fully offline:
 uv run prepare-data configs/data/tinystories.toml
 ```
 
-The prep step tokenizes the dataset once, inserts EOT between documents by default, writes one `uint32` `tokens.bin`, and records train/val split offsets plus source/tokenizer metadata in `manifest.json`. For HF datasets, `prepare-data` uses `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` if set, then falls back to saved Hugging Face Hub credentials from `hf auth login`, and only prompts if no token is available. Blank prompt input uses anonymous downloads. Tokens are never written to the manifest.
+The prep step tokenizes the dataset once, streams input texts into one `uint32`
+`tokens.bin`, inserts EOT between documents by default, and records train/val
+split offsets plus source/tokenizer metadata in `manifest.json`. For HF datasets,
+`prepare-data` uses `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` if set, then falls
+back to saved Hugging Face Hub credentials from `hf auth login`, and only prompts
+if no token is available. Blank prompt input uses anonymous downloads. Tokens are
+never written to the manifest.
+
+Prepared token manifests are validated on load: dtype, tokenizer name, token file
+length, train/val split bounds, and split overlap must match the config and token
+file. Checksum validation is available in code but not run by default, so large
+training starts do not hash multi-GB token files.
 
 ## Run Training
 

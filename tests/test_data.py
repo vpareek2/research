@@ -33,6 +33,19 @@ def data_config(tmp_path, text=None, val_fraction=0.25):
     return DataConfig(path=str(path), tokenizer="gpt2", val_fraction=val_fraction)
 
 
+def write_manifest(data_dir, *, num_tokens=128, train=(0, 64), val=(64, 128), tokenizer="gpt2", dtype="uint32"):
+    (data_dir / "manifest.json").write_text(json.dumps({
+        "dtype": dtype,
+        "num_tokens": num_tokens,
+        "tokenizer": {"name": tokenizer},
+        "files": {"tokens": {"path": "tokens.bin"}},
+        "splits": {
+            "train": {"start": train[0], "end": train[1], "tokens": train[1] - train[0]},
+            "val": {"start": val[0], "end": val[1], "tokens": val[1] - val[0]},
+        },
+    }))
+
+
 def test_token_dataset_chunks_with_provenance():
     dataset = TokenDataset(np.arange(20, dtype=np.int32), seq_len=6)
 
@@ -104,13 +117,7 @@ def test_prepared_token_dataloaders_shapes_and_val_determinism(tmp_path):
     data_dir = tmp_path / "prepared"
     data_dir.mkdir()
     np.arange(128, dtype=np.uint32).tofile(data_dir / "tokens.bin")
-    (data_dir / "manifest.json").write_text(json.dumps({
-        "files": {"tokens": {"path": "tokens.bin"}},
-        "splits": {
-            "train": {"start": 0, "end": 64, "tokens": 64},
-            "val": {"start": 64, "end": 128, "tokens": 64},
-        },
-    }))
+    write_manifest(data_dir)
     dc = DataConfig(source="tokens", path=str(data_dir), tokenizer="gpt2")
     tc = train_config(eval_steps=2)
 
@@ -126,3 +133,36 @@ def test_prepared_token_dataloaders_shapes_and_val_determinism(tmp_path):
     assert val_batch["input_ids"].dtype == np.int32
     np.testing.assert_array_equal(np.asarray(val_a["input_ids"]), np.asarray(val_b["input_ids"]))
     np.testing.assert_array_equal(np.asarray(val_a["chunk_idx"]), np.asarray(val_b["chunk_idx"]))
+
+
+@pytest.mark.parametrize(
+    "manifest_kwargs,match",
+    [
+        ({"dtype": "uint16"}, "dtype"),
+        ({"tokenizer": "cl100k_base"}, "tokenizer"),
+        ({"num_tokens": 127}, "num_tokens"),
+        ({"train": (0, 80), "val": (64, 128)}, "overlap"),
+        ({"train": (0, 129)}, "invalid bounds"),
+    ],
+)
+def test_prepared_token_manifest_validation_raises(tmp_path, manifest_kwargs, match):
+    data_dir = tmp_path / "prepared"
+    data_dir.mkdir()
+    np.arange(128, dtype=np.uint32).tofile(data_dir / "tokens.bin")
+    write_manifest(data_dir, **manifest_kwargs)
+    dc = DataConfig(source="tokens", path=str(data_dir), tokenizer="gpt2")
+    tc = train_config(eval_steps=2)
+
+    with pytest.raises((ValueError, FileNotFoundError), match=match):
+        make_dataloaders(dc, tc)
+
+
+def test_prepared_token_manifest_missing_token_file_raises(tmp_path):
+    data_dir = tmp_path / "prepared"
+    data_dir.mkdir()
+    write_manifest(data_dir, num_tokens=0, train=(0, 0), val=(0, 0))
+    dc = DataConfig(source="tokens", path=str(data_dir), tokenizer="gpt2")
+    tc = train_config(eval_steps=2)
+
+    with pytest.raises(FileNotFoundError, match="token file"):
+        make_dataloaders(dc, tc)

@@ -13,7 +13,7 @@ import os
 import json
 from pathlib import Path
 import tomllib
-from typing import Iterable, Sequence
+from typing import Iterable
 
 import numpy as np
 import tiktoken
@@ -94,7 +94,7 @@ def load_texts(config: SourceConfig) -> Iterable[str]:
     if config.type == "text":
         if config.path is None:
             raise ValueError("Text source requires path")
-        return Path(config.path).read_text(encoding="utf-8").splitlines()
+        return _iter_text_lines(Path(config.path))
 
     raise ValueError(f"Unknown source type: {config.type}")
 
@@ -165,9 +165,6 @@ def prepare_dataset(config: PrepareConfig):
 
 
 def prepare_texts(texts: Iterable[str], config: PrepareConfig, *, hf_auth: str = "not_applicable") -> dict:
-    if not isinstance(texts, Sequence):
-        texts = list(texts)
-
     tokenizer = tiktoken.get_encoding(config.tokenizer.name)
     output_dir = Path(config.output.path)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -219,6 +216,12 @@ def prepare_texts(texts: Iterable[str], config: PrepareConfig, *, hf_auth: str =
         f.write("\n")
 
     return manifest
+
+
+def _iter_text_lines(path: Path) -> Iterable[str]:
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            yield line.rstrip("\n")
 
 
 def _tokenize(text: str, tokenizer: tiktoken.Encoding, append_eot: bool) -> list[int]:

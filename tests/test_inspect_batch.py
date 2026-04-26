@@ -25,7 +25,7 @@ def _write_run_config(run_dir, data_path):
         train=TrainConfig(
             seed=0,
             batch_size=1,
-            seq_len=4,
+            seq_len=8,
             steps=1,
             lr=0.001,
             decay=0.1,
@@ -139,6 +139,9 @@ def test_inspect_batch_reads_prepared_token_data(tmp_path):
     tokens = np.asarray(tokenizer.encode("prepared hello world"), dtype=np.uint32)
     tokens.tofile(data_dir / "tokens.bin")
     (data_dir / "manifest.json").write_text(json.dumps({
+        "dtype": "uint32",
+        "num_tokens": len(tokens),
+        "tokenizer": {"name": "gpt2"},
         "files": {"tokens": {"path": "tokens.bin"}},
         "splits": {
             "train": {"start": 0, "end": len(tokens), "tokens": len(tokens)},
@@ -169,7 +172,7 @@ tied = false
 [train]
 seed = 0
 batch_size = 1
-seq_len = 4
+seq_len = 8
 steps = 1
 lr = 0.001
 decay = 0.1

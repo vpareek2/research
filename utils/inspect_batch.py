@@ -10,7 +10,7 @@ import numpy as np
 import tiktoken
 
 from config import load_config
-from data import load_token_manifest
+from data import load_validated_token_manifest
 
 
 def _load_batch_record(run_dir: Path, step: int) -> dict:
@@ -34,7 +34,7 @@ def _format_batch_text(run_dir: Path, step: int) -> str:
     tokenizer = tiktoken.get_encoding(config.data.tokenizer)
     if config.data.source == "tokens":
         data_dir = Path(config.data.path)
-        manifest = load_token_manifest(data_dir)
+        manifest = load_validated_token_manifest(config.data)
         tokens = np.memmap(data_dir / manifest["files"]["tokens"]["path"], dtype=np.uint32, mode="r")
     else:
         text = Path(config.data.path).read_text(encoding="utf-8")

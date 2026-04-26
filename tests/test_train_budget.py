@@ -1,5 +1,6 @@
 import json
 
+import numpy as np
 import pytest
 
 from config import load_config
@@ -79,10 +80,13 @@ def test_build_budget_for_text_config_with_target_tokens(tmp_path):
 def test_build_budget_infers_prepared_token_epoch(tmp_path):
     data_dir = tmp_path / "prepared"
     data_dir.mkdir()
-    (data_dir / "tokens.bin").write_bytes(b"")
+    np.arange(120, dtype=np.uint32).tofile(data_dir / "tokens.bin")
     (data_dir / "manifest.json").write_text(
         json.dumps(
             {
+                "dtype": "uint32",
+                "num_tokens": 120,
+                "tokenizer": {"name": "gpt2"},
                 "files": {"tokens": {"path": "tokens.bin"}},
                 "splits": {
                     "train": {"start": 0, "end": 100, "tokens": 100},

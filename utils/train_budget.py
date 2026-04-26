@@ -7,10 +7,9 @@ from __future__ import annotations
 import argparse
 import math
 from dataclasses import dataclass
-from pathlib import Path
 
 from config import RunConfig, load_config
-from data import load_token_manifest
+from data import load_validated_token_manifest
 
 
 @dataclass(frozen=True)
@@ -61,7 +60,7 @@ def infer_train_tokens(config: RunConfig) -> int | None:
     if config.data.source != "tokens":
         return None
 
-    manifest = load_token_manifest(Path(config.data.path))
+    manifest = load_validated_token_manifest(config.data)
     train_split = manifest["splits"]["train"]
     return int(train_split.get("tokens", train_split["end"] - train_split["start"]))
 

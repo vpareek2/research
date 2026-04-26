@@ -143,6 +143,57 @@ loss_dtype = "fp32"
     assert config.precision.loss_dtype == "fp32"
 
 
+def test_mismatched_model_and_train_seq_len_raises(tmp_path):
+    config_path = tmp_path / "config.toml"
+    write_config(config_path)
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace("seq_len = 8\nsteps = 2", "seq_len = 4\nsteps = 2")
+    config_path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="model.seq_len"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("batch_size", 0),
+        ("seq_len", 0),
+        ("steps", 0),
+        ("log_every", 0),
+        ("eval_every", 0),
+        ("eval_steps", 0),
+        ("keep_last", 0),
+    ],
+)
+def test_invalid_positive_train_fields_raise(tmp_path, field, value):
+    config_path = tmp_path / "config.toml"
+    write_config(config_path)
+    originals = {
+        "batch_size": "batch_size = 2",
+        "seq_len": "seq_len = 8\nsteps = 2",
+        "steps": "steps = 2",
+        "log_every": "log_every = 1",
+        "eval_every": "eval_every = 1",
+        "eval_steps": "eval_steps = 1",
+        "keep_last": "keep_last = 2",
+    }
+    replacements = {
+        "batch_size": f"batch_size = {value}",
+        "seq_len": f"seq_len = {value}\nsteps = 2",
+        "steps": f"steps = {value}",
+        "log_every": f"log_every = {value}",
+        "eval_every": f"eval_every = {value}",
+        "eval_steps": f"eval_steps = {value}",
+        "keep_last": f"keep_last = {value}",
+    }
+    text = config_path.read_text(encoding="utf-8").replace(originals[field], replacements[field])
+    config_path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=f"train.{field}"):
+        load_config(config_path)
+
+
 @pytest.mark.parametrize("val_fraction", [0.0, 1.0, -0.1, 1.1])
 def test_invalid_val_fraction_raises(val_fraction):
     with pytest.raises(ValueError):

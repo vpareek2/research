@@ -8,7 +8,7 @@ Main things that look missing for a serious ~100M / 2B-token pretraining repo:
 2. **LR schedule / warmup** Done
    Training uses a constant `train.lr` through Muon in [pretrain.py](/home/veer/Master/projects/research/pretrain.py:130), and logs it statically at [pretrain.py](/home/veer/Master/projects/research/pretrain.py:168). For 2B tokens, I’d expect warmup + cosine/linear decay + min LR.
 
-3. **Precision controls**
+3. **Precision controls**Done
    There’s no config for `bf16`/`fp32`, parameter dtype, activation dtype, or matmul precision. The model path in [model.py](/home/veer/Master/projects/research/model.py:93) appears to default to normal JAX/Flax behavior. That is fine for smoke, but expensive and ambiguous for actual runs.
 
 4. **Multi-device / sharding story**

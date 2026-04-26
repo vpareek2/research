@@ -11,6 +11,7 @@ from prepare_data import (
     PrepareConfig,
     SourceConfig,
     TokenizerConfig,
+    load_texts,
     load_prepare_config,
     prepare_texts,
     resolve_hf_token,
@@ -52,6 +53,36 @@ def test_prepare_texts_writes_bins_manifest_and_eot(tmp_path):
     manifest_text = json.dumps(disk_manifest)
     assert "prompt-token" not in manifest_text
     assert "env-token" not in manifest_text
+
+
+def test_prepare_texts_streams_generator(tmp_path):
+    output_dir = tmp_path / "prepared"
+    config = PrepareConfig(
+        source=SourceConfig(type="text", path="input.txt"),
+        tokenizer=TokenizerConfig(name="gpt2", append_eot=True),
+        output=OutputConfig(path=str(output_dir), dtype="uint32", val_fraction=0.25),
+    )
+    consumed = []
+
+    def texts():
+        for text in ["hello", "world", "again"]:
+            consumed.append(text)
+            yield text
+
+    manifest = prepare_texts(texts(), config)
+
+    assert consumed == ["hello", "world", "again"]
+    assert manifest["num_tokens"] > 0
+    assert (output_dir / "tokens.bin").exists()
+
+
+def test_load_texts_streams_local_file(tmp_path):
+    path = tmp_path / "input.txt"
+    path.write_text("hello\nworld\n", encoding="utf-8")
+    texts = load_texts(SourceConfig(type="text", path=str(path)))
+
+    assert iter(texts) is texts
+    assert list(texts) == ["hello", "world"]
 
 
 def test_load_prepare_config_parses_hf_section(tmp_path):
