@@ -124,6 +124,9 @@ breakdowns such as `time/data_sec`, `time/shard_sec`,
 `time/train_step_sec`, `time/eval_sec`, `time/checkpoint_sec`, and
 `time/train_tokens_per_sec` to `metrics.jsonl` and W&B. The console keeps the
 compact metrics table.
+JAX dispatch is asynchronous, so `time/train_step_sec` mostly measures enqueue
+time; `time/metrics_sync_sec` is the explicit host synchronization point for
+logged scalars and may include queued device work.
 
 For a short JAX trace, enable profiling and set `profiler = "jax"`. Trace
 files are written under `runs/<name>/profiles/jax_trace/`. For Nsight Systems,

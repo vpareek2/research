@@ -75,6 +75,11 @@ def evaluate(model: Model, val_iter, eval_steps: int, distributed: DistributedCo
     return jnp.mean(jnp.asarray(losses))
 
 
+def sync_metric_scalars(device_metrics: dict[str, jax.Array]) -> dict[str, float]:
+    host_metrics = jax.device_get(device_metrics)
+    return {key: float(value) for key, value in host_metrics.items()}
+
+
 def print_startup(config: RunConfig, *, resume: bool, distributed: DistributedContext | None = None):
     line = "=" * 72
     mode = "resume" if resume else "new run"
@@ -192,25 +197,29 @@ def main():
 
                 should_log = step % train_config.log_every == 0
                 if should_log:
-                    with trace_profiler.annotate("metrics_sync"), timer.phase("metrics_sync"):
-                        metrics = {
-                            "step": step,
-                            "train/loss": float(loss_value),
-                            "train/ppl": float(jnp.exp(loss_value)),
-                            "train/grad_norm": float(train_metrics["train/grad_norm"]),
-                            "train/param_norm": float(train_metrics["train/param_norm"]),
-                            "train/tokens_seen": (step + 1) * train_config.batch_size * train_config.seq_len,
-                            "optim/lr": float(lr_schedule(step)),
-                        }
+                    device_metrics = {
+                        "train/loss": loss_value,
+                        "train/ppl": jnp.exp(loss_value),
+                        "train/grad_norm": train_metrics["train/grad_norm"],
+                        "train/param_norm": train_metrics["train/param_norm"],
+                        "optim/lr": lr_schedule(step),
+                    }
 
                     if step % train_config.eval_every == 0:
                         with trace_profiler.annotate("eval"), timer.phase("eval"):
                             val_iter = make_val_dataloader(config.data, train_config)
                             val_loss = evaluate(model, val_iter, train_config.eval_steps, distributed)
-                        with trace_profiler.annotate("metrics_sync"), timer.phase("metrics_sync"):
-                            metrics["val/loss"] = float(val_loss)
-                            metrics["val/ppl"] = float(jnp.exp(val_loss))
+                        device_metrics["val/loss"] = val_loss
+                        device_metrics["val/ppl"] = jnp.exp(val_loss)
 
+                    with trace_profiler.annotate("metrics_sync"), timer.phase("metrics_sync"):
+                        metrics = {
+                            "step": step,
+                            **sync_metric_scalars(device_metrics),
+                            "train/tokens_seen": (step + 1) * train_config.batch_size * train_config.seq_len,
+                        }
+
+                    if step % train_config.eval_every == 0:
                         if config.sampling.enabled:
                             with trace_profiler.annotate("sample"), timer.phase("sample"):
                                 tokenizer = tiktoken.get_encoding(config.data.tokenizer)

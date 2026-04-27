@@ -1,13 +1,14 @@
 import jax
 import jax.numpy as jnp
 import optax
+import pytest
 from flax import nnx
 
 from config import DataConfig, DistributedConfig, ExperimentConfig, ModelConfig, PrecisionConfig, ProfilingConfig, RunConfig, SamplingConfig, TrainConfig, WandbConfig
 from distributed import create_distributed_context
 from lr_schedule import build_lr_schedule
 from model import Model
-from pretrain import add_timing_metrics, format_metrics_row, loss, make_muon_dimension_numbers, metric_header, print_startup, train_step, tree_l2_norm
+from pretrain import add_timing_metrics, format_metrics_row, loss, make_muon_dimension_numbers, metric_header, print_startup, sync_metric_scalars, train_step, tree_l2_norm
 from profiling import StepTimer
 
 
@@ -89,6 +90,29 @@ def test_train_step_returns_classic_train_metrics():
     assert metrics["train/param_norm"].shape == ()
     assert bool(jnp.isfinite(metrics["train/grad_norm"]))
     assert bool(jnp.isfinite(metrics["train/param_norm"]))
+
+
+def test_sync_metric_scalars_returns_python_floats():
+    metrics = sync_metric_scalars(
+        {
+            "train/loss": jnp.asarray(1.25, dtype=jnp.float32),
+            "train/ppl": jnp.asarray(3.5, dtype=jnp.float32),
+            "train/grad_norm": jnp.asarray(0.75, dtype=jnp.float32),
+            "train/param_norm": jnp.asarray(12.0, dtype=jnp.float32),
+            "optim/lr": jnp.asarray(1e-3, dtype=jnp.float32),
+        }
+    )
+
+    assert set(metrics) == {
+        "train/loss",
+        "train/ppl",
+        "train/grad_norm",
+        "train/param_norm",
+        "optim/lr",
+    }
+    assert metrics["train/loss"] == pytest.approx(1.25)
+    assert metrics["optim/lr"] == pytest.approx(1e-3)
+    assert all(isinstance(value, float) for value in metrics.values())
 
 
 def test_muon_optimizer_accepts_lr_schedule():
