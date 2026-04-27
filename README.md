@@ -271,6 +271,20 @@ runs/<name>/profiles/timing_summary.md
 
 Use `--warmup-steps` to choose a different cutoff.
 
+Use `profile analyze` to write a compact LLM-readable report from timing metrics
+and an optional NSys report:
+
+```bash
+uv run profile analyze runs/tinystories_nsys_53m
+```
+
+The command writes:
+
+```text
+runs/<name>/profiles/profile_report.json
+runs/<name>/profiles/profile_report.md
+```
+
 To capture a short JAX trace, use a short timing-style config with:
 
 ```toml
@@ -303,6 +317,8 @@ uv run profile nsys configs/tinystories_timing.toml --force-run-dir
 The helper writes the temporary NSys report outside `runs/`, lets `pretrain`
 create the run directory normally, and copies the final report to
 `runs/<name>/profiles/nsys.nsys-rep`.
+Add `--analyze` to generate `profile_report.json` and `profile_report.md`
+after a successful NSys capture.
 
 ## Resume
 
