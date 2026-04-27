@@ -50,6 +50,7 @@ Main sections:
 - `[model]`: model size, heads, context length, RoPE theta
 - `[precision]`: compute, parameter, and loss dtypes
 - `[distributed]`: replicated data-parallel device mesh settings
+- `[profiling]`: lightweight timing and future profiler capture settings
 - `[train]`: batch size, steps, peak learning rate, eval/checkpoint cadence
 - `[train.lr_schedule]`: optional LR schedule; defaults to linear warmup + cosine decay
 - `[data]`: either raw text data or prepared token data
@@ -106,6 +107,24 @@ sharded over the `axis_name` mesh axis. `train.batch_size` is always the global
 batch size, so it must divide evenly by the selected device count. Use
 `device_count = "auto"` to use all visible JAX devices, or set a positive
 integer to use a prefix of local devices.
+
+Profiling config:
+
+```toml
+[profiling]
+enabled = false
+profiler = "none"
+start_step = 100
+steps = 5
+output_dir = "profiles"
+```
+
+Phase 1 profiling is always-on lightweight timing. Training logs detailed
+breakdowns such as `time/data_sec`, `time/shard_sec`,
+`time/train_step_sec`, `time/eval_sec`, `time/checkpoint_sec`, and
+`time/train_tokens_per_sec` to `metrics.jsonl` and W&B. The console keeps the
+compact metrics table. JAX/NSys trace capture modes are reserved for a later
+pass, so `profiler` must currently be `"none"`.
 
 ## Data
 
@@ -225,6 +244,24 @@ uv run train-budget configs/tinystories_smoke.toml
 
 Raw text configs do not infer dataset token counts; pass `--tokens` when you only need target-step math.
 
+## Profile A Run
+
+Use `profile` to summarize timing metrics from a completed run:
+
+```bash
+uv run profile runs/tinystories_timing_53m
+```
+
+The command reads `metrics.jsonl`, skips the first 20 steps by default, prints
+mean/p50/p95/max timing tables, and writes:
+
+```text
+runs/<name>/profiles/timing_summary.json
+runs/<name>/profiles/timing_summary.md
+```
+
+Use `--warmup-steps` to choose a different cutoff.
+
 ## Resume
 
 ```bash
@@ -284,5 +321,5 @@ XLA_FLAGS=--xla_force_host_platform_device_count=4 JAX_PLATFORMS=cpu uv run pyte
 Compile check:
 
 ```bash
-uv run python -m py_compile config.py data.py distributed.py model.py prepare_data.py pretrain.py logs.py checkpoint.py sample.py lr_schedule.py utils/inspect_batch.py utils/param_count.py utils/train_budget.py
+uv run python -m py_compile config.py data.py distributed.py model.py prepare_data.py pretrain.py logs.py profiling.py checkpoint.py sample.py lr_schedule.py utils/inspect_batch.py utils/param_count.py utils/train_budget.py
 ```

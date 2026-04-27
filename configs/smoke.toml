@@ -24,6 +24,13 @@ enabled = true
 device_count = "auto"
 axis_name = "data"
 
+[profiling]
+enabled = false
+profiler = "none"
+start_step = 100
+steps = 5
+output_dir = "profiles"
+
 [train]
 seed = 0
 batch_size = 2

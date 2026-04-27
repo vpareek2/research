@@ -1,18 +1,18 @@
 [experiment]
-name = "baseline"
+name = "tinystories_soak_53m"
 out_dir = "runs"
 
 [model]
 vocab_size = 50257
-hidden_size = 768
-intermediate_size = 3072
-n_layers = 12
-n_heads = 12
-n_kv_heads = 12
-seq_len = 1024
+hidden_size = 384
+intermediate_size = 1536
+n_layers = 6
+n_heads = 6
+n_kv_heads = 6
+seq_len = 256
 theta = 1000000.0
 eps = 0.000001
-tied = true
+tied = false
 
 [precision]
 compute_dtype = "bf16"
@@ -33,15 +33,15 @@ output_dir = "profiles"
 
 [train]
 seed = 0
-batch_size = 2
-seq_len = 1024
-steps = 102
-lr = 0.001
+batch_size = 32
+seq_len = 256
+steps = 57802
+lr = 0.0006
 decay = 0.1
-log_every = 1
-eval_every = 20
-eval_steps = 10
-checkpoint_every = 100
+log_every = 10
+eval_every = 1000
+eval_steps = 25
+checkpoint_every = 5000
 keep_last = 3
 
 [train.lr_schedule]
@@ -51,15 +51,14 @@ stable_ratio = 0.80
 min_lr_ratio = 0.1
 
 [data]
-source = "text"
-path = "data/tiny_shakespeare/input.txt"
+source = "tokens"
+path = "data/tinystories_gpt2"
 tokenizer = "gpt2"
-val_fraction = 0.1
 
 [sampling]
 enabled = true
-prompt = "ROMEO:"
-max_new_tokens = 128
+prompt = "Once upon a time"
+max_new_tokens = 64
 temperature = 0.8
 top_k = 50
 
@@ -67,4 +66,4 @@ top_k = 50
 enabled = true
 project = "data-research"
 entity = ""
-tags = []
+tags = ["tinystories", "soak", "53m"]

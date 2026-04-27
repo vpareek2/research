@@ -3,11 +3,12 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 
-from config import DataConfig, DistributedConfig, ExperimentConfig, ModelConfig, PrecisionConfig, RunConfig, SamplingConfig, TrainConfig, WandbConfig
+from config import DataConfig, DistributedConfig, ExperimentConfig, ModelConfig, PrecisionConfig, ProfilingConfig, RunConfig, SamplingConfig, TrainConfig, WandbConfig
 from distributed import create_distributed_context
 from lr_schedule import build_lr_schedule
 from model import Model
-from pretrain import format_metrics_row, loss, make_muon_dimension_numbers, metric_header, print_startup, train_step, tree_l2_norm
+from pretrain import add_timing_metrics, format_metrics_row, loss, make_muon_dimension_numbers, metric_header, print_startup, train_step, tree_l2_norm
+from profiling import StepTimer
 
 
 def tiny_model_config():
@@ -142,6 +143,7 @@ def test_print_startup_outputs_run_summary(capsys):
         data=DataConfig(path="input.txt", tokenizer="gpt2", val_fraction=0.25),
         sampling=SamplingConfig(enabled=True),
         distributed=DistributedConfig(enabled=False),
+        profiling=ProfilingConfig(),
         precision=PrecisionConfig(compute_dtype="bf16", param_dtype="fp32", loss_dtype="fp32"),
         wandb=WandbConfig(enabled=True, project="unit"),
     )
@@ -156,6 +158,7 @@ def test_print_startup_outputs_run_summary(capsys):
     assert "distributed: devices=1 global_batch=2 per_device_batch=2 axis=data" in output
     assert "schedule:   cosine" in output
     assert "precision:  compute=bf16 params=fp32 loss=fp32" in output
+    assert "profiling:  enabled=False profiler=none" in output
     assert "wandb:      on" in output
     assert "Starting training" not in output
     assert "step |" not in output
@@ -185,3 +188,32 @@ def test_metric_row_without_val_loss():
     }
 
     assert format_metrics_row(metrics) == "    21 |     8.9149 |    7430.12 |      9.16 |    20006 |           "
+
+
+def test_add_timing_metrics_reports_loop_and_train_throughput():
+    train_cfg = TrainConfig(
+        seed=0,
+        batch_size=4,
+        seq_len=8,
+        steps=2,
+        lr=1e-3,
+        decay=0.1,
+        log_every=1,
+        eval_every=1,
+        eval_steps=1,
+        checkpoint_every=2,
+        keep_last=2,
+    )
+    timer = StepTimer()
+    timer.add("step", 0.2)
+    timer.add("train_step", 0.1)
+    timer.add("data", 0.03)
+    metrics = {"step": 0}
+
+    add_timing_metrics(metrics, timer, train_cfg)
+
+    assert metrics["time/data_sec"] == 0.03
+    assert metrics["time/train_step_sec"] == 0.1
+    assert metrics["time/step_sec"] == 0.2
+    assert metrics["time/tokens_per_sec"] == 160.0
+    assert metrics["time/train_tokens_per_sec"] == 320.0

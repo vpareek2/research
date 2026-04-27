@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from pathlib import Path
 import platform
 import shutil
+import time
 from typing import Any
 
 import flax
@@ -39,6 +40,11 @@ class RunLogger:
             self._sample_table = self._wandb.Table(columns=["step", "path", "text"], log_mode="MUTABLE")
 
     def log(self, metrics: dict):
+        log_start = time.perf_counter()
+        metrics = dict(metrics)
+        metrics["time/log_sec"] = 0.0
+        metrics["time/log_sec"] = time.perf_counter() - log_start
+
         with self.metrics_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(metrics, sort_keys=True) + "\n")
 

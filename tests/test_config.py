@@ -3,7 +3,7 @@ from pathlib import Path
 import jax.numpy as jnp
 import pytest
 
-from config import DataConfig, DistributedConfig, LRScheduleConfig, PrecisionConfig, dtype_from_name, load_config
+from config import DataConfig, DistributedConfig, LRScheduleConfig, PrecisionConfig, ProfilingConfig, dtype_from_name, load_config
 
 
 def write_config(
@@ -13,6 +13,7 @@ def write_config(
     lr_schedule_section: str = "",
     precision_section: str = "",
     distributed_section: str = "",
+    profiling_section: str = "",
 ):
     wandb_section = """
 [wandb]
@@ -40,6 +41,7 @@ eps = 0.000001
 tied = false
 {precision_section}
 {distributed_section}
+{profiling_section}
 
 [train]
 seed = 0
@@ -92,6 +94,11 @@ def test_load_config(tmp_path):
     assert config.distributed.enabled is True
     assert config.distributed.device_count == "auto"
     assert config.distributed.axis_name == "data"
+    assert config.profiling.enabled is False
+    assert config.profiling.profiler == "none"
+    assert config.profiling.start_step == 100
+    assert config.profiling.steps == 5
+    assert config.profiling.output_dir == "profiles"
     assert config.data.val_fraction == 0.25
     assert config.sampling.enabled is True
     assert config.sampling.prompt == "ROMEO:"
@@ -189,6 +196,29 @@ axis_name = "data"
 
     assert config.distributed.enabled is False
     assert config.distributed.device_count == 8
+
+
+def test_explicit_profiling_config(tmp_path):
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        profiling_section="""
+[profiling]
+enabled = false
+profiler = "none"
+start_step = 200
+steps = 7
+output_dir = "profiles/unit"
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.profiling.enabled is False
+    assert config.profiling.profiler == "none"
+    assert config.profiling.start_step == 200
+    assert config.profiling.steps == 7
+    assert config.profiling.output_dir == "profiles/unit"
 
 
 def test_mismatched_model_and_train_seq_len_raises(tmp_path):
@@ -291,6 +321,24 @@ def test_invalid_precision_config_raises(kwargs):
 def test_invalid_distributed_config_raises(kwargs):
     with pytest.raises(ValueError):
         DistributedConfig(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"enabled": "yes"},
+        {"profiler": "jax"},
+        {"profiler": "nsys"},
+        {"start_step": -1},
+        {"start_step": 0.5},
+        {"steps": 0},
+        {"steps": -1},
+        {"output_dir": ""},
+    ],
+)
+def test_invalid_profiling_config_raises(kwargs):
+    with pytest.raises(ValueError):
+        ProfilingConfig(**kwargs)
 
 
 def test_dtype_from_name():

@@ -3,7 +3,6 @@ Pretrain a language model.
 """
 
 import argparse
-import time
 
 import jax
 import jax.numpy as jnp
@@ -18,6 +17,7 @@ from distributed import DistributedContext, create_distributed_context, place_re
 from lr_schedule import build_lr_schedule, describe_lr_schedule
 from model import Model
 from logs import setup_run
+from profiling import StepTimer
 from sample import generate, write_sample
 
 
@@ -99,6 +99,7 @@ def print_startup(config: RunConfig, *, resume: bool, distributed: DistributedCo
     print(f"optimizer:  muon peak_lr={config.train.lr} weight_decay={config.train.decay}")
     print(f"schedule:   {describe_lr_schedule(config.train)}")
     print(f"precision:  compute={config.precision.compute_dtype} params={config.precision.param_dtype} loss={config.precision.loss_dtype}")
+    print(f"profiling:  enabled={config.profiling.enabled} profiler={config.profiling.profiler}")
     print(f"eval:       every={config.train.eval_every} steps={config.train.eval_steps}")
     print(f"data:       {config.data.path} tokenizer={config.data.tokenizer} val_fraction={config.data.val_fraction}")
     print(f"samples:    {'on' if config.sampling.enabled else 'off'}")
@@ -121,6 +122,17 @@ def format_metrics_row(metrics: dict) -> str:
         f"{metrics['time/tokens_per_sec']:>8.0f} | "
         f"{val_text}"
     )
+
+
+def add_timing_metrics(metrics: dict, timer: StepTimer, train_config) -> dict:
+    tokens_per_step = train_config.batch_size * train_config.seq_len
+    step_sec = timer.get("step")
+    train_step_sec = timer.get("train_step")
+    metrics.update(timer.metrics())
+    metrics["time/step_sec"] = step_sec
+    metrics["time/tokens_per_sec"] = tokens_per_step / step_sec if step_sec > 0.0 else 0.0
+    metrics["time/train_tokens_per_sec"] = tokens_per_step / train_step_sec if train_step_sec > 0.0 else 0.0
+    return metrics
 
 
 def main():
@@ -164,69 +176,76 @@ def main():
 
     try:
         for step in range(start_step, train_config.steps):
-            batch = next(train_iter)
-            logger.log_batch(step, batch)
-            sharded_batch = shard_batch(batch, distributed)
+            timer = StepTimer()
+            metrics = None
+            with timer.phase("step"):
+                with timer.phase("data"):
+                    batch = next(train_iter)
+                with timer.phase("batch_log"):
+                    logger.log_batch(step, batch)
+                with timer.phase("shard"):
+                    sharded_batch = shard_batch(batch, distributed)
+                with timer.phase("train_step"):
+                    loss_value, train_metrics = train_step(model, optimizer, sharded_batch["input_ids"])
 
-            start_time = time.perf_counter()
-            loss_value, train_metrics = train_step(model, optimizer, sharded_batch["input_ids"])
-            step_sec = time.perf_counter() - start_time
+                should_log = step % train_config.log_every == 0
+                if should_log:
+                    with timer.phase("metrics_sync"):
+                        metrics = {
+                            "step": step,
+                            "train/loss": float(loss_value),
+                            "train/ppl": float(jnp.exp(loss_value)),
+                            "train/grad_norm": float(train_metrics["train/grad_norm"]),
+                            "train/param_norm": float(train_metrics["train/param_norm"]),
+                            "train/tokens_seen": (step + 1) * train_config.batch_size * train_config.seq_len,
+                            "optim/lr": float(lr_schedule(step)),
+                        }
 
-            if step % train_config.log_every == 0:
-                loss_float = float(loss_value)
-                tokens_per_sec = train_config.batch_size * train_config.seq_len / step_sec
-                metrics = {
-                    "step": step,
-                    "train/loss": loss_float,
-                    "train/ppl": float(jnp.exp(loss_value)),
-                    "train/grad_norm": float(train_metrics["train/grad_norm"]),
-                    "train/param_norm": float(train_metrics["train/param_norm"]),
-                    "train/tokens_seen": (step + 1) * train_config.batch_size * train_config.seq_len,
-                    "optim/lr": float(lr_schedule(step)),
-                    "time/step_sec": step_sec,
-                    "time/tokens_per_sec": tokens_per_sec,
-                }
+                    if step % train_config.eval_every == 0:
+                        with timer.phase("eval"):
+                            val_iter = make_val_dataloader(config.data, train_config)
+                            val_loss = evaluate(model, val_iter, train_config.eval_steps, distributed)
+                        with timer.phase("metrics_sync"):
+                            metrics["val/loss"] = float(val_loss)
+                            metrics["val/ppl"] = float(jnp.exp(val_loss))
 
-                if step % train_config.eval_every == 0:
-                    val_iter = make_val_dataloader(config.data, train_config)
-                    val_loss = evaluate(model, val_iter, train_config.eval_steps, distributed)
-                    val_loss_float = float(val_loss)
-                    metrics["val/loss"] = val_loss_float
-                    metrics["val/ppl"] = float(jnp.exp(val_loss))
+                        if config.sampling.enabled:
+                            with timer.phase("sample"):
+                                tokenizer = tiktoken.get_encoding(config.data.tokenizer)
+                                sample_key = jax.random.fold_in(jax.random.key(train_config.seed), step)
+                                sample_text = generate(
+                                    model,
+                                    model_config,
+                                    config.sampling,
+                                    tokenizer,
+                                    sample_key,
+                                )
+                                sample_path = write_sample(
+                                    logger.run_dir,
+                                    step,
+                                    config.sampling.prompt,
+                                    sample_text,
+                                )
+                                metrics["sample/path"] = str(sample_path)
 
-                    if config.sampling.enabled:
-                        tokenizer = tiktoken.get_encoding(config.data.tokenizer)
-                        sample_key = jax.random.fold_in(jax.random.key(train_config.seed), step)
-                        sample_text = generate(
-                            model,
-                            model_config,
-                            config.sampling,
-                            tokenizer,
-                            sample_key,
+                next_step = step + 1
+                if train_config.checkpoint_every > 0 and next_step % train_config.checkpoint_every == 0:
+                    with timer.phase("checkpoint"):
+                        save_checkpoint(
+                            checkpoint_manager,
+                            next_step=next_step,
+                            model=model,
+                            optimizer=optimizer,
+                            train_iter=train_iter,
                         )
-                        sample_path = write_sample(
-                            logger.run_dir,
-                            step,
-                            config.sampling.prompt,
-                            sample_text,
-                        )
-                        metrics["sample/path"] = str(sample_path)
 
+            if metrics is not None:
+                add_timing_metrics(metrics, timer, train_config)
                 if not printed_metric_header:
                     print(metric_header())
                     printed_metric_header = True
                 print(format_metrics_row(metrics))
                 logger.log(metrics)
-
-            next_step = step + 1
-            if train_config.checkpoint_every > 0 and next_step % train_config.checkpoint_every == 0:
-                save_checkpoint(
-                    checkpoint_manager,
-                    next_step=next_step,
-                    model=model,
-                    optimizer=optimizer,
-                    train_iter=train_iter,
-                )
 
     finally:
         checkpoint_manager.wait_until_finished()

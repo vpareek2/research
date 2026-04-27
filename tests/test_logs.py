@@ -129,7 +129,10 @@ def test_setup_run_creates_artifacts_and_logs_metrics_and_batches(tmp_path):
 
     metrics = (run_dir / "metrics.jsonl").read_text().splitlines()
     assert len(metrics) == 1
-    assert json.loads(metrics[0]) == {"step": 0, "train/loss": 1.25}
+    logged_metrics = json.loads(metrics[0])
+    assert logged_metrics["step"] == 0
+    assert logged_metrics["train/loss"] == 1.25
+    assert logged_metrics["time/log_sec"] >= 0.0
 
     batches = (run_dir / "batches.jsonl").read_text().splitlines()
     assert len(batches) == 1
@@ -197,7 +200,10 @@ def test_wandb_first_run_logs_scalars_and_samples(tmp_path, monkeypatch):
     assert fake_wandb.init_calls[0]["entity"] == "unit-entity"
     assert fake_wandb.init_calls[0]["tags"] == ["unit"]
     assert fake_wandb.init_calls[0]["name"] == "unit"
-    assert fake_wandb.run.logs[0] == ({"train/loss": 1.0}, 0)
+    first_log, first_step = fake_wandb.run.logs[0]
+    assert first_step == 0
+    assert first_log["train/loss"] == 1.0
+    assert first_log["time/log_sec"] >= 0.0
     sample_log, sample_step = fake_wandb.run.logs[1]
     assert sample_step == 0
     assert "samples" in sample_log

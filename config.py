@@ -71,6 +71,27 @@ class DistributedConfig:
 
 
 @dataclass
+class ProfilingConfig:
+    enabled: bool = False
+    profiler: str = "none"
+    start_step: int = 100
+    steps: int = 5
+    output_dir: str = "profiles"
+
+    def __post_init__(self):
+        if not isinstance(self.enabled, bool):
+            raise ValueError(f"profiling.enabled must be a bool, got {self.enabled!r}")
+        if self.profiler != "none":
+            raise ValueError(f"profiling.profiler must be 'none' in phase 1, got {self.profiler!r}")
+        if not isinstance(self.start_step, int) or self.start_step < 0:
+            raise ValueError(f"profiling.start_step must be a non-negative integer, got {self.start_step!r}")
+        if not isinstance(self.steps, int) or self.steps <= 0:
+            raise ValueError(f"profiling.steps must be a positive integer, got {self.steps!r}")
+        if not isinstance(self.output_dir, str) or not self.output_dir:
+            raise ValueError("profiling.output_dir must be a non-empty string")
+
+
+@dataclass
 class LRScheduleConfig:
     type: str = "cosine"
     warmup_ratio: float = 0.01
@@ -158,6 +179,7 @@ class RunConfig:
     data: DataConfig
     sampling: SamplingConfig
     distributed: DistributedConfig = field(default_factory=DistributedConfig)
+    profiling: ProfilingConfig = field(default_factory=ProfilingConfig)
     precision: PrecisionConfig = field(default_factory=PrecisionConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
@@ -196,6 +218,7 @@ def load_config(path: str | Path) -> RunConfig:
         data=DataConfig(**data["data"]),
         sampling=SamplingConfig(**data.get("sampling", {})),
         distributed=DistributedConfig(**data.get("distributed", {})),
+        profiling=ProfilingConfig(**data.get("profiling", {})),
         precision=PrecisionConfig(**data.get("precision", {})),
         wandb=WandbConfig(**data.get("wandb", {})),
     )
