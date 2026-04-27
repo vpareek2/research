@@ -10,10 +10,11 @@ import json
 from pathlib import Path
 
 from flax import nnx
+import jax
 
 from checkpoint import create_checkpoint_manager, restore_model_checkpoint
 from config import load_config
-from data import make_val_dataloader
+from data import load_token_bytes, make_val_dataloader
 from distributed import create_distributed_context, place_replicated_model
 from evals import LossEvalResult, evaluate_loss
 from model import Model
@@ -43,6 +44,8 @@ def write_eval_artifacts(run_dir: Path, checkpoint_step: int, result: LossEvalRe
         f"- tokens: `{result.tokens}`\n"
         f"- loss: `{result.loss:.6f}`\n"
         f"- ppl: `{result.ppl:.6f}`\n"
+        f"- bpb: `{result.bpb:.6f}`\n"
+        f"- bytes: `{result.bytes}`\n"
         f"- elapsed_sec: `{result.elapsed_sec:.6f}`\n"
         f"- tokens_per_sec: `{result.tokens_per_sec:.2f}`\n",
         encoding="utf-8",
@@ -63,6 +66,7 @@ def run_eval(run_dir: Path, *, step: int | None, eval_steps: int | None) -> tupl
     manager = create_checkpoint_manager(run_dir, train_config.keep_last)
     checkpoint_step = restore_model_checkpoint(manager, model=model, step=step)
     place_replicated_model(model, distributed)
+    token_bytes = jax.device_put(load_token_bytes(config.data), distributed.replicated_sharding)
 
     val_iter = make_val_dataloader(config.data, train_config)
     result = evaluate_loss(
@@ -71,6 +75,7 @@ def run_eval(run_dir: Path, *, step: int | None, eval_steps: int | None) -> tupl
         train_config.eval_steps,
         distributed,
         tokens_per_example=train_config.seq_len,
+        token_bytes=token_bytes,
     )
     return checkpoint_step, result
 

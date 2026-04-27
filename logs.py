@@ -8,6 +8,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import getpass
 import json
+import math
 import netrc
 import os
 from urllib.parse import urlparse
@@ -28,11 +29,94 @@ from config import RunConfig
 from data import Batch
 
 
+class HealthMonitor:
+    train_slope_window = 100
+    val_slope_window = 5
+    spike_window = 128
+    spike_threshold_std = 6.0
+
+    def __init__(self):
+        self.started_at = time.perf_counter()
+        self.train_losses: list[float] = []
+        self.val_losses: list[float] = []
+        self.grad_norms: list[float] = []
+        self.loss_spike_count = 0
+        self.grad_norm_spike_count = 0
+        self.any_spike_count = 0
+        self.nan_count = 0
+        self.steps = 0
+
+    def enrich(self, metrics: dict) -> dict:
+        metrics["optim/loss_scale"] = 1.0
+        metrics["time/elapsed_sec"] = time.perf_counter() - self.started_at
+        row_has_nan = any(_is_nan(value) for value in metrics.values())
+
+        train_loss = _finite_float(metrics.get("train/loss"))
+        val_loss = _finite_float(metrics.get("val/loss"))
+        grad_norm = _finite_float(metrics.get("train/grad_norm"))
+        param_norm = _finite_float(metrics.get("train/param_norm"))
+
+        if train_loss is not None:
+            self.steps += 1
+            loss_spike = self._is_spike(train_loss, self.train_losses)
+            metrics["health/train_loss_spike"] = float(loss_spike)
+            if loss_spike:
+                self.loss_spike_count += 1
+            self.train_losses.append(train_loss)
+            self.train_losses = self.train_losses[-max(self.train_slope_window, self.spike_window) :]
+            slope = _slope(self.train_losses[-self.train_slope_window :])
+            if slope is not None:
+                metrics["health/train_loss_slope"] = slope
+
+        if val_loss is not None:
+            self.val_losses.append(val_loss)
+            self.val_losses = self.val_losses[-self.val_slope_window :]
+            slope = _slope(self.val_losses[-self.val_slope_window :])
+            if slope is not None:
+                metrics["health/val_loss_slope"] = slope
+
+        if train_loss is not None and val_loss is not None:
+            metrics["health/train_val_gap"] = val_loss - train_loss
+
+        if grad_norm is not None:
+            grad_spike = self._is_spike(grad_norm, self.grad_norms)
+            metrics["health/grad_norm_spike"] = float(grad_spike)
+            if grad_spike:
+                self.grad_norm_spike_count += 1
+            self.grad_norms.append(grad_norm)
+            self.grad_norms = self.grad_norms[-self.spike_window :]
+
+        if grad_norm is not None and param_norm is not None and param_norm != 0.0:
+            metrics["health/grad_param_ratio"] = grad_norm / param_norm
+
+        if train_loss is not None:
+            if metrics.get("health/train_loss_spike", 0.0) or metrics.get("health/grad_norm_spike", 0.0):
+                self.any_spike_count += 1
+            metrics["health/loss_spike_count"] = self.loss_spike_count
+            metrics["health/grad_norm_spike_count"] = self.grad_norm_spike_count
+            metrics["health/spike_rate"] = self.any_spike_count / self.steps
+
+        if row_has_nan:
+            self.nan_count += 1
+        metrics["health/nan_count"] = self.nan_count
+
+        return metrics
+
+    def _is_spike(self, value: float, history: list[float]) -> bool:
+        window = history[-self.spike_window :]
+        if len(window) < 2:
+            return False
+        mean = sum(window) / len(window)
+        variance = sum((item - mean) ** 2 for item in window) / len(window)
+        return value > mean + self.spike_threshold_std * math.sqrt(variance)
+
+
 class RunLogger:
     def __init__(self, run_dir: Path, wandb_module: Any | None = None, wandb_run: Any | None = None):
         self.run_dir = run_dir
         self.metrics_path = run_dir / "metrics.jsonl"
         self.batches_path = run_dir / "batches.jsonl"
+        self._health = HealthMonitor()
         self._wandb = wandb_module
         self._wandb_run = wandb_run
         self._sample_table = None
@@ -43,6 +127,7 @@ class RunLogger:
         log_start = time.perf_counter()
         metrics = dict(metrics)
         metrics["time/log_sec"] = 0.0
+        self._health.enrich(metrics)
         metrics["time/log_sec"] = time.perf_counter() - log_start
 
         with self.metrics_path.open("a", encoding="utf-8") as f:
@@ -186,6 +271,30 @@ def _is_scalar(value: Any) -> bool:
     if isinstance(value, np.generic):
         return True
     return False
+
+
+def _finite_float(value: Any) -> float | None:
+    if not isinstance(value, (int, float, np.generic)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def _is_nan(value: Any) -> bool:
+    if not isinstance(value, (int, float, np.generic)):
+        return False
+    return math.isnan(float(value))
+
+
+def _slope(values: list[float]) -> float | None:
+    n = len(values)
+    if n < 2:
+        return None
+    x_mean = (n - 1) / 2
+    y_mean = sum(values) / n
+    numerator = sum((idx - x_mean) * (value - y_mean) for idx, value in enumerate(values))
+    denominator = sum((idx - x_mean) ** 2 for idx in range(n))
+    return numerator / denominator
 
 
 def _write_metadata(run_dir: Path, config_path: Path):

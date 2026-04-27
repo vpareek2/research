@@ -128,6 +128,13 @@ JAX dispatch is asynchronous, so `time/train_step_sec` mostly measures enqueue
 time; `time/metrics_sync_sec` is the explicit host synchronization point for
 logged scalars and may include queued device work.
 
+Training also logs always-on health metrics to `metrics.jsonl` and W&B without
+adding console columns. These include `train/bpb`, `val/bpb`,
+`optim/loss_scale`, `health/train_val_gap`, rolling loss slopes, loss and grad
+norm spike flags/counts, `health/nan_count`, `health/grad_param_ratio`,
+`health/spike_rate`, and `time/elapsed_sec`. BPB is computed from token negative log likelihood
+normalized by target-token UTF-8 bytes.
+
 For a short JAX trace, enable profiling and set `profiler = "jax"`. Trace
 files are written under `runs/<name>/profiles/jax_trace/`. For Nsight Systems,
 set `profiler = "nsys"` so the training loop emits NVTX ranges without starting
@@ -180,6 +187,9 @@ Prepared token manifests are validated on load: dtype, tokenizer name, token fil
 length, train/val split bounds, and split overlap must match the config and token
 file. Checksum validation is available in code but not run by default, so large
 training starts do not hash multi-GB token files.
+Prepared data also stores `token_bytes.bin`, a tokenizer byte-length lookup used
+for BPB metrics. Older prepared datasets without this file still work; the table
+is regenerated from the tokenizer at startup.
 
 ## Run Training
 

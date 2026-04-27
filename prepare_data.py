@@ -19,6 +19,8 @@ import numpy as np
 import tiktoken
 from tqdm.auto import tqdm
 
+from data import TOKEN_BYTES_FILENAME, build_token_bytes
+
 
 @dataclass
 class SourceConfig:
@@ -169,6 +171,7 @@ def prepare_texts(texts: Iterable[str], config: PrepareConfig, *, hf_auth: str =
     output_dir = Path(config.output.path)
     output_dir.mkdir(parents=True, exist_ok=True)
     tokens_path = output_dir / "tokens.bin"
+    token_bytes_path = output_dir / TOKEN_BYTES_FILENAME
 
     print("Writing tokens...")
     token_count = _write_tokens_bin(
@@ -179,6 +182,9 @@ def prepare_texts(texts: Iterable[str], config: PrepareConfig, *, hf_auth: str =
     )
     split_idx = int(token_count * (1.0 - config.output.val_fraction))
     print(f"tokens: {token_count} train={split_idx} val={token_count - split_idx}")
+
+    print("Writing token byte table...")
+    build_token_bytes(tokenizer).tofile(token_bytes_path)
 
     manifest = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -204,6 +210,7 @@ def prepare_texts(texts: Iterable[str], config: PrepareConfig, *, hf_auth: str =
         },
         "files": {
             "tokens": {"path": "tokens.bin", "sha256": _sha256(tokens_path, desc="Hashing tokens.bin")},
+            "token_bytes": {"path": TOKEN_BYTES_FILENAME, "sha256": _sha256(token_bytes_path, desc=f"Hashing {TOKEN_BYTES_FILENAME}")},
         },
     }
     manifest["train_tokens"] = manifest["splits"]["train"]["tokens"]

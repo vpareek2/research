@@ -12,14 +12,15 @@ import tiktoken
 
 from checkpoint import create_checkpoint_manager, restore_latest_checkpoint, save_checkpoint
 from config import RunConfig, load_config
-from data import make_dataloaders, make_val_dataloader
+from data import load_token_bytes, make_dataloaders, make_val_dataloader
 from distributed import DistributedContext, create_distributed_context, place_replicated_state, shard_batch
-from evals import evaluate_loss, loss as lm_loss
+from evals import evaluate_loss, loss_with_bpb
 from lr_schedule import build_lr_schedule, describe_lr_schedule
 from model import Model
 from logs import setup_run
 from profiling import StepTimer, TraceProfiler
 from sample import generate, write_sample
+from train_debug import debug_nans_enabled, raise_for_nonfinite_training_state
 
 
 def tree_l2_norm(tree) -> jax.Array:
@@ -45,12 +46,13 @@ def make_muon_dimension_numbers(model_config):
 
 
 @nnx.jit
-def train_step(model: Model, optimizer: nnx.Optimizer, input_ids: jax.Array) -> tuple[jax.Array, dict[str, jax.Array]]:
-    loss_value, grads = nnx.value_and_grad(lm_loss)(model, input_ids)
+def train_step(model: Model, optimizer: nnx.Optimizer, input_ids: jax.Array, token_bytes: jax.Array) -> tuple[jax.Array, dict[str, jax.Array]]:
+    (loss_value, loss_metrics), grads = nnx.value_and_grad(loss_with_bpb, has_aux=True)(model, input_ids, token_bytes)
     grad_norm = tree_l2_norm(grads)
     optimizer.update(model, grads)
     param_norm = tree_l2_norm(nnx.state(model, nnx.Param))
     return loss_value, {
+        "train/bpb": loss_metrics["bpb"],
         "train/grad_norm": grad_norm,
         "train/param_norm": param_norm,
     }
@@ -137,6 +139,7 @@ def main():
     trace_profiler = TraceProfiler(config.profiling, logger.run_dir)
     print("Compiling first step, then training...\n")
     printed_metric_header = False
+    debug_nans = debug_nans_enabled()
 
     model = Model(model_config, precision=config.precision, rngs=nnx.Rngs(train_config.seed))
     tx = optax.contrib.muon(
@@ -147,6 +150,7 @@ def main():
     )
     optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
     place_replicated_state(model, optimizer, distributed)
+    token_bytes = jax.device_put(load_token_bytes(config.data), distributed.replicated_sharding)
     train_iter, _ = make_dataloaders(config.data, train_config)
     checkpoint_manager = create_checkpoint_manager(logger.run_dir, train_config.keep_last)
 
@@ -174,13 +178,26 @@ def main():
                 with trace_profiler.annotate("shard"), timer.phase("shard"):
                     sharded_batch = shard_batch(batch, distributed)
                 with trace_profiler.annotate("train_step"), timer.phase("train_step"):
-                    loss_value, train_metrics = train_step(model, optimizer, sharded_batch["input_ids"])
+                    loss_value, train_metrics = train_step(model, optimizer, sharded_batch["input_ids"], token_bytes)
+                if debug_nans:
+                    raise_for_nonfinite_training_state(
+                        step,
+                        {
+                            "train/loss": loss_value,
+                            "train/bpb": train_metrics["train/bpb"],
+                            "train/grad_norm": train_metrics["train/grad_norm"],
+                            "train/param_norm": train_metrics["train/param_norm"],
+                        },
+                        model=nnx.state(model, nnx.Param),
+                        optimizer=nnx.state(optimizer),
+                    )
 
                 should_log = step % train_config.log_every == 0
                 if should_log:
                     device_metrics = {
                         "train/loss": loss_value,
                         "train/ppl": jnp.exp(loss_value),
+                        "train/bpb": train_metrics["train/bpb"],
                         "train/grad_norm": train_metrics["train/grad_norm"],
                         "train/param_norm": train_metrics["train/param_norm"],
                         "optim/lr": lr_schedule(step),
@@ -195,9 +212,11 @@ def main():
                                 train_config.eval_steps,
                                 distributed,
                                 tokens_per_example=train_config.seq_len,
+                                token_bytes=token_bytes,
                             )
                         device_metrics["val/loss"] = val_result.loss
                         device_metrics["val/ppl"] = val_result.ppl
+                        device_metrics["val/bpb"] = val_result.bpb
 
                     with trace_profiler.annotate("metrics_sync"), timer.phase("metrics_sync"):
                         metrics = {
@@ -236,6 +255,7 @@ def main():
                             optimizer=optimizer,
                             train_iter=train_iter,
                         )
+                        checkpoint_manager.wait_until_finished()
 
             if metrics is not None:
                 add_timing_metrics(metrics, timer, train_config)

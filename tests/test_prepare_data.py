@@ -46,6 +46,12 @@ def test_prepare_texts_writes_bins_manifest_and_eot(tmp_path):
     assert manifest["tokenizer"]["append_eot"] is True
     assert manifest["hf_auth"] == "prompt"
     assert manifest["files"]["tokens"]["sha256"]
+    assert manifest["files"]["token_bytes"]["path"] == "token_bytes.bin"
+    assert manifest["files"]["token_bytes"]["sha256"]
+    token_bytes = np.fromfile(output_dir / "token_bytes.bin", dtype=np.uint16)
+    assert token_bytes[tokenizer.eot_token] == 0
+    hello_token = tokenizer.encode("hello")[0]
+    assert token_bytes[hello_token] == len(tokenizer.decode_single_token_bytes(hello_token))
 
     disk_manifest = json.loads((output_dir / "manifest.json").read_text())
     assert disk_manifest["source"]["dataset"] == "fake/dataset"
@@ -74,6 +80,7 @@ def test_prepare_texts_streams_generator(tmp_path):
     assert consumed == ["hello", "world", "again"]
     assert manifest["num_tokens"] > 0
     assert (output_dir / "tokens.bin").exists()
+    assert (output_dir / "token_bytes.bin").exists()
 
 
 def test_load_texts_streams_local_file(tmp_path):

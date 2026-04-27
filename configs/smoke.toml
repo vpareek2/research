@@ -1,5 +1,5 @@
 [experiment]
-name = "tiny_shakespeare_smoke"
+name = "tiny_shakespeare_smoke_1"
 out_dir = "runs"
 
 [model]

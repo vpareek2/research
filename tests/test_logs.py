@@ -14,7 +14,7 @@ from config import (
     SamplingConfig,
     TrainConfig,
 )
-from logs import setup_run
+from logs import HealthMonitor, setup_run
 
 
 def make_config(out_dir, *, wandb=False):
@@ -111,7 +111,7 @@ def test_setup_run_creates_artifacts_and_logs_metrics_and_batches(tmp_path):
     config = make_config(tmp_path / "runs")
 
     logger = setup_run(config_path, config)
-    logger.log({"step": 0, "train/loss": 1.25})
+    logger.log({"step": 0, "train/loss": 1.25, "val/loss": 1.75, "train/grad_norm": 0.5, "train/param_norm": 10.0})
     logger.log_batch(
         0,
         {
@@ -132,6 +132,16 @@ def test_setup_run_creates_artifacts_and_logs_metrics_and_batches(tmp_path):
     logged_metrics = json.loads(metrics[0])
     assert logged_metrics["step"] == 0
     assert logged_metrics["train/loss"] == 1.25
+    assert logged_metrics["optim/loss_scale"] == 1.0
+    assert logged_metrics["health/train_val_gap"] == 0.5
+    assert logged_metrics["health/grad_param_ratio"] == 0.05
+    assert logged_metrics["health/train_loss_spike"] == 0.0
+    assert logged_metrics["health/grad_norm_spike"] == 0.0
+    assert logged_metrics["health/loss_spike_count"] == 0
+    assert logged_metrics["health/grad_norm_spike_count"] == 0
+    assert logged_metrics["health/spike_rate"] == 0.0
+    assert logged_metrics["health/nan_count"] == 0
+    assert logged_metrics["time/elapsed_sec"] >= 0.0
     assert logged_metrics["time/log_sec"] >= 0.0
 
     batches = (run_dir / "batches.jsonl").read_text().splitlines()
@@ -142,6 +152,33 @@ def test_setup_run_creates_artifacts_and_logs_metrics_and_batches(tmp_path):
         "token_start": [24, 56],
         "token_end": [32, 64],
     }
+
+
+def test_health_monitor_tracks_slopes_and_spikes():
+    monitor = HealthMonitor()
+    first = monitor.enrich({"step": 0, "train/loss": 1.0, "val/loss": 1.5, "train/grad_norm": 1.0, "train/param_norm": 10.0})
+    second = monitor.enrich({"step": 1, "train/loss": 0.9, "val/loss": 1.4, "train/grad_norm": 0.9, "train/param_norm": 10.0})
+    spike = monitor.enrich({"step": 2, "train/loss": 10.0, "train/grad_norm": 10.0, "train/param_norm": 10.0})
+
+    assert "health/train_loss_slope" not in first
+    assert second["health/train_loss_slope"] < 0.0
+    assert second["health/val_loss_slope"] < 0.0
+    assert spike["health/train_loss_spike"] == 1.0
+    assert spike["health/grad_norm_spike"] == 1.0
+    assert spike["health/loss_spike_count"] == 1
+    assert spike["health/grad_norm_spike_count"] == 1
+    assert spike["health/spike_rate"] > 0.0
+
+
+def test_health_monitor_counts_nan_rows():
+    monitor = HealthMonitor()
+    first = monitor.enrich({"step": 0, "train/loss": 1.0})
+    second = monitor.enrich({"step": 1, "train/loss": float("nan")})
+    third = monitor.enrich({"step": 2, "train/loss": 0.9, "train/grad_norm": float("nan")})
+
+    assert first["health/nan_count"] == 0
+    assert second["health/nan_count"] == 1
+    assert third["health/nan_count"] == 2
 
 
 def test_setup_run_rejects_duplicate_run_dir(tmp_path):

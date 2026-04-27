@@ -210,8 +210,9 @@ def test_replicated_state_placement_and_sharded_train_eval_steps():
         {"input_ids": jax.random.randint(jax.random.key(1), (8, 8), 0, cfg.vocab_size)},
         context,
     )
+    token_bytes = jax.device_put(jnp.ones((cfg.vocab_size,), dtype=jnp.uint16), context.replicated_sharding)
 
-    train_loss, train_metrics = train_step(model, optimizer, batch["input_ids"])
+    train_loss, train_metrics = train_step(model, optimizer, batch["input_ids"], token_bytes)
     val_loss = eval_step(model, batch["input_ids"])
 
     assert train_loss.shape == ()

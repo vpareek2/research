@@ -16,6 +16,7 @@ from config import DataConfig, TrainConfig
 
 
 Batch = dict[str, jax.Array]
+TOKEN_BYTES_FILENAME = "token_bytes.bin"
 
 
 class TokenDataset:
@@ -90,6 +91,29 @@ def load_token_file(path: str | Path, dtype: str = "uint32") -> np.memmap:
     if dtype != "uint32":
         raise ValueError(f"Only uint32 token files are supported, got {dtype}")
     return np.memmap(path, dtype=np.uint32, mode="r")
+
+
+def build_token_bytes(tokenizer: tiktoken.Encoding) -> np.ndarray:
+    token_bytes = np.zeros(tokenizer.n_vocab, dtype=np.uint16)
+    for token_id in range(tokenizer.n_vocab):
+        try:
+            token_bytes[token_id] = len(tokenizer.decode_single_token_bytes(token_id))
+        except KeyError:
+            token_bytes[token_id] = 0
+    token_bytes[tokenizer.eot_token] = 0
+    return token_bytes
+
+
+def load_token_bytes(data_config: DataConfig) -> np.ndarray:
+    if data_config.source == "tokens":
+        data_dir = Path(data_config.path)
+        manifest = load_validated_token_manifest(data_config)
+        token_bytes_path = manifest.get("files", {}).get("token_bytes", {}).get("path")
+        if token_bytes_path is not None:
+            return np.fromfile(data_dir / token_bytes_path, dtype=np.uint16)
+
+    tokenizer = tiktoken.get_encoding(data_config.tokenizer)
+    return build_token_bytes(tokenizer)
 
 
 def load_token_manifest(path: str | Path) -> dict:

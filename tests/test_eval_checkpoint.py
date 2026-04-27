@@ -151,6 +151,8 @@ def test_eval_checkpoint_cli_writes_latest_eval_artifacts(tmp_path, monkeypatch)
     assert metrics["tokens"] == 16
     assert metrics["loss"] > 0.0
     assert metrics["ppl"] > 0.0
+    assert metrics["bpb"] > 0.0
+    assert metrics["bytes"] > 0
     assert metrics["tokens_per_sec"] > 0.0
 
 

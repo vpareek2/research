@@ -2,9 +2,10 @@ import json
 
 import numpy as np
 import pytest
+import tiktoken
 
 from config import DataConfig, TrainConfig
-from data import TokenDataset, TokenMemmapDataset, make_dataloaders, make_val_dataloader, split_tokens
+from data import TokenDataset, TokenMemmapDataset, build_token_bytes, load_token_bytes, make_dataloaders, make_val_dataloader, split_tokens
 
 
 def train_config(**overrides):
@@ -33,12 +34,15 @@ def data_config(tmp_path, text=None, val_fraction=0.25):
     return DataConfig(path=str(path), tokenizer="gpt2", val_fraction=val_fraction)
 
 
-def write_manifest(data_dir, *, num_tokens=128, train=(0, 64), val=(64, 128), tokenizer="gpt2", dtype="uint32"):
+def write_manifest(data_dir, *, num_tokens=128, train=(0, 64), val=(64, 128), tokenizer="gpt2", dtype="uint32", token_bytes=False):
+    files = {"tokens": {"path": "tokens.bin"}}
+    if token_bytes:
+        files["token_bytes"] = {"path": "token_bytes.bin"}
     (data_dir / "manifest.json").write_text(json.dumps({
         "dtype": dtype,
         "num_tokens": num_tokens,
         "tokenizer": {"name": tokenizer},
-        "files": {"tokens": {"path": "tokens.bin"}},
+        "files": files,
         "splits": {
             "train": {"start": train[0], "end": train[1], "tokens": train[1] - train[0]},
             "val": {"start": val[0], "end": val[1], "tokens": val[1] - val[0]},
@@ -68,6 +72,27 @@ def test_split_tokens_is_deterministic():
 
     np.testing.assert_array_equal(train, np.arange(80, dtype=np.int32))
     np.testing.assert_array_equal(val, np.arange(80, 100, dtype=np.int32))
+
+
+def test_build_token_bytes_zeros_eot_and_counts_normal_tokens():
+    tokenizer = tiktoken.get_encoding("gpt2")
+    token_bytes = build_token_bytes(tokenizer)
+    hello_token = tokenizer.encode("hello")[0]
+
+    assert token_bytes[tokenizer.eot_token] == 0
+    assert token_bytes[hello_token] == len(tokenizer.decode_single_token_bytes(hello_token))
+
+
+def test_load_token_bytes_prefers_prepared_table(tmp_path):
+    data_dir = tmp_path / "prepared"
+    data_dir.mkdir()
+    np.arange(128, dtype=np.uint32).tofile(data_dir / "tokens.bin")
+    expected = np.arange(128, dtype=np.uint16)
+    expected.tofile(data_dir / "token_bytes.bin")
+    write_manifest(data_dir, token_bytes=True)
+    dc = DataConfig(source="tokens", path=str(data_dir), tokenizer="gpt2")
+
+    np.testing.assert_array_equal(load_token_bytes(dc), expected)
 
 
 def test_dataloaders_shapes_and_val_determinism(tmp_path):

@@ -82,11 +82,14 @@ def test_train_step_returns_classic_train_metrics():
     model = Model(cfg, rngs=nnx.Rngs(0))
     optimizer = nnx.Optimizer(model, optax.adamw(1e-3), wrt=nnx.Param)
     input_ids = jax.random.randint(jax.random.key(1), (2, 8), 0, cfg.vocab_size)
+    token_bytes = jnp.ones((cfg.vocab_size,), dtype=jnp.uint16)
 
-    value, metrics = train_step(model, optimizer, input_ids)
+    value, metrics = train_step(model, optimizer, input_ids, token_bytes)
 
     assert value.shape == ()
     assert bool(jnp.isfinite(value))
+    assert metrics["train/bpb"].shape == ()
+    assert bool(jnp.isfinite(metrics["train/bpb"]))
     assert metrics["train/grad_norm"].shape == ()
     assert metrics["train/param_norm"].shape == ()
     assert bool(jnp.isfinite(metrics["train/grad_norm"]))
@@ -140,8 +143,9 @@ def test_muon_optimizer_accepts_lr_schedule():
     )
     optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
     input_ids = jax.random.randint(jax.random.key(1), (2, 8), 0, cfg.vocab_size)
+    token_bytes = jnp.ones((cfg.vocab_size,), dtype=jnp.uint16)
 
-    value, metrics = train_step(model, optimizer, input_ids)
+    value, metrics = train_step(model, optimizer, input_ids, token_bytes)
 
     assert value.shape == ()
     assert bool(jnp.isfinite(value))
