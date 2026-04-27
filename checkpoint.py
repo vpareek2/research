@@ -65,3 +65,24 @@ def restore_latest_checkpoint(
     nnx.update(model, restored["model"])
     nnx.update(optimizer, restored["optimizer"])
     return int(restored["metadata"]["next_step"])
+
+
+def restore_model_checkpoint(
+    manager: ocp.CheckpointManager,
+    *,
+    model: Model,
+    step: int | None = None,
+) -> int:
+    checkpoint_step = manager.latest_step() if step is None else step
+    if checkpoint_step is None:
+        raise FileNotFoundError("No checkpoint found to evaluate.")
+
+    restored = manager.restore(
+        checkpoint_step,
+        args=ocp.args.Composite(
+            model=ocp.args.StandardRestore(nnx.state(model)),
+            metadata=ocp.args.JsonRestore(),
+        ),
+    )
+    nnx.update(model, restored["model"])
+    return int(restored["metadata"].get("next_step", checkpoint_step))

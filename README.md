@@ -328,6 +328,24 @@ uv run pretrain configs/smoke.toml --resume
 
 Resume restores the latest checkpoint and Grain iterator state, then continues from the saved next step.
 
+## Evaluate A Checkpoint
+
+Use `eval-checkpoint` to run the configured validation split against a saved
+checkpoint without restoring the optimizer or train iterator:
+
+```bash
+uv run eval-checkpoint runs/tiny_shakespeare_smoke
+uv run eval-checkpoint runs/tiny_shakespeare_smoke --step 100
+uv run eval-checkpoint runs/tiny_shakespeare_smoke --eval-steps 50
+```
+
+The command writes:
+
+```text
+runs/<name>/evals/step_<step>/metrics.json
+runs/<name>/evals/step_<step>/summary.md
+```
+
 ## Inspect A Training Batch
 
 Every training step logs token spans to `batches.jsonl`, so a suspicious metric spike can be traced back to the exact data seen at that step.

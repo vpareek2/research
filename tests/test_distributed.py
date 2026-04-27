@@ -14,8 +14,9 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from config import DistributedConfig, ModelConfig, TrainConfig
 from distributed import create_distributed_context, place_replicated_state, shard_batch
+from evals import eval_step
 from model import Model
-from pretrain import eval_step, train_step
+from pretrain import train_step
 
 
 FAKE_DEVICE_COUNT = 4

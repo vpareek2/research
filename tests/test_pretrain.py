@@ -6,9 +6,10 @@ from flax import nnx
 
 from config import DataConfig, DistributedConfig, ExperimentConfig, ModelConfig, PrecisionConfig, ProfilingConfig, RunConfig, SamplingConfig, TrainConfig, WandbConfig
 from distributed import create_distributed_context
+from evals import loss
 from lr_schedule import build_lr_schedule
 from model import Model
-from pretrain import add_timing_metrics, format_metrics_row, loss, make_muon_dimension_numbers, metric_header, print_startup, sync_metric_scalars, train_step, tree_l2_norm
+from pretrain import add_timing_metrics, format_metrics_row, make_muon_dimension_numbers, metric_header, print_startup, sync_metric_scalars, train_step, tree_l2_norm
 from profiling import StepTimer
 
 

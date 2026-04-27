@@ -14,21 +14,12 @@ from checkpoint import create_checkpoint_manager, restore_latest_checkpoint, sav
 from config import RunConfig, load_config
 from data import make_dataloaders, make_val_dataloader
 from distributed import DistributedContext, create_distributed_context, place_replicated_state, shard_batch
+from evals import evaluate_loss, loss as lm_loss
 from lr_schedule import build_lr_schedule, describe_lr_schedule
 from model import Model
 from logs import setup_run
 from profiling import StepTimer, TraceProfiler
 from sample import generate, write_sample
-
-
-def loss(model: Model, input_ids: jax.Array) -> jax.Array:
-    logits = model(input_ids)
-    shift_logits = logits[:, :-1, :].astype(model.loss_dtype)
-    shift_labels = input_ids[:, 1:]
-    return optax.softmax_cross_entropy_with_integer_labels(
-        shift_logits,
-        shift_labels,
-    ).mean()
 
 
 def tree_l2_norm(tree) -> jax.Array:
@@ -55,7 +46,7 @@ def make_muon_dimension_numbers(model_config):
 
 @nnx.jit
 def train_step(model: Model, optimizer: nnx.Optimizer, input_ids: jax.Array) -> tuple[jax.Array, dict[str, jax.Array]]:
-    loss_value, grads = nnx.value_and_grad(loss)(model, input_ids)
+    loss_value, grads = nnx.value_and_grad(lm_loss)(model, input_ids)
     grad_norm = tree_l2_norm(grads)
     optimizer.update(model, grads)
     param_norm = tree_l2_norm(nnx.state(model, nnx.Param))
@@ -63,16 +54,6 @@ def train_step(model: Model, optimizer: nnx.Optimizer, input_ids: jax.Array) -> 
         "train/grad_norm": grad_norm,
         "train/param_norm": param_norm,
     }
-
-
-@nnx.jit
-def eval_step(model: Model, input_ids: jax.Array) -> jax.Array:
-    return loss(model, input_ids)
-
-
-def evaluate(model: Model, val_iter, eval_steps: int, distributed: DistributedContext) -> jax.Array:
-    losses = [eval_step(model, shard_batch(next(val_iter), distributed)["input_ids"]) for _ in range(eval_steps)]
-    return jnp.mean(jnp.asarray(losses))
 
 
 def sync_metric_scalars(device_metrics: dict[str, jax.Array]) -> dict[str, float]:
@@ -208,9 +189,15 @@ def main():
                     if step % train_config.eval_every == 0:
                         with trace_profiler.annotate("eval"), timer.phase("eval"):
                             val_iter = make_val_dataloader(config.data, train_config)
-                            val_loss = evaluate(model, val_iter, train_config.eval_steps, distributed)
-                        device_metrics["val/loss"] = val_loss
-                        device_metrics["val/ppl"] = jnp.exp(val_loss)
+                            val_result = evaluate_loss(
+                                model,
+                                val_iter,
+                                train_config.eval_steps,
+                                distributed,
+                                tokens_per_example=train_config.seq_len,
+                            )
+                        device_metrics["val/loss"] = val_result.loss
+                        device_metrics["val/ppl"] = val_result.ppl
 
                     with trace_profiler.annotate("metrics_sync"), timer.phase("metrics_sync"):
                         metrics = {

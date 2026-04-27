@@ -1,10 +1,12 @@
 import numpy as np
 import optax
+import jax.numpy as jnp
 from flax import nnx
 
-from checkpoint import create_checkpoint_manager, restore_latest_checkpoint, save_checkpoint
+from checkpoint import create_checkpoint_manager, restore_latest_checkpoint, restore_model_checkpoint, save_checkpoint
 from config import DataConfig, ModelConfig, TrainConfig
 from data import make_dataloaders
+from evals import loss
 from model import Model
 
 
@@ -88,4 +90,35 @@ def test_checkpoint_restores_next_step_and_train_iterator(tmp_path):
     np.testing.assert_array_equal(
         np.asarray(actual_next_batch["chunk_idx"]),
         np.asarray(expected_next_batch["chunk_idx"]),
+    )
+
+
+def test_restore_model_checkpoint_restores_model_without_optimizer_or_iterator(tmp_path):
+    model_config = tiny_model_config()
+    tc = train_config()
+    dc = data_config(tmp_path)
+
+    model = Model(model_config, rngs=nnx.Rngs(0))
+    optimizer = nnx.Optimizer(model, optax.adamw(tc.lr), wrt=nnx.Param)
+    train_iter, _ = make_dataloaders(dc, tc)
+    batch = next(train_iter)
+
+    manager = create_checkpoint_manager(tmp_path / "run", keep_last=2)
+    save_checkpoint(
+        manager,
+        next_step=1,
+        model=model,
+        optimizer=optimizer,
+        train_iter=train_iter,
+    )
+    manager.wait_until_finished()
+
+    restored_model = Model(model_config, rngs=nnx.Rngs(1))
+    restored_step = restore_model_checkpoint(manager, model=restored_model)
+
+    assert restored_step == 1
+    np.testing.assert_allclose(
+        np.asarray(loss(restored_model, jnp.asarray(batch["input_ids"]))),
+        np.asarray(loss(model, jnp.asarray(batch["input_ids"]))),
+        rtol=1e-6,
     )

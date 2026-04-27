@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 pretrain = "pretrain:main"
+eval-checkpoint = "utils.eval_checkpoint:main"
 prepare-data = "prepare_data:main"
 inspect-batch = "utils.inspect_batch:main"
 param-count = "utils.param_count:main"
@@ -30,5 +31,5 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["checkpoint", "config", "data", "distributed", "model", "prepare_data", "pretrain", "logs", "profiling", "sample", "lr_schedule"]
+py-modules = ["checkpoint", "config", "data", "distributed", "evals", "model", "prepare_data", "pretrain", "logs", "profiling", "sample", "lr_schedule"]
 packages = ["utils"]

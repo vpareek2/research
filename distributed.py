@@ -59,8 +59,12 @@ def _resolve_device_count(requested: int | str, available: int) -> int:
     return requested
 
 
-def place_replicated_state(model: nnx.Module, optimizer: nnx.Optimizer, context: DistributedContext):
+def place_replicated_model(model: nnx.Module, context: DistributedContext):
     nnx.update(model, jax.device_put(nnx.state(model), context.replicated_sharding))
+
+
+def place_replicated_state(model: nnx.Module, optimizer: nnx.Optimizer, context: DistributedContext):
+    place_replicated_model(model, context)
     nnx.update(optimizer, jax.device_put(nnx.state(optimizer), context.replicated_sharding))
 
 
