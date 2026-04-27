@@ -123,8 +123,12 @@ Phase 1 profiling is always-on lightweight timing. Training logs detailed
 breakdowns such as `time/data_sec`, `time/shard_sec`,
 `time/train_step_sec`, `time/eval_sec`, `time/checkpoint_sec`, and
 `time/train_tokens_per_sec` to `metrics.jsonl` and W&B. The console keeps the
-compact metrics table. JAX/NSys trace capture modes are reserved for a later
-pass, so `profiler` must currently be `"none"`.
+compact metrics table.
+
+For a short JAX trace, enable profiling and set `profiler = "jax"`. Trace
+files are written under `runs/<name>/profiles/jax_trace/`. For Nsight Systems,
+set `profiler = "nsys"` so the training loop emits NVTX ranges without starting
+the JAX profiler; JAX and NSys should not capture CUPTI in the same process.
 
 ## Data
 
@@ -250,6 +254,8 @@ Use `profile` to summarize timing metrics from a completed run:
 
 ```bash
 uv run profile runs/tinystories_timing_53m
+# equivalent:
+uv run profile summary runs/tinystories_timing_53m
 ```
 
 The command reads `metrics.jsonl`, skips the first 20 steps by default, prints
@@ -261,6 +267,39 @@ runs/<name>/profiles/timing_summary.md
 ```
 
 Use `--warmup-steps` to choose a different cutoff.
+
+To capture a short JAX trace, use a short timing-style config with:
+
+```toml
+[profiling]
+enabled = true
+profiler = "jax"
+start_step = 100
+steps = 5
+output_dir = "profiles"
+```
+
+For Nsight Systems, use `profiler = "nsys"` instead. This emits NVTX ranges for
+the same phase names without starting the JAX profiler:
+
+```toml
+[profiling]
+enabled = true
+profiler = "nsys"
+start_step = 100
+steps = 5
+output_dir = "profiles"
+```
+
+Then launch the run through the `profile` helper:
+
+```bash
+uv run profile nsys configs/tinystories_timing.toml --force-run-dir
+```
+
+The helper writes the temporary NSys report outside `runs/`, lets `pretrain`
+create the run directory normally, and copies the final report to
+`runs/<name>/profiles/nsys.nsys-rep`.
 
 ## Resume
 

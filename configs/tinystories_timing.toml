@@ -1,5 +1,5 @@
 [experiment]
-name = "tinystories_timing_53m"
+name = "tinystories_nsys_53m"
 out_dir = "runs"
 
 [model]
@@ -25,9 +25,9 @@ device_count = "auto"
 axis_name = "data"
 
 [profiling]
-enabled = false
-profiler = "none"
-start_step = 100
+enabled = true
+profiler = "nsys"
+start_step = 20
 steps = 5
 output_dir = "profiles"
 
@@ -35,11 +35,11 @@ output_dir = "profiles"
 seed = 0
 batch_size = 32
 seq_len = 256
-steps = 300
+steps = 40
 lr = 0.0006
 decay = 0.1
 log_every = 1
-eval_every = 100
+eval_every = 1000
 eval_steps = 10
 checkpoint_every = 0
 keep_last = 3
@@ -56,7 +56,7 @@ path = "data/tinystories_gpt2"
 tokenizer = "gpt2"
 
 [sampling]
-enabled = true
+enabled = false
 prompt = "Once upon a time"
 max_new_tokens = 64
 temperature = 0.8
@@ -66,4 +66,4 @@ top_k = 50
 enabled = false
 project = "data-research"
 entity = ""
-tags = ["tinystories", "timing", "53m"]
+tags = ["tinystories", "nsys", "53m"]

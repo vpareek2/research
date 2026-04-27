@@ -81,8 +81,8 @@ class ProfilingConfig:
     def __post_init__(self):
         if not isinstance(self.enabled, bool):
             raise ValueError(f"profiling.enabled must be a bool, got {self.enabled!r}")
-        if self.profiler != "none":
-            raise ValueError(f"profiling.profiler must be 'none' in phase 1, got {self.profiler!r}")
+        if self.profiler not in {"none", "jax", "nsys"}:
+            raise ValueError(f"profiling.profiler must be 'none', 'jax', or 'nsys', got {self.profiler!r}")
         if not isinstance(self.start_step, int) or self.start_step < 0:
             raise ValueError(f"profiling.start_step must be a non-negative integer, got {self.start_step!r}")
         if not isinstance(self.steps, int) or self.steps <= 0:

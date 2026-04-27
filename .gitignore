@@ -4,3 +4,4 @@ __pycache__/
 research.egg-info/
 /data/
 runs/
+profiles/

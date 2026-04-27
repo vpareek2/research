@@ -221,6 +221,50 @@ output_dir = "profiles/unit"
     assert config.profiling.output_dir == "profiles/unit"
 
 
+def test_jax_profiling_config_parses(tmp_path):
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        profiling_section="""
+[profiling]
+enabled = true
+profiler = "jax"
+start_step = 10
+steps = 3
+output_dir = "profiles"
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.profiling.enabled is True
+    assert config.profiling.profiler == "jax"
+    assert config.profiling.start_step == 10
+    assert config.profiling.steps == 3
+
+
+def test_nsys_profiling_config_parses(tmp_path):
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        profiling_section="""
+[profiling]
+enabled = true
+profiler = "nsys"
+start_step = 10
+steps = 3
+output_dir = "profiles"
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.profiling.enabled is True
+    assert config.profiling.profiler == "nsys"
+    assert config.profiling.start_step == 10
+    assert config.profiling.steps == 3
+
+
 def test_mismatched_model_and_train_seq_len_raises(tmp_path):
     config_path = tmp_path / "config.toml"
     write_config(config_path)
@@ -327,8 +371,7 @@ def test_invalid_distributed_config_raises(kwargs):
     "kwargs",
     [
         {"enabled": "yes"},
-        {"profiler": "jax"},
-        {"profiler": "nsys"},
+        {"profiler": "xplane"},
         {"start_step": -1},
         {"start_step": 0.5},
         {"steps": 0},

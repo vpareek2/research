@@ -17,7 +17,7 @@ from distributed import DistributedContext, create_distributed_context, place_re
 from lr_schedule import build_lr_schedule, describe_lr_schedule
 from model import Model
 from logs import setup_run
-from profiling import StepTimer
+from profiling import StepTimer, TraceProfiler
 from sample import generate, write_sample
 
 
@@ -148,6 +148,7 @@ def main():
     distributed = create_distributed_context(config.distributed, train_config)
     print_startup(config, resume=args.resume, distributed=distributed)
     logger = setup_run(args.config, config, resume=args.resume)
+    trace_profiler = TraceProfiler(config.profiling, logger.run_dir)
     print("Compiling first step, then training...\n")
     printed_metric_header = False
 
@@ -176,21 +177,22 @@ def main():
 
     try:
         for step in range(start_step, train_config.steps):
+            trace_profiler.begin_step(step)
             timer = StepTimer()
             metrics = None
-            with timer.phase("step"):
-                with timer.phase("data"):
+            with trace_profiler.annotate("step", step=step), timer.phase("step"):
+                with trace_profiler.annotate("data"), timer.phase("data"):
                     batch = next(train_iter)
-                with timer.phase("batch_log"):
+                with trace_profiler.annotate("batch_log"), timer.phase("batch_log"):
                     logger.log_batch(step, batch)
-                with timer.phase("shard"):
+                with trace_profiler.annotate("shard"), timer.phase("shard"):
                     sharded_batch = shard_batch(batch, distributed)
-                with timer.phase("train_step"):
+                with trace_profiler.annotate("train_step"), timer.phase("train_step"):
                     loss_value, train_metrics = train_step(model, optimizer, sharded_batch["input_ids"])
 
                 should_log = step % train_config.log_every == 0
                 if should_log:
-                    with timer.phase("metrics_sync"):
+                    with trace_profiler.annotate("metrics_sync"), timer.phase("metrics_sync"):
                         metrics = {
                             "step": step,
                             "train/loss": float(loss_value),
@@ -202,15 +204,15 @@ def main():
                         }
 
                     if step % train_config.eval_every == 0:
-                        with timer.phase("eval"):
+                        with trace_profiler.annotate("eval"), timer.phase("eval"):
                             val_iter = make_val_dataloader(config.data, train_config)
                             val_loss = evaluate(model, val_iter, train_config.eval_steps, distributed)
-                        with timer.phase("metrics_sync"):
+                        with trace_profiler.annotate("metrics_sync"), timer.phase("metrics_sync"):
                             metrics["val/loss"] = float(val_loss)
                             metrics["val/ppl"] = float(jnp.exp(val_loss))
 
                         if config.sampling.enabled:
-                            with timer.phase("sample"):
+                            with trace_profiler.annotate("sample"), timer.phase("sample"):
                                 tokenizer = tiktoken.get_encoding(config.data.tokenizer)
                                 sample_key = jax.random.fold_in(jax.random.key(train_config.seed), step)
                                 sample_text = generate(
@@ -230,7 +232,7 @@ def main():
 
                 next_step = step + 1
                 if train_config.checkpoint_every > 0 and next_step % train_config.checkpoint_every == 0:
-                    with timer.phase("checkpoint"):
+                    with trace_profiler.annotate("checkpoint"), timer.phase("checkpoint"):
                         save_checkpoint(
                             checkpoint_manager,
                             next_step=next_step,
@@ -245,9 +247,12 @@ def main():
                     print(metric_header())
                     printed_metric_header = True
                 print(format_metrics_row(metrics))
-                logger.log(metrics)
+                with trace_profiler.annotate("log"):
+                    logger.log(metrics)
+            trace_profiler.end_current_step(step)
 
     finally:
+        trace_profiler.stop()
         checkpoint_manager.wait_until_finished()
         logger.close()
 
