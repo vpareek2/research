@@ -20,6 +20,9 @@ dependencies = [
 [project.scripts]
 pretrain = "pretrain:main"
 eval-checkpoint = "utils.eval_checkpoint:main"
+summarize-run = "utils.run_summary:main"
+register-run = "utils.run_registry:main"
+list-runs = "utils.run_registry:list_main"
 prepare-data = "prepare_data:main"
 inspect-batch = "utils.inspect_batch:main"
 param-count = "utils.param_count:main"

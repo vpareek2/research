@@ -21,6 +21,7 @@ from logs import setup_run
 from profiling import StepTimer, TraceProfiler
 from sample import generate, write_sample
 from train_debug import debug_nans_enabled, raise_for_nonfinite_training_state
+from utils.run_summary import summarize_and_write
 
 
 def tree_l2_norm(tree) -> jax.Array:
@@ -123,6 +124,19 @@ def add_timing_metrics(metrics: dict, timer: StepTimer, train_config) -> dict:
     return metrics
 
 
+def write_completion_summary(run_dir) -> tuple:
+    _, json_path, md_path, _ = summarize_and_write(run_dir)
+    print(f"wrote {json_path}")
+    print(f"wrote {md_path}")
+    return json_path, md_path
+
+
+def maybe_write_completion_summary(run_dir, *, completed: bool):
+    if not completed:
+        return None
+    return write_completion_summary(run_dir)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", help="Path to a run config TOML file.")
@@ -165,6 +179,7 @@ def main():
         place_replicated_state(model, optimizer, distributed)
         print(f"resumed from checkpoint; starting at step {start_step}")
 
+    completed = False
     try:
         for step in range(start_step, train_config.steps):
             trace_profiler.begin_step(step)
@@ -266,11 +281,14 @@ def main():
                 with trace_profiler.annotate("log"):
                     logger.log(metrics)
             trace_profiler.end_current_step(step)
+        completed = True
 
     finally:
         trace_profiler.stop()
         checkpoint_manager.wait_until_finished()
         logger.close()
+
+    maybe_write_completion_summary(logger.run_dir, completed=completed)
 
 
 if __name__ == "__main__":

@@ -356,6 +356,31 @@ runs/<name>/evals/step_<step>/metrics.json
 runs/<name>/evals/step_<step>/summary.md
 ```
 
+## Summarize A Run
+
+Successful training runs automatically write:
+
+```text
+runs/<name>/summary/run_summary.json
+runs/<name>/summary/scorecard.md
+```
+
+Regenerate the summary manually for old, partial, or newly evaluated runs:
+
+```bash
+uv run summarize-run runs/tiny_shakespeare_smoke
+```
+
+Register runs explicitly when you want them in the comparison registry:
+
+```bash
+uv run summarize-run runs/tiny_shakespeare_smoke --register
+uv run register-run runs/tiny_shakespeare_smoke
+uv run list-runs
+```
+
+The registry is written to `runs/registry.jsonl`.
+
 ## Inspect A Training Batch
 
 Every training step logs token spans to `batches.jsonl`, so a suspicious metric spike can be traced back to the exact data seen at that step.

@@ -9,7 +9,17 @@ from distributed import create_distributed_context
 from evals import loss
 from lr_schedule import build_lr_schedule
 from model import Model
-from pretrain import add_timing_metrics, format_metrics_row, make_muon_dimension_numbers, metric_header, print_startup, sync_metric_scalars, train_step, tree_l2_norm
+from pretrain import (
+    add_timing_metrics,
+    format_metrics_row,
+    make_muon_dimension_numbers,
+    maybe_write_completion_summary,
+    metric_header,
+    print_startup,
+    sync_metric_scalars,
+    train_step,
+    tree_l2_norm,
+)
 from profiling import StepTimer
 
 
@@ -246,3 +256,21 @@ def test_add_timing_metrics_reports_loop_and_train_throughput():
     assert metrics["time/step_sec"] == 0.2
     assert metrics["time/tokens_per_sec"] == 160.0
     assert metrics["time/train_tokens_per_sec"] == 320.0
+
+
+def test_maybe_write_completion_summary_only_writes_for_completed_runs(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_write(run_dir):
+        calls.append(run_dir)
+        return tmp_path / "run_summary.json", tmp_path / "scorecard.md"
+
+    monkeypatch.setattr("pretrain.write_completion_summary", fake_write)
+
+    assert maybe_write_completion_summary(tmp_path / "run", completed=False) is None
+    assert calls == []
+
+    result = maybe_write_completion_summary(tmp_path / "run", completed=True)
+
+    assert calls == [tmp_path / "run"]
+    assert result == (tmp_path / "run_summary.json", tmp_path / "scorecard.md")
