@@ -143,6 +143,16 @@ class DataConfig:
 
 
 @dataclass
+class EvalConfig:
+    domain_root: str | None = None
+    domain_eval_steps: int | None = None
+
+    def __post_init__(self):
+        if self.domain_eval_steps is not None and self.domain_eval_steps <= 0:
+            raise ValueError(f"eval.domain_eval_steps must be positive, got {self.domain_eval_steps}")
+
+
+@dataclass
 class WandbConfig:
     enabled: bool = False
     project: str = "data-research"
@@ -179,6 +189,7 @@ class RunConfig:
     data: DataConfig
     sampling: SamplingConfig
     distributed: DistributedConfig = field(default_factory=DistributedConfig)
+    eval: EvalConfig = field(default_factory=EvalConfig)
     profiling: ProfilingConfig = field(default_factory=ProfilingConfig)
     precision: PrecisionConfig = field(default_factory=PrecisionConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
@@ -218,6 +229,7 @@ def load_config(path: str | Path) -> RunConfig:
         data=DataConfig(**data["data"]),
         sampling=SamplingConfig(**data.get("sampling", {})),
         distributed=DistributedConfig(**data.get("distributed", {})),
+        eval=EvalConfig(**data.get("eval", {})),
         profiling=ProfilingConfig(**data.get("profiling", {})),
         precision=PrecisionConfig(**data.get("precision", {})),
         wandb=WandbConfig(**data.get("wandb", {})),

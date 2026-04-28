@@ -14,6 +14,7 @@ def write_config(
     precision_section: str = "",
     distributed_section: str = "",
     profiling_section: str = "",
+    eval_section: str = "",
 ):
     wandb_section = """
 [wandb]
@@ -42,6 +43,7 @@ tied = false
 {precision_section}
 {distributed_section}
 {profiling_section}
+{eval_section}
 
 [train]
 seed = 0
@@ -99,6 +101,8 @@ def test_load_config(tmp_path):
     assert config.profiling.start_step == 100
     assert config.profiling.steps == 5
     assert config.profiling.output_dir == "profiles"
+    assert config.eval.domain_root is None
+    assert config.eval.domain_eval_steps is None
     assert config.data.val_fraction == 0.25
     assert config.sampling.enabled is True
     assert config.sampling.prompt == "ROMEO:"
@@ -219,6 +223,23 @@ output_dir = "profiles/unit"
     assert config.profiling.start_step == 200
     assert config.profiling.steps == 7
     assert config.profiling.output_dir == "profiles/unit"
+
+
+def test_explicit_eval_config(tmp_path):
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        eval_section="""
+[eval]
+domain_root = "data/eval_domains/custom"
+domain_eval_steps = 25
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.eval.domain_root == "data/eval_domains/custom"
+    assert config.eval.domain_eval_steps == 25
 
 
 def test_jax_profiling_config_parses(tmp_path):

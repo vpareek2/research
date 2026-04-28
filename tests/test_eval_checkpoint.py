@@ -8,7 +8,8 @@ from flax import nnx
 
 from checkpoint import create_checkpoint_manager, save_checkpoint
 from config import DataConfig, ModelConfig, TrainConfig
-from data import make_dataloaders
+from data import REQUIRED_EVAL_DOMAINS, make_dataloaders
+from evals import LossEvalResult
 from model import Model
 from utils import eval_checkpoint
 
@@ -59,7 +60,35 @@ def write_manifest(data_dir):
     }))
 
 
-def write_run_config(run_dir, data_dir):
+def write_eval_domain_pack(root):
+    root.mkdir(parents=True)
+    np.ones(128, dtype=np.uint16).tofile(root / "token_bytes.bin")
+    domains = {}
+    for name in REQUIRED_EVAL_DOMAINS:
+        domain_dir = root / name
+        domain_dir.mkdir()
+        np.arange(32, dtype=np.uint32).tofile(domain_dir / "tokens.bin")
+        (domain_dir / "manifest.json").write_text(json.dumps({
+            "dtype": "uint32",
+            "num_tokens": 32,
+            "tokenizer": {"name": "gpt2"},
+            "files": {"tokens": {"path": "tokens.bin"}},
+            "splits": {
+                "train": {"start": 0, "end": 0, "tokens": 0},
+                "val": {"start": 0, "end": 32, "tokens": 32},
+            },
+        }))
+        domains[name] = {"path": name, "num_tokens": 32}
+    (root / "manifest.json").write_text(json.dumps({
+        "kind": "eval_domains",
+        "tokenizer": {"name": "gpt2"},
+        "files": {"token_bytes": {"path": "token_bytes.bin"}},
+        "domains": domains,
+    }))
+
+
+def write_run_config(run_dir, data_dir, eval_root=None):
+    eval_root = eval_root or run_dir.parent / "eval_domains"
     (run_dir / "config.toml").write_text(
         f"""
 [experiment]
@@ -100,6 +129,10 @@ keep_last = 2
 source = "tokens"
 path = "{data_dir}"
 tokenizer = "gpt2"
+
+[eval]
+domain_root = "{eval_root}"
+domain_eval_steps = 1
 """,
         encoding="utf-8",
     )
@@ -110,10 +143,12 @@ def make_run(tmp_path):
     data_dir.mkdir()
     np.arange(128, dtype=np.uint32).tofile(data_dir / "tokens.bin")
     write_manifest(data_dir)
+    eval_root = tmp_path / "eval_domains"
+    write_eval_domain_pack(eval_root)
 
     run_dir = tmp_path / "runs" / "unit"
     run_dir.mkdir(parents=True)
-    write_run_config(run_dir, data_dir)
+    write_run_config(run_dir, data_dir, eval_root)
 
     model_config = tiny_model_config()
     tc = train_config()
@@ -133,9 +168,26 @@ def make_run(tmp_path):
     return run_dir
 
 
+def fake_domain_results(*args, **kwargs):
+    return {
+        name: LossEvalResult(
+            loss=1.0,
+            ppl=2.0,
+            eval_steps=1,
+            examples=2,
+            tokens=16,
+            elapsed_sec=0.1,
+            bpb=0.5,
+            bytes=32,
+        )
+        for name in REQUIRED_EVAL_DOMAINS
+    }
+
+
 def test_eval_checkpoint_cli_writes_latest_eval_artifacts(tmp_path, monkeypatch):
     run_dir = make_run(tmp_path)
     monkeypatch.setattr(sys, "argv", ["eval-checkpoint", str(run_dir), "--eval-steps", "1"])
+    monkeypatch.setattr(eval_checkpoint, "evaluate_domain_losses", fake_domain_results)
 
     eval_checkpoint.main()
 
@@ -154,11 +206,14 @@ def test_eval_checkpoint_cli_writes_latest_eval_artifacts(tmp_path, monkeypatch)
     assert metrics["bpb"] > 0.0
     assert metrics["bytes"] > 0
     assert metrics["tokens_per_sec"] > 0.0
+    assert set(metrics["domains"]) == set(REQUIRED_EVAL_DOMAINS)
+    assert metrics["domains"]["web"]["loss"] > 0.0
 
 
 def test_eval_checkpoint_cli_supports_explicit_step(tmp_path, monkeypatch):
     run_dir = make_run(tmp_path)
     monkeypatch.setattr(sys, "argv", ["eval-checkpoint", str(run_dir), "--step", "1", "--eval-steps", "1"])
+    monkeypatch.setattr(eval_checkpoint, "evaluate_domain_losses", fake_domain_results)
 
     eval_checkpoint.main()
 
@@ -169,7 +224,9 @@ def test_eval_checkpoint_cli_supports_explicit_step(tmp_path, monkeypatch):
 def test_eval_checkpoint_missing_checkpoint_raises_clear_error(tmp_path):
     run_dir = tmp_path / "runs" / "unit"
     run_dir.mkdir(parents=True)
-    write_run_config(run_dir, tmp_path / "prepared")
+    eval_root = tmp_path / "eval_domains"
+    write_eval_domain_pack(eval_root)
+    write_run_config(run_dir, tmp_path / "prepared", eval_root)
 
     with pytest.raises(FileNotFoundError, match="No checkpoint"):
         eval_checkpoint.run_eval(run_dir, step=None, eval_steps=1)

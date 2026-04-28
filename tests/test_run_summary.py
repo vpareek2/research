@@ -127,6 +127,14 @@ def healthy_rows():
             "val/loss": 2.8,
             "val/ppl": 16.4,
             "val/bpb": 1.3,
+            "val/domain/web/loss": 3.2,
+            "val/domain/web/ppl": 24.5,
+            "val/domain/web/bpb": 1.6,
+            "val/domain/web/tokens": 16,
+            "val/domain/code/loss": 4.2,
+            "val/domain/code/ppl": 66.7,
+            "val/domain/code/bpb": 2.1,
+            "val/domain/code/tokens": 16,
             "train/tokens_seen": 64,
             "time/tokens_per_sec": 50.0,
             "time/train_tokens_per_sec": 60.0,
@@ -147,8 +155,20 @@ def test_summarize_run_computes_quality_health_speed_and_checkpoint_evals(tmp_pa
     eval_dir_2 = run_dir / "evals" / "step_3"
     eval_dir_1.mkdir(parents=True)
     eval_dir_2.mkdir(parents=True)
-    (eval_dir_1 / "metrics.json").write_text(json.dumps({"checkpoint_step": 1, "loss": 3.1, "ppl": 22.2, "bpb": 1.6}))
-    (eval_dir_2 / "metrics.json").write_text(json.dumps({"checkpoint_step": 3, "loss": 2.7, "ppl": 14.9, "bpb": 1.2}))
+    (eval_dir_1 / "metrics.json").write_text(json.dumps({
+        "checkpoint_step": 1,
+        "loss": 3.1,
+        "ppl": 22.2,
+        "bpb": 1.6,
+        "domains": {"web": {"loss": 3.3, "ppl": 27.1, "bpb": 1.7}},
+    }))
+    (eval_dir_2 / "metrics.json").write_text(json.dumps({
+        "checkpoint_step": 3,
+        "loss": 2.7,
+        "ppl": 14.9,
+        "bpb": 1.2,
+        "domains": {"web": {"loss": 3.0, "ppl": 20.1, "bpb": 1.5}},
+    }))
 
     summary = run_summary.summarize_run(run_dir)
 
@@ -171,6 +191,10 @@ def test_summarize_run_computes_quality_health_speed_and_checkpoint_evals(tmp_pa
     assert summary["checkpoint_evals"]["count"] == 2
     assert summary["checkpoint_evals"]["latest"]["checkpoint_step"] == 3
     assert summary["checkpoint_evals"]["best_loss"]["checkpoint_step"] == 3
+    assert summary["domain_validation"]["training"]["web"]["final_loss"] == 3.2
+    assert summary["domain_validation"]["training"]["web"]["best_bpb"] == 1.6
+    assert summary["domain_validation"]["checkpoint_evals"]["web"]["best_loss"]["checkpoint_step"] == 3
+    assert "Domain Validation" in run_summary.format_scorecard(summary)
     assert summary["status"] == "healthy"
     assert summary["decision_hint"] == "scale"
 

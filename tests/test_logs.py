@@ -158,11 +158,24 @@ def test_health_monitor_tracks_slopes_and_spikes():
     monitor = HealthMonitor()
     first = monitor.enrich({"step": 0, "train/loss": 1.0, "val/loss": 1.5, "train/grad_norm": 1.0, "train/param_norm": 10.0})
     second = monitor.enrich({"step": 1, "train/loss": 0.9, "val/loss": 1.4, "train/grad_norm": 0.9, "train/param_norm": 10.0})
-    spike = monitor.enrich({"step": 2, "train/loss": 10.0, "train/grad_norm": 10.0, "train/param_norm": 10.0})
 
     assert "health/train_loss_slope" not in first
     assert second["health/train_loss_slope"] < 0.0
     assert second["health/val_loss_slope"] < 0.0
+    for step in range(2, HealthMonitor.min_spike_history):
+        normal = monitor.enrich({"step": step, "train/loss": 0.8, "train/grad_norm": 0.8, "train/param_norm": 10.0})
+        assert normal["health/train_loss_spike"] == 0.0
+        assert normal["health/grad_norm_spike"] == 0.0
+
+    spike = monitor.enrich(
+        {
+            "step": HealthMonitor.min_spike_history,
+            "train/loss": 10.0,
+            "train/grad_norm": 10.0,
+            "train/param_norm": 10.0,
+        }
+    )
+
     assert spike["health/train_loss_spike"] == 1.0
     assert spike["health/grad_norm_spike"] == 1.0
     assert spike["health/loss_spike_count"] == 1
@@ -228,7 +241,22 @@ def test_wandb_first_run_logs_scalars_and_samples(tmp_path, monkeypatch):
     logger = setup_run(config_path, config)
     sample_path = logger.run_dir / "samples" / "sample_step_000000.txt"
     sample_path.write_text("sample text", encoding="utf-8")
-    logger.log({"step": 0, "train/loss": 1.0, "sample/path": str(sample_path)})
+    logger.log(
+        {
+            "step": 0,
+            "train/loss": 1.0,
+            "train/ppl": 2.7,
+            "val/loss": 1.5,
+            "val/ppl": 4.5,
+            "val/bpb": 0.9,
+            "val/tokens": 128,
+            "val/domain/web/loss": 1.6,
+            "val/domain/web/ppl": 5.0,
+            "val/domain/web/bpb": 1.0,
+            "val/domain/web/tokens": 128,
+            "sample/path": str(sample_path),
+        }
+    )
     logger.close()
 
     assert fake_wandb.login_calls == [{"key": "test-key"}]
@@ -240,6 +268,15 @@ def test_wandb_first_run_logs_scalars_and_samples(tmp_path, monkeypatch):
     first_log, first_step = fake_wandb.run.logs[0]
     assert first_step == 0
     assert first_log["train/loss"] == 1.0
+    assert first_log["val/loss"] == 1.5
+    assert first_log["val/bpb"] == 0.9
+    assert first_log["val/domain/web/loss"] == 1.6
+    assert "train/ppl" not in first_log
+    assert "val/ppl" not in first_log
+    assert "val/tokens" not in first_log
+    assert "val/domain/web/ppl" not in first_log
+    assert "val/domain/web/bpb" not in first_log
+    assert "val/domain/web/tokens" not in first_log
     assert first_log["time/log_sec"] >= 0.0
     sample_log, sample_step = fake_wandb.run.logs[1]
     assert sample_step == 0

@@ -131,3 +131,25 @@ def evaluate_loss(
         tokens=tokens,
         elapsed_sec=elapsed_sec,
     )
+
+
+def evaluate_domain_losses(
+    model: Model,
+    domain_iters: dict[str, Iterator[Batch]],
+    eval_steps: int,
+    distributed: DistributedContext,
+    *,
+    tokens_per_example: int,
+    token_bytes: jax.Array,
+) -> dict[str, LossEvalResult]:
+    return {
+        name: evaluate_loss(
+            model,
+            domain_iter,
+            eval_steps,
+            distributed,
+            tokens_per_example=tokens_per_example,
+            token_bytes=token_bytes,
+        )
+        for name, domain_iter in domain_iters.items()
+    }

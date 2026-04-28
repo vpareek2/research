@@ -55,6 +55,9 @@ source = "tokens"
 path = "data/tinystories_gpt2"
 tokenizer = "gpt2"
 
+[eval]
+domain_eval_steps = 10
+
 [sampling]
 enabled = false
 prompt = "Once upon a time"

@@ -12,9 +12,17 @@ import tiktoken
 
 from checkpoint import create_checkpoint_manager, restore_latest_checkpoint, save_checkpoint
 from config import RunConfig, load_config
-from data import load_token_bytes, make_dataloaders, make_val_dataloader
+from data import (
+    domain_eval_steps,
+    eval_domain_root,
+    load_eval_domain_token_bytes,
+    load_token_bytes,
+    make_dataloaders,
+    make_eval_domain_dataloaders,
+    make_val_dataloader,
+)
 from distributed import DistributedContext, create_distributed_context, place_replicated_state, shard_batch
-from evals import evaluate_loss, loss_with_bpb
+from evals import evaluate_domain_losses, evaluate_loss, loss_with_bpb
 from lr_schedule import build_lr_schedule, describe_lr_schedule
 from model import Model
 from logs import setup_run
@@ -90,6 +98,8 @@ def print_startup(config: RunConfig, *, resume: bool, distributed: DistributedCo
     print(f"precision:  compute={config.precision.compute_dtype} params={config.precision.param_dtype} loss={config.precision.loss_dtype}")
     print(f"profiling:  enabled={config.profiling.enabled} profiler={config.profiling.profiler}")
     print(f"eval:       every={config.train.eval_every} steps={config.train.eval_steps}")
+    domain_steps = config.eval.domain_eval_steps or config.train.eval_steps
+    print(f"domain eval: root={eval_domain_root(config.eval, config.data)} steps={domain_steps}")
     print(f"data:       {config.data.path} tokenizer={config.data.tokenizer} val_fraction={config.data.val_fraction}")
     print(f"samples:    {'on' if config.sampling.enabled else 'off'}")
     print(f"wandb:      {'on' if config.wandb.enabled else 'off'}")
@@ -165,6 +175,9 @@ def main():
     optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
     place_replicated_state(model, optimizer, distributed)
     token_bytes = jax.device_put(load_token_bytes(config.data), distributed.replicated_sharding)
+    domain_token_bytes = jax.device_put(load_eval_domain_token_bytes(config.eval, config.data), distributed.replicated_sharding)
+    domain_steps = domain_eval_steps(config.eval, train_config)
+    make_eval_domain_dataloaders(config.eval, config.data, train_config)
     train_iter, _ = make_dataloaders(config.data, train_config)
     checkpoint_manager = create_checkpoint_manager(logger.run_dir, train_config.keep_last)
 
@@ -229,9 +242,23 @@ def main():
                                 tokens_per_example=train_config.seq_len,
                                 token_bytes=token_bytes,
                             )
+                            domain_results = evaluate_domain_losses(
+                                model,
+                                make_eval_domain_dataloaders(config.eval, config.data, train_config),
+                                domain_steps,
+                                distributed,
+                                tokens_per_example=train_config.seq_len,
+                                token_bytes=domain_token_bytes,
+                            )
                         device_metrics["val/loss"] = val_result.loss
                         device_metrics["val/ppl"] = val_result.ppl
                         device_metrics["val/bpb"] = val_result.bpb
+                        for name, result in domain_results.items():
+                            prefix = f"val/domain/{name}"
+                            device_metrics[f"{prefix}/loss"] = result.loss
+                            device_metrics[f"{prefix}/ppl"] = result.ppl
+                            device_metrics[f"{prefix}/bpb"] = result.bpb
+                            device_metrics[f"{prefix}/tokens"] = result.tokens
 
                     with trace_profiler.annotate("metrics_sync"), timer.phase("metrics_sync"):
                         metrics = {

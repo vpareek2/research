@@ -55,6 +55,9 @@ path = "data/tiny_shakespeare/input.txt"
 tokenizer = "gpt2"
 val_fraction = 0.1
 
+[eval]
+domain_eval_steps = 10
+
 [sampling]
 enabled = true
 prompt = "ROMEO:"

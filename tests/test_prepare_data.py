@@ -3,16 +3,22 @@ import sys
 import types
 
 import numpy as np
+import pytest
 import tiktoken
 
+from data import REQUIRED_EVAL_DOMAINS
 from prepare_data import (
+    DomainConfig,
     HfConfig,
     OutputConfig,
     PrepareConfig,
     SourceConfig,
     TokenizerConfig,
     load_texts,
+    load_hf_texts,
     load_prepare_config,
+    prepare_dataset,
+    prepare_eval_domains,
     prepare_texts,
     resolve_hf_token,
 )
@@ -186,3 +192,143 @@ def test_resolve_hf_token_saves_prompted_token(monkeypatch):
     assert token == "prompt-token"
     assert source == "prompt"
     assert login_calls == [{"token": "prompt-token", "skip_if_logged_in": True}]
+
+
+def test_prepare_eval_domains_writes_pack_manifest_and_domain_artifacts(tmp_path):
+    source_path = tmp_path / "domain.txt"
+    source_path.write_text("hello world\n" * 50, encoding="utf-8")
+    output_dir = tmp_path / "eval_domains"
+    config = PrepareConfig(
+        kind="eval_domains",
+        tokenizer=TokenizerConfig(name="gpt2", append_eot=True),
+        output=OutputConfig(path=str(output_dir), tokens_per_domain=32),
+        domains=[
+            DomainConfig(name=name, source=SourceConfig(type="text", path=str(source_path)))
+            for name in REQUIRED_EVAL_DOMAINS
+        ],
+    )
+
+    manifest = prepare_eval_domains(config)
+
+    assert manifest["kind"] == "eval_domains"
+    assert manifest["required_domains"] == list(REQUIRED_EVAL_DOMAINS)
+    assert manifest["files"]["token_bytes"]["path"] == "token_bytes.bin"
+    assert set(manifest["domains"]) == set(REQUIRED_EVAL_DOMAINS)
+    assert (output_dir / "token_bytes.bin").exists()
+    for name in REQUIRED_EVAL_DOMAINS:
+        domain_dir = output_dir / name
+        domain_manifest = json.loads((domain_dir / "manifest.json").read_text(encoding="utf-8"))
+        tokens = np.memmap(domain_dir / "tokens.bin", dtype=np.uint32, mode="r")
+        assert len(tokens) == 32
+        assert domain_manifest["kind"] == "eval_domain"
+        assert domain_manifest["domain"] == name
+        assert domain_manifest["splits"]["train"] == {"start": 0, "end": 0, "tokens": 0}
+        assert domain_manifest["splits"]["val"] == {"start": 0, "end": 32, "tokens": 32}
+
+
+def test_prepare_eval_domains_requires_exact_domain_panel(tmp_path):
+    source_path = tmp_path / "domain.txt"
+    source_path.write_text("hello world\n", encoding="utf-8")
+
+    domains = [
+        DomainConfig(name=name, source=SourceConfig(type="text", path=str(source_path)))
+        for name in REQUIRED_EVAL_DOMAINS[:-1]
+    ]
+
+    with pytest.raises(ValueError, match="missing"):
+        PrepareConfig(
+            kind="eval_domains",
+            tokenizer=TokenizerConfig(name="gpt2"),
+            output=OutputConfig(path=str(tmp_path / "out"), tokens_per_domain=8),
+            domains=domains,
+        )
+
+
+def test_load_prepare_config_parses_eval_domain_config_and_hf_subset(tmp_path):
+    path = tmp_path / "eval_domains.toml"
+    domain_sections = []
+    for name in REQUIRED_EVAL_DOMAINS:
+        domain_sections.append(
+            f"""
+[[domain]]
+name = "{name}"
+source.type = "hf"
+source.dataset = "fake/dataset"
+source.subset = "subset-name"
+source.data_dir = "data/python"
+source.split = "train"
+source.text_column = "text"
+"""
+        )
+    path.write_text(
+        f"""
+kind = "eval_domains"
+
+[tokenizer]
+name = "gpt2"
+
+[output]
+path = "{tmp_path / 'out'}"
+tokens_per_domain = 8
+
+{''.join(domain_sections)}
+""",
+        encoding="utf-8",
+    )
+
+    config = load_prepare_config(path)
+
+    assert config.kind == "eval_domains"
+    assert config.domains[0].source.subset == "subset-name"
+    assert config.domains[0].source.data_dir == "data/python"
+
+
+def test_hf_subset_is_passed_to_load_dataset(monkeypatch):
+    calls = []
+
+    class FakeDataset:
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, idx):
+            return {"text": "hello"}
+
+    fake_datasets = types.SimpleNamespace(
+        load_dataset=lambda *args, **kwargs: calls.append((args, kwargs)) or FakeDataset()
+    )
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+
+    texts = load_hf_texts(SourceConfig(type="hf", dataset="fake/dataset", subset="subset-name", split="train"), token=None)
+
+    assert list(texts) == ["hello"]
+    assert calls == [(("fake/dataset", "subset-name"), {"split": "train", "token": None, "streaming": False})]
+
+
+def test_hf_data_dir_is_passed_to_load_dataset(monkeypatch):
+    calls = []
+
+    class FakeDataset:
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, idx):
+            return {"content": "print('hello')"}
+
+    fake_datasets = types.SimpleNamespace(
+        load_dataset=lambda *args, **kwargs: calls.append((args, kwargs)) or FakeDataset()
+    )
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+
+    texts = load_hf_texts(
+        SourceConfig(
+            type="hf",
+            dataset="bigcode/the-stack-dedup",
+            data_dir="data/python",
+            split="train",
+            text_column="content",
+        ),
+        token="token",
+    )
+
+    assert list(texts) == ["print('hello')"]
+    assert calls == [(("bigcode/the-stack-dedup",), {"split": "train", "token": "token", "streaming": False, "data_dir": "data/python"})]

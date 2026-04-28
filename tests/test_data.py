@@ -1,11 +1,26 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
 import tiktoken
 
-from config import DataConfig, TrainConfig
-from data import TokenDataset, TokenMemmapDataset, build_token_bytes, load_token_bytes, make_dataloaders, make_val_dataloader, split_tokens
+from config import DataConfig, EvalConfig, TrainConfig
+from data import (
+    REQUIRED_EVAL_DOMAINS,
+    TokenDataset,
+    TokenMemmapDataset,
+    build_token_bytes,
+    default_eval_domain_root,
+    eval_domain_root,
+    load_eval_domain_token_bytes,
+    load_token_bytes,
+    make_dataloaders,
+    make_eval_domain_dataloaders,
+    make_val_dataloader,
+    split_tokens,
+    validate_eval_domain_pack,
+)
 
 
 def train_config(**overrides):
@@ -47,6 +62,24 @@ def write_manifest(data_dir, *, num_tokens=128, train=(0, 64), val=(64, 128), to
             "train": {"start": train[0], "end": train[1], "tokens": train[1] - train[0]},
             "val": {"start": val[0], "end": val[1], "tokens": val[1] - val[0]},
         },
+    }))
+
+
+def write_eval_domain_pack(root, *, tokenizer="gpt2", tokens_per_domain=32):
+    root.mkdir(parents=True)
+    np.arange(128, dtype=np.uint16).tofile(root / "token_bytes.bin")
+    domains = {}
+    for name in REQUIRED_EVAL_DOMAINS:
+        domain_dir = root / name
+        domain_dir.mkdir()
+        np.arange(tokens_per_domain, dtype=np.uint32).tofile(domain_dir / "tokens.bin")
+        write_manifest(domain_dir, num_tokens=tokens_per_domain, train=(0, 0), val=(0, tokens_per_domain), tokenizer=tokenizer)
+        domains[name] = {"path": name, "num_tokens": tokens_per_domain}
+    (root / "manifest.json").write_text(json.dumps({
+        "kind": "eval_domains",
+        "tokenizer": {"name": tokenizer},
+        "files": {"token_bytes": {"path": "token_bytes.bin"}},
+        "domains": domains,
     }))
 
 
@@ -93,6 +126,17 @@ def test_load_token_bytes_prefers_prepared_table(tmp_path):
     dc = DataConfig(source="tokens", path=str(data_dir), tokenizer="gpt2")
 
     np.testing.assert_array_equal(load_token_bytes(dc), expected)
+
+
+def test_default_eval_domain_root_uses_tokenizer_name():
+    assert default_eval_domain_root("gpt2") == Path("data/eval_domains/gpt2")
+    assert default_eval_domain_root("org/tokenizer") == Path("data/eval_domains/org__tokenizer")
+
+
+def test_eval_domain_root_allows_config_override():
+    dc = DataConfig(source="tokens", path="data/prepared", tokenizer="gpt2")
+
+    assert eval_domain_root(EvalConfig(domain_root="custom/eval"), dc) == Path("custom/eval")
 
 
 def test_dataloaders_shapes_and_val_determinism(tmp_path):
@@ -191,3 +235,53 @@ def test_prepared_token_manifest_missing_token_file_raises(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="token file"):
         make_dataloaders(dc, tc)
+
+
+def test_eval_domain_pack_validation_and_dataloaders(tmp_path):
+    eval_root = tmp_path / "eval_domains"
+    write_eval_domain_pack(eval_root, tokens_per_domain=64)
+    dc = DataConfig(source="tokens", path=str(tmp_path / "prepared"), tokenizer="gpt2")
+    ec = EvalConfig(domain_root=str(eval_root), domain_eval_steps=2)
+    tc = train_config(batch_size=2, seq_len=8)
+
+    manifest = validate_eval_domain_pack(ec, dc)
+    dataloaders = make_eval_domain_dataloaders(ec, dc, tc)
+    token_bytes = load_eval_domain_token_bytes(ec, dc)
+
+    assert set(manifest["domains"]) == set(REQUIRED_EVAL_DOMAINS)
+    assert set(dataloaders) == set(REQUIRED_EVAL_DOMAINS)
+    assert token_bytes.dtype == np.uint16
+    batch = next(dataloaders["web"])
+    assert batch["input_ids"].shape == (tc.batch_size, tc.seq_len)
+
+
+def test_eval_domain_pack_uses_default_root_when_unset(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    eval_root = default_eval_domain_root("gpt2")
+    write_eval_domain_pack(eval_root, tokens_per_domain=64)
+    dc = DataConfig(source="tokens", path=str(tmp_path / "prepared"), tokenizer="gpt2")
+    tc = train_config(batch_size=2, seq_len=8)
+
+    dataloaders = make_eval_domain_dataloaders(EvalConfig(domain_eval_steps=2), dc, tc)
+
+    assert set(dataloaders) == set(REQUIRED_EVAL_DOMAINS)
+
+
+def test_eval_domain_pack_tokenizer_mismatch_raises(tmp_path):
+    eval_root = tmp_path / "eval_domains"
+    write_eval_domain_pack(eval_root, tokenizer="cl100k_base")
+    dc = DataConfig(source="tokens", path=str(tmp_path / "prepared"), tokenizer="gpt2")
+
+    with pytest.raises(ValueError, match="tokenizer"):
+        validate_eval_domain_pack(EvalConfig(domain_root=str(eval_root)), dc)
+
+
+def test_eval_domain_pack_insufficient_tokens_raises(tmp_path):
+    eval_root = tmp_path / "eval_domains"
+    write_eval_domain_pack(eval_root, tokens_per_domain=8)
+    dc = DataConfig(source="tokens", path=str(tmp_path / "prepared"), tokenizer="gpt2")
+    ec = EvalConfig(domain_root=str(eval_root), domain_eval_steps=2)
+    tc = train_config(batch_size=2, seq_len=8)
+
+    with pytest.raises(ValueError, match="Eval domain"):
+        make_eval_domain_dataloaders(ec, dc, tc)

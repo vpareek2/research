@@ -12,11 +12,27 @@ import jax
 import numpy as np
 import tiktoken
 
-from config import DataConfig, TrainConfig
+from config import DataConfig, EvalConfig, TrainConfig
 
 
 Batch = dict[str, jax.Array]
 TOKEN_BYTES_FILENAME = "token_bytes.bin"
+DEFAULT_EVAL_DOMAIN_ROOT = Path("data") / "eval_domains"
+REQUIRED_EVAL_DOMAINS = ("web", "knowledge", "books", "news", "code", "math", "reasoning", "docs", "dialogue")
+
+
+def tokenizer_path_name(tokenizer_name: str) -> str:
+    return tokenizer_name.replace("/", "__")
+
+
+def default_eval_domain_root(tokenizer_name: str) -> Path:
+    return DEFAULT_EVAL_DOMAIN_ROOT / tokenizer_path_name(tokenizer_name)
+
+
+def eval_domain_root(eval_config: EvalConfig, data_config: DataConfig) -> Path:
+    if eval_config.domain_root is not None:
+        return Path(eval_config.domain_root)
+    return default_eval_domain_root(data_config.tokenizer)
 
 
 class TokenDataset:
@@ -119,6 +135,54 @@ def load_token_bytes(data_config: DataConfig) -> np.ndarray:
 def load_token_manifest(path: str | Path) -> dict:
     with (Path(path) / "manifest.json").open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_eval_domain_manifest(eval_root: str | Path) -> dict:
+    with (Path(eval_root) / "manifest.json").open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def validate_eval_domain_pack(eval_config: EvalConfig, data_config: DataConfig) -> dict:
+    eval_root = eval_domain_root(eval_config, data_config)
+    manifest = load_eval_domain_manifest(eval_root)
+    if manifest.get("kind") != "eval_domains":
+        raise ValueError(f"Eval domain manifest kind must be eval_domains, got {manifest.get('kind')!r}")
+
+    manifest_tokenizer = manifest.get("tokenizer", {}).get("name")
+    if manifest_tokenizer != data_config.tokenizer:
+        raise ValueError(
+            f"Eval domain tokenizer {manifest_tokenizer!r} does not match data tokenizer {data_config.tokenizer!r}"
+        )
+
+    domains = manifest.get("domains", {})
+    domain_names = set(domains)
+    required = set(REQUIRED_EVAL_DOMAINS)
+    if domain_names != required:
+        missing = sorted(required - domain_names)
+        extra = sorted(domain_names - required)
+        raise ValueError(f"Eval domain pack must contain exactly {sorted(required)}; missing={missing}, extra={extra}")
+
+    for name in REQUIRED_EVAL_DOMAINS:
+        domain = domains[name]
+        domain_path = eval_root / domain["path"]
+        token_path = domain_path / "tokens.bin"
+        manifest_path = domain_path / "manifest.json"
+        if not token_path.exists():
+            raise FileNotFoundError(f"Eval domain token file does not exist: {token_path}")
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Eval domain manifest does not exist: {manifest_path}")
+
+    return manifest
+
+
+def load_eval_domain_token_bytes(eval_config: EvalConfig, data_config: DataConfig) -> np.ndarray:
+    manifest = validate_eval_domain_pack(eval_config, data_config)
+    token_bytes_path = manifest.get("files", {}).get("token_bytes", {}).get("path")
+    if token_bytes_path is not None:
+        return np.fromfile(eval_domain_root(eval_config, data_config) / token_bytes_path, dtype=np.uint16)
+
+    tokenizer = tiktoken.get_encoding(data_config.tokenizer)
+    return build_token_bytes(tokenizer)
 
 
 def validate_token_manifest(
@@ -300,3 +364,35 @@ def make_val_dataloader(
         shuffle=False,
         repeat=False,
     )
+
+
+def domain_eval_steps(eval_config: EvalConfig, train_config: TrainConfig) -> int:
+    return eval_config.domain_eval_steps or train_config.eval_steps
+
+
+def make_eval_domain_dataloaders(
+    eval_config: EvalConfig,
+    data_config: DataConfig,
+    train_config: TrainConfig,
+) -> dict[str, Iterator[Batch]]:
+    manifest = validate_eval_domain_pack(eval_config, data_config)
+    eval_root = eval_domain_root(eval_config, data_config)
+    eval_steps = domain_eval_steps(eval_config, train_config)
+    required_examples = eval_steps * train_config.batch_size
+    dataloaders = {}
+
+    for name in REQUIRED_EVAL_DOMAINS:
+        domain = manifest["domains"][name]
+        domain_path = eval_root / domain["path"]
+        domain_manifest = load_token_manifest(domain_path)
+        token_path = domain_path / domain_manifest["files"]["tokens"]["path"]
+        num_tokens = int(domain_manifest["num_tokens"])
+        dataset = TokenMemmapDataset(token_path, train_config.seq_len, start=0, end=num_tokens)
+        if len(dataset) < required_examples:
+            raise ValueError(
+                f"Eval domain {name!r} has {len(dataset)} examples, but eval requires "
+                f"{required_examples} examples ({eval_steps=} * {train_config.batch_size=})"
+            )
+        dataloaders[name] = _make_iter(dataset, train_config.batch_size, seed=None, shuffle=False, repeat=False)
+
+    return dataloaders

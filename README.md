@@ -191,6 +191,51 @@ Prepared data also stores `token_bytes.bin`, a tokenizer byte-length lookup used
 for BPB metrics. Older prepared datasets without this file still work; the table
 is regenerated from the tokenizer at startup.
 
+### Domain Validation
+
+Domain validation data is a shared artifact prepared once per tokenizer. The
+domain pack path is tokenizer-derived by default:
+
+```text
+data/eval_domains/<tokenizer>/
+```
+
+For example, `tokenizer.name = "gpt2"` uses:
+
+```text
+data/eval_domains/gpt2/
+```
+
+Training and checkpoint evals require this pack and infer the path from
+`[data].tokenizer` unless `[eval].domain_root` overrides it. The v1 domain panel
+is fixed:
+
+```text
+web, knowledge, books, news, code, math, reasoning, docs, dialogue
+```
+
+The reusable eval source panel lives in `configs/data/eval_domains.toml`.
+Prepare it before launching runs:
+
+```bash
+uv run prepare-data configs/data/eval_domains.toml
+```
+
+The normal workflow is:
+
+```bash
+uv run prepare-data configs/data/eval_domains.toml
+uv run prepare-data configs/data/tinystories.toml
+uv run pretrain configs/tinystories_soak.toml
+```
+
+The first command writes `data/eval_domains/gpt2/`. The second writes
+`data/tinystories_gpt2/`. Pretraining infers the eval pack path from
+`[data].tokenizer`, unless `[eval].domain_root` overrides it.
+
+Training logs `val/domain/<domain>/loss`, `ppl`, `bpb`, and `tokens` to
+`metrics.jsonl` and W&B; the console table stays compact.
+
 ## Run Training
 
 ```bash

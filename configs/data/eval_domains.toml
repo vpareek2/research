@@ -1,0 +1,92 @@
+kind = "eval_domains"
+
+[hf]
+prompt_for_token = true
+token_env = "HF_TOKEN"
+
+[tokenizer]
+name = "gpt2"
+append_eot = true
+
+[output]
+path = "data/eval_domains/gpt2"
+dtype = "uint32"
+tokens_per_domain = 250000
+
+[[domain]]
+name = "web"
+source.type = "hf"
+source.dataset = "HuggingFaceFW/fineweb"
+source.subset = "sample-10BT"
+source.split = "train"
+source.text_column = "text"
+source.streaming = true
+
+[[domain]]
+name = "knowledge"
+source.type = "hf"
+source.dataset = "HuggingFaceFW/finewiki"
+source.subset = "en"
+source.split = "train"
+source.text_column = "text"
+source.streaming = true
+
+[[domain]]
+name = "books"
+source.type = "hf"
+source.dataset = "Nelathan/standardebooks"
+source.split = "train"
+source.text_column = "text"
+source.streaming = true
+
+[[domain]]
+name = "news"
+source.type = "hf"
+source.dataset = "allenai/c4"
+source.subset = "realnewslike"
+source.split = "train"
+source.text_column = "text"
+source.streaming = true
+
+[[domain]]
+name = "code"
+source.type = "hf"
+source.dataset = "bigcode/the-stack-dedup"
+source.data_dir = "data/python"
+source.split = "train"
+source.text_column = "content"
+source.streaming = true
+
+[[domain]]
+name = "math"
+source.type = "hf"
+source.dataset = "open-web-math/open-web-math"
+source.split = "train"
+source.text_column = "text"
+source.streaming = true
+
+[[domain]]
+name = "reasoning"
+source.type = "hf"
+source.dataset = "allenai/big-reasoning-traces"
+source.subset = "DeepSeek"
+source.split = "train"
+source.text_column = "text"
+source.streaming = true
+
+[[domain]]
+name = "docs"
+source.type = "hf"
+source.dataset = "HuggingFaceFW/finepdfs"
+source.subset = "eng_Latn"
+source.split = "train"
+source.text_column = "text"
+source.streaming = true
+
+[[domain]]
+name = "dialogue"
+source.type = "hf"
+source.dataset = "OpenAssistant/oasst1"
+source.split = "train"
+source.text_column = "text"
+source.streaming = true

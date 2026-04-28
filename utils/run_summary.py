@@ -57,6 +57,7 @@ def summarize_run(run_dir: str | Path) -> dict[str, Any]:
     health = _health_summary(rows)
     quality = _quality_summary(rows, val_rows)
     checkpoint_evals = _checkpoint_eval_summary(eval_rows)
+    domain_validation = _domain_validation_summary(rows, eval_rows)
     status, decision_hint = _verdict(config, rows, final_row, val_rows, health)
 
     summary = {
@@ -98,6 +99,7 @@ def summarize_run(run_dir: str | Path) -> dict[str, Any]:
             "final_elapsed_sec": _number_or_none(final_row.get("time/elapsed_sec")),
         },
         "checkpoint_evals": checkpoint_evals,
+        "domain_validation": domain_validation,
         "status": status,
         "decision_hint": decision_hint,
     }
@@ -113,6 +115,7 @@ def format_scorecard(summary: dict[str, Any]) -> str:
     health = summary["health"]
     speed = summary["speed"]
     evals = summary["checkpoint_evals"]
+    domains = summary.get("domain_validation", {})
 
     lines = [
         "# Run Scorecard",
@@ -182,6 +185,26 @@ def format_scorecard(summary: dict[str, Any]) -> str:
                 f"- best_bpb: `{_format_optional(best_bpb_eval.get('bpb'))}`",
             ]
         )
+
+    training_domains = domains.get("training", {})
+    if training_domains:
+        lines.extend(
+            [
+                "",
+                "## Domain Validation",
+                "",
+                f"{'domain':<12} {'final_loss':>12} {'best_loss':>12} {'final_bpb':>12} {'best_bpb':>12}",
+                "-" * 64,
+            ]
+        )
+        for name, domain in training_domains.items():
+            lines.append(
+                f"{name:<12} "
+                f"{_format_optional(domain.get('final_loss')):>12} "
+                f"{_format_optional(domain.get('best_loss')):>12} "
+                f"{_format_optional(domain.get('final_bpb')):>12} "
+                f"{_format_optional(domain.get('best_bpb')):>12}"
+            )
 
     return "\n".join(lines) + "\n"
 
@@ -297,6 +320,45 @@ def _checkpoint_eval_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "latest": rows[-1] if rows else None,
         "best_loss": min(finite_loss_rows, key=lambda row: float(row["loss"])) if finite_loss_rows else None,
         "best_bpb": min(finite_bpb_rows, key=lambda row: float(row["bpb"])) if finite_bpb_rows else None,
+    }
+
+
+def _domain_validation_summary(rows: list[dict[str, Any]], eval_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    names = sorted(
+        {
+            parts[2]
+            for row in rows
+            for key in row
+            if (parts := key.split("/")) and len(parts) == 4 and parts[:2] == ["val", "domain"]
+        }
+    )
+    training = {}
+    for name in names:
+        prefix = f"val/domain/{name}"
+        training[name] = {
+            "final_loss": _last_metric(rows, f"{prefix}/loss"),
+            "best_loss": _min_metric(rows, f"{prefix}/loss"),
+            "final_ppl": _last_metric(rows, f"{prefix}/ppl"),
+            "final_bpb": _last_metric(rows, f"{prefix}/bpb"),
+            "best_bpb": _min_metric(rows, f"{prefix}/bpb"),
+            "final_tokens": _last_metric(rows, f"{prefix}/tokens"),
+        }
+
+    checkpoint_names = sorted({name for row in eval_rows for name in row.get("domains", {})})
+    checkpoint_evals = {}
+    for name in checkpoint_names:
+        domain_rows = [row["domains"][name] | {"checkpoint_step": row.get("checkpoint_step")} for row in eval_rows if name in row.get("domains", {})]
+        finite_loss_rows = [row for row in domain_rows if _is_finite(row.get("loss"))]
+        finite_bpb_rows = [row for row in domain_rows if _is_finite(row.get("bpb"))]
+        checkpoint_evals[name] = {
+            "latest": domain_rows[-1] if domain_rows else None,
+            "best_loss": min(finite_loss_rows, key=lambda row: float(row["loss"])) if finite_loss_rows else None,
+            "best_bpb": min(finite_bpb_rows, key=lambda row: float(row["bpb"])) if finite_bpb_rows else None,
+        }
+
+    return {
+        "training": training,
+        "checkpoint_evals": checkpoint_evals,
     }
 
 

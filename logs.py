@@ -33,6 +33,7 @@ class HealthMonitor:
     train_slope_window = 100
     val_slope_window = 5
     spike_window = 128
+    min_spike_history = 8
     spike_threshold_std = 6.0
 
     def __init__(self):
@@ -104,7 +105,7 @@ class HealthMonitor:
 
     def _is_spike(self, value: float, history: list[float]) -> bool:
         window = history[-self.spike_window :]
-        if len(window) < 2:
+        if len(window) < self.min_spike_history:
             return False
         mean = sum(window) / len(window)
         variance = sum((item - mean) ** 2 for item in window) / len(window)
@@ -140,7 +141,7 @@ class RunLogger:
         wandb_metrics = {
             key: value
             for key, value in metrics.items()
-            if key != "step" and key != "sample/path" and _is_scalar(value)
+            if _should_log_to_wandb(key, value)
         }
         if wandb_metrics:
             self._wandb_run.log(wandb_metrics, step=step)
@@ -271,6 +272,25 @@ def _is_scalar(value: Any) -> bool:
     if isinstance(value, np.generic):
         return True
     return False
+
+
+def _should_log_to_wandb(key: str, value: Any) -> bool:
+    if key in {"step", "sample/path"} or not _is_scalar(value):
+        return False
+    if key.endswith("/ppl"):
+        return False
+    if key.startswith("val/domain/") and not key.endswith("/loss"):
+        return False
+    if key.startswith("val/") and key.rsplit("/", 1)[-1] in {
+        "bytes",
+        "elapsed_sec",
+        "eval_steps",
+        "examples",
+        "tokens",
+        "tokens_per_sec",
+    }:
+        return False
+    return True
 
 
 def _finite_float(value: Any) -> float | None:

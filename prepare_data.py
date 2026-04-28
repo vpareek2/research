@@ -19,16 +19,19 @@ import numpy as np
 import tiktoken
 from tqdm.auto import tqdm
 
-from data import TOKEN_BYTES_FILENAME, build_token_bytes
+from data import REQUIRED_EVAL_DOMAINS, TOKEN_BYTES_FILENAME, build_token_bytes
 
 
 @dataclass
 class SourceConfig:
     type: str
     dataset: str | None = None
+    subset: str | None = None
+    data_dir: str | None = None
     split: str | None = None
     text_column: str = "text"
     path: str | None = None
+    streaming: bool = False
 
 
 @dataclass
@@ -48,20 +51,40 @@ class OutputConfig:
     path: str
     dtype: str = "uint32"
     val_fraction: float = 0.001
+    tokens_per_domain: int | None = None
+    seed: int = 0
 
     def __post_init__(self):
         if self.dtype != "uint32":
             raise ValueError(f"Only uint32 prepared token dtype is supported, got {self.dtype}")
         if not 0.0 < self.val_fraction < 1.0:
             raise ValueError(f"val_fraction must be between 0 and 1, got {self.val_fraction}")
+        if self.tokens_per_domain is not None and self.tokens_per_domain <= 0:
+            raise ValueError(f"tokens_per_domain must be positive, got {self.tokens_per_domain}")
+
+
+@dataclass
+class DomainConfig:
+    name: str
+    source: SourceConfig
 
 
 @dataclass
 class PrepareConfig:
-    source: SourceConfig
     tokenizer: TokenizerConfig
     output: OutputConfig
+    source: SourceConfig | None = None
+    kind: str = "dataset"
+    domains: list[DomainConfig] = field(default_factory=list)
     hf: HfConfig = field(default_factory=HfConfig)
+
+    def __post_init__(self):
+        if self.kind not in {"dataset", "eval_domains"}:
+            raise ValueError(f"Unknown prepare-data kind: {self.kind}")
+        if self.kind == "dataset" and self.source is None:
+            raise ValueError("Dataset preparation requires [source]")
+        if self.kind == "eval_domains":
+            _validate_eval_domain_configs(self.domains)
 
 
 class TextColumnSequence:
@@ -72,6 +95,16 @@ class TextColumnSequence:
     def __len__(self) -> int:
         return len(self.dataset)
 
+    def __iter__(self):
+        try:
+            size = len(self.dataset)
+        except TypeError:
+            for item in self.dataset:
+                yield item[self.text_column]
+        else:
+            for idx in range(size):
+                yield self[idx]
+
     def __getitem__(self, idx: int) -> str:
         return self.dataset[idx][self.text_column]
 
@@ -80,10 +113,16 @@ def load_prepare_config(path: str | Path) -> PrepareConfig:
     with open(path, "rb") as f:
         data = tomllib.load(f)
 
+    domains = [
+        DomainConfig(name=item["name"], source=SourceConfig(**item["source"]))
+        for item in data.get("domain", [])
+    ]
     return PrepareConfig(
-        source=SourceConfig(**data["source"]),
+        kind=data.get("kind", "dataset"),
+        source=SourceConfig(**data["source"]) if "source" in data else None,
         tokenizer=TokenizerConfig(**data["tokenizer"]),
         output=OutputConfig(**data["output"]),
+        domains=domains,
         hf=HfConfig(**data.get("hf", {})),
     )
 
@@ -106,7 +145,18 @@ def load_hf_texts(config: SourceConfig, *, token: str | None) -> Iterable[str]:
         raise ValueError("HF source requires dataset and split")
     from datasets import load_dataset
 
-    dataset = load_dataset(config.dataset, split=config.split, token=token)
+    kwargs = {
+        "split": config.split,
+        "token": token,
+        "streaming": config.streaming,
+    }
+    if config.data_dir is not None:
+        kwargs["data_dir"] = config.data_dir
+
+    if config.subset is None:
+        dataset = load_dataset(config.dataset, **kwargs)
+    else:
+        dataset = load_dataset(config.dataset, config.subset, **kwargs)
     return TextColumnSequence(dataset, config.text_column)
 
 
@@ -147,6 +197,10 @@ def _save_hf_token(token: str):
 
 
 def prepare_dataset(config: PrepareConfig):
+    if config.kind == "eval_domains":
+        return prepare_eval_domains(config)
+
+    assert config.source is not None
     print("Preparing dataset")
     print(f"source: {config.source.type}")
     if config.source.type == "hf":
@@ -167,6 +221,7 @@ def prepare_dataset(config: PrepareConfig):
 
 
 def prepare_texts(texts: Iterable[str], config: PrepareConfig, *, hf_auth: str = "not_applicable") -> dict:
+    assert config.source is not None
     tokenizer = tiktoken.get_encoding(config.tokenizer.name)
     output_dir = Path(config.output.path)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -191,6 +246,8 @@ def prepare_texts(texts: Iterable[str], config: PrepareConfig, *, hf_auth: str =
         "source": {
             "type": config.source.type,
             "dataset": config.source.dataset,
+            "subset": config.source.subset,
+            "data_dir": config.source.data_dir,
             "split": config.source.split,
             "text_column": config.source.text_column,
             "path": config.source.path,
@@ -219,6 +276,104 @@ def prepare_texts(texts: Iterable[str], config: PrepareConfig, *, hf_auth: str =
     print("Writing manifest...")
     manifest_path = output_dir / "manifest.json"
     with manifest_path.open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+    return manifest
+
+
+def prepare_eval_domains(config: PrepareConfig) -> dict:
+    if config.output.tokens_per_domain is None:
+        raise ValueError("eval_domains preparation requires output.tokens_per_domain")
+
+    print("Preparing eval domain pack")
+    print(f"output: {config.output.path}")
+    print(f"tokenizer: {config.tokenizer.name} append_eot={config.tokenizer.append_eot}")
+    print(f"tokens_per_domain: {config.output.tokens_per_domain}")
+
+    tokenizer = tiktoken.get_encoding(config.tokenizer.name)
+    output_dir = Path(config.output.path)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    token_bytes_path = output_dir / TOKEN_BYTES_FILENAME
+
+    print("Writing token byte table...")
+    build_token_bytes(tokenizer).tofile(token_bytes_path)
+
+    hf_auth = "not_applicable"
+    token = None
+    if any(domain.source.type == "hf" for domain in config.domains):
+        token, hf_auth = resolve_hf_token(config.hf)
+        print(f"hf_auth: {hf_auth}")
+
+    domains = {}
+    domain_by_name = {domain.name: domain for domain in config.domains}
+    for name in REQUIRED_EVAL_DOMAINS:
+        domain = domain_by_name[name]
+        domain_dir = output_dir / name
+        domain_dir.mkdir(parents=True, exist_ok=True)
+        tokens_path = domain_dir / "tokens.bin"
+        print(f"Writing domain {name}...")
+        texts = load_hf_texts(domain.source, token=token) if domain.source.type == "hf" else load_texts(domain.source)
+        token_count = _write_limited_tokens_bin(
+            texts,
+            tokenizer=tokenizer,
+            append_eot=config.tokenizer.append_eot,
+            tokens_path=tokens_path,
+            max_tokens=config.output.tokens_per_domain,
+        )
+
+        domain_manifest = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "kind": "eval_domain",
+            "domain": name,
+            "source": _source_manifest(domain.source),
+            "tokenizer": {
+                "name": config.tokenizer.name,
+                "append_eot": config.tokenizer.append_eot,
+                "eot_token": tokenizer.eot_token,
+            },
+            "dtype": config.output.dtype,
+            "num_tokens": token_count,
+            "splits": {
+                "train": {"start": 0, "end": 0, "tokens": 0},
+                "val": {"start": 0, "end": token_count, "tokens": token_count},
+            },
+            "files": {
+                "tokens": {"path": "tokens.bin", "sha256": _sha256(tokens_path, desc=f"Hashing {name}/tokens.bin")},
+            },
+        }
+        with (domain_dir / "manifest.json").open("w", encoding="utf-8") as f:
+            json.dump(domain_manifest, f, indent=2, sort_keys=True)
+            f.write("\n")
+
+        domains[name] = {
+            "path": name,
+            "num_tokens": token_count,
+            "source": _source_manifest(domain.source),
+            "files": domain_manifest["files"],
+        }
+
+    manifest = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "kind": "eval_domains",
+        "required_domains": list(REQUIRED_EVAL_DOMAINS),
+        "tokens_per_domain": config.output.tokens_per_domain,
+        "seed": config.output.seed,
+        "tokenizer": {
+            "name": config.tokenizer.name,
+            "append_eot": config.tokenizer.append_eot,
+            "eot_token": tokenizer.eot_token,
+        },
+        "hf_auth": hf_auth,
+        "dtype": config.output.dtype,
+        "domains": domains,
+        "files": {
+            "token_bytes": {"path": TOKEN_BYTES_FILENAME, "sha256": _sha256(token_bytes_path, desc=f"Hashing {TOKEN_BYTES_FILENAME}")},
+        },
+    }
+
+    print("Writing eval domain manifest...")
+    with (output_dir / "manifest.json").open("w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, sort_keys=True)
         f.write("\n")
 
@@ -256,6 +411,53 @@ def _write_tokens_bin(
     return token_count
 
 
+def _write_limited_tokens_bin(
+    texts: Iterable[str],
+    *,
+    tokenizer: tiktoken.Encoding,
+    append_eot: bool,
+    tokens_path: Path,
+    max_tokens: int,
+) -> int:
+    token_count = 0
+    with tokens_path.open("wb") as f:
+        for text in tqdm(texts, total=_safe_len(texts), desc="Tokenizing docs", unit="doc"):
+            remaining = max_tokens - token_count
+            if remaining <= 0:
+                break
+            tokens = _tokenize(text, tokenizer, append_eot)
+            if not tokens:
+                continue
+            tokens = tokens[:remaining]
+            np.asarray(tokens, dtype=np.uint32).tofile(f)
+            token_count += len(tokens)
+    return token_count
+
+
+def _validate_eval_domain_configs(domains: list[DomainConfig]):
+    names = [domain.name for domain in domains]
+    required = set(REQUIRED_EVAL_DOMAINS)
+    found = set(names)
+    duplicates = sorted(name for name in found if names.count(name) > 1)
+    missing = sorted(required - found)
+    extra = sorted(found - required)
+    if duplicates or missing or extra:
+        raise ValueError(f"eval_domains must contain exactly {sorted(required)}; missing={missing}, extra={extra}, duplicates={duplicates}")
+
+
+def _source_manifest(source: SourceConfig) -> dict:
+    return {
+        "type": source.type,
+        "dataset": source.dataset,
+        "subset": source.subset,
+        "data_dir": source.data_dir,
+        "split": source.split,
+        "text_column": source.text_column,
+        "path": source.path,
+        "streaming": source.streaming,
+    }
+
+
 def _safe_len(value) -> int | None:
     try:
         return len(value)
@@ -281,7 +483,10 @@ def main():
     config = load_prepare_config(args.config)
     manifest = prepare_dataset(config)
     print(f"wrote {config.output.path}")
-    print(f"tokens: {manifest['num_tokens']} train={manifest['train_tokens']} val={manifest['val_tokens']}")
+    if config.kind == "eval_domains":
+        print(f"domains: {', '.join(manifest['domains'])}")
+    else:
+        print(f"tokens: {manifest['num_tokens']} train={manifest['train_tokens']} val={manifest['val_tokens']}")
 
 
 if __name__ == "__main__":

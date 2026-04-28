@@ -14,13 +14,18 @@ import jax
 
 from checkpoint import create_checkpoint_manager, restore_model_checkpoint
 from config import load_config
-from data import load_token_bytes, make_val_dataloader
+from data import domain_eval_steps, load_eval_domain_token_bytes, load_token_bytes, make_eval_domain_dataloaders, make_val_dataloader
 from distributed import create_distributed_context, place_replicated_model
-from evals import LossEvalResult, evaluate_loss
+from evals import LossEvalResult, evaluate_domain_losses, evaluate_loss
 from model import Model
 
 
-def write_eval_artifacts(run_dir: Path, checkpoint_step: int, result: LossEvalResult) -> tuple[Path, Path]:
+def write_eval_artifacts(
+    run_dir: Path,
+    checkpoint_step: int,
+    result: LossEvalResult,
+    domains: dict[str, LossEvalResult] | None = None,
+) -> tuple[Path, Path]:
     eval_dir = run_dir / "evals" / f"step_{checkpoint_step}"
     eval_dir.mkdir(parents=True, exist_ok=True)
 
@@ -29,6 +34,8 @@ def write_eval_artifacts(run_dir: Path, checkpoint_step: int, result: LossEvalRe
         "checkpoint_step": checkpoint_step,
         **result.to_dict(),
     }
+    if domains is not None:
+        metrics["domains"] = {name: domain_result.to_dict() for name, domain_result in domains.items()}
     metrics_path = eval_dir / "metrics.json"
     with metrics_path.open("w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, sort_keys=True)
@@ -50,10 +57,20 @@ def write_eval_artifacts(run_dir: Path, checkpoint_step: int, result: LossEvalRe
         f"- tokens_per_sec: `{result.tokens_per_sec:.2f}`\n",
         encoding="utf-8",
     )
+    if domains:
+        with summary_path.open("a", encoding="utf-8") as f:
+            f.write("\n## Domains\n\n")
+            f.write(f"{'domain':<12} {'loss':>10} {'ppl':>10} {'bpb':>10} {'tokens':>10}\n")
+            f.write("-" * 58 + "\n")
+            for name, domain_result in domains.items():
+                f.write(
+                    f"{name:<12} {domain_result.loss:>10.6f} {domain_result.ppl:>10.6f} "
+                    f"{domain_result.bpb:>10.6f} {domain_result.tokens:>10}\n"
+                )
     return metrics_path, summary_path
 
 
-def run_eval(run_dir: Path, *, step: int | None, eval_steps: int | None) -> tuple[int, LossEvalResult]:
+def run_eval(run_dir: Path, *, step: int | None, eval_steps: int | None) -> tuple[int, LossEvalResult, dict[str, LossEvalResult]]:
     config = load_config(run_dir / "config.toml")
     train_config = config.train
     if eval_steps is not None:
@@ -67,6 +84,7 @@ def run_eval(run_dir: Path, *, step: int | None, eval_steps: int | None) -> tupl
     checkpoint_step = restore_model_checkpoint(manager, model=model, step=step)
     place_replicated_model(model, distributed)
     token_bytes = jax.device_put(load_token_bytes(config.data), distributed.replicated_sharding)
+    domain_token_bytes = jax.device_put(load_eval_domain_token_bytes(config.eval, config.data), distributed.replicated_sharding)
 
     val_iter = make_val_dataloader(config.data, train_config)
     result = evaluate_loss(
@@ -77,7 +95,15 @@ def run_eval(run_dir: Path, *, step: int | None, eval_steps: int | None) -> tupl
         tokens_per_example=train_config.seq_len,
         token_bytes=token_bytes,
     )
-    return checkpoint_step, result
+    domain_results = evaluate_domain_losses(
+        model,
+        make_eval_domain_dataloaders(config.eval, config.data, train_config),
+        domain_eval_steps(config.eval, train_config),
+        distributed,
+        tokens_per_example=train_config.seq_len,
+        token_bytes=domain_token_bytes,
+    )
+    return checkpoint_step, result, domain_results
 
 
 def main():
@@ -88,8 +114,8 @@ def main():
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
-    checkpoint_step, result = run_eval(run_dir, step=args.step, eval_steps=args.eval_steps)
-    metrics_path, summary_path = write_eval_artifacts(run_dir, checkpoint_step, result)
+    checkpoint_step, result, domains = run_eval(run_dir, step=args.step, eval_steps=args.eval_steps)
+    metrics_path, summary_path = write_eval_artifacts(run_dir, checkpoint_step, result, domains)
     print(f"wrote {metrics_path}")
     print(f"wrote {summary_path}")
 
