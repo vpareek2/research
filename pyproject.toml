@@ -23,6 +23,7 @@ dependencies = [
 
 [project.scripts]
 pretrain = "pretrain:main"
+experiment = "utils.experiment:main"
 eval-checkpoint = "utils.eval_checkpoint:main"
 eval-core = "utils.core_eval:main"
 summarize-run = "utils.run_summary:main"
@@ -39,5 +40,5 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["checkpoint", "config", "data", "distributed", "evals", "model", "prepare_data", "pretrain", "logs", "profiling", "sample", "lr_schedule", "train_debug"]
+py-modules = ["checkpoint", "config", "data", "distributed", "evals", "kv_cache", "model", "prepare_data", "pretrain", "logs", "profiling", "sample", "lr_schedule", "train_debug"]
 packages = ["utils"]

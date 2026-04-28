@@ -64,8 +64,8 @@ def bpb_from_losses(losses: jax.Array, target_ids: jax.Array, token_bytes: jax.A
 
 def loss_with_bpb(model: Model, input_ids: jax.Array, token_bytes: jax.Array) -> tuple[jax.Array, dict[str, jax.Array]]:
     losses = token_losses(model, input_ids)
-    bpb, _ = bpb_from_losses(losses, input_ids[:, 1:], token_bytes)
-    return losses.mean(), {"bpb": bpb}
+    bpb, byte_count = bpb_from_losses(losses, input_ids[:, 1:], token_bytes)
+    return losses.mean(), {"bpb": bpb, "bytes": byte_count}
 
 
 @nnx.jit

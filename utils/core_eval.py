@@ -30,6 +30,7 @@ from checkpoint import create_checkpoint_manager, restore_model_checkpoint
 from config import load_config
 from distributed import create_distributed_context, place_replicated_model
 from model import Model
+from utils.inference_bench import benchmark_inference, write_inference_artifacts
 from utils.run_summary import summarize_and_write
 
 
@@ -158,19 +159,23 @@ def crop_sequences(
     start_indices: list[int],
     end_indices: list[int],
     max_tokens: int,
-) -> tuple[list[list[int]], list[int], list[int]]:
+) -> tuple[list[list[int]], list[int], list[int]] | None:
     new_tokens = []
     new_start_indices = []
     new_end_indices = []
     for seq, start_idx, end_idx in zip(tokens, start_indices, end_indices):
         if len(seq) > max_tokens:
             num_to_crop = len(seq) - max_tokens
+            new_start_idx = start_idx - num_to_crop
+            new_end_idx = end_idx - num_to_crop
+            if new_start_idx < 1 or new_end_idx <= new_start_idx:
+                return None
             new_tokens.append(seq[-max_tokens:])
-            new_start_indices.append(start_idx - num_to_crop)
-            new_end_indices.append(end_idx - num_to_crop)
-            assert start_idx - num_to_crop >= 0, "continuation was fully cropped"
-            assert end_idx - num_to_crop >= 0, "continuation was fully cropped"
+            new_start_indices.append(new_start_idx)
+            new_end_indices.append(new_end_idx)
         else:
+            if start_idx < 1 or end_idx <= start_idx:
+                return None
             new_tokens.append(seq)
             new_start_indices.append(start_idx)
             new_end_indices.append(end_idx)
@@ -212,7 +217,7 @@ def score_language_modeling(
     return bool((predicted_tokens == actual_tokens).all())
 
 
-def evaluate_example(idx: int, model: Model, tokenizer: CoreTokenizer, data: list[dict], task: CoreTask, max_seq_len: int) -> bool:
+def evaluate_example(idx: int, model: Model, tokenizer: CoreTokenizer, data: list[dict], task: CoreTask, max_seq_len: int) -> bool | None:
     item = data[idx]
     fewshot_examples = []
     if task.num_fewshot > 0:
@@ -234,7 +239,10 @@ def evaluate_example(idx: int, model: Model, tokenizer: CoreTokenizer, data: lis
     else:
         raise ValueError(f"Unsupported CORE task type: {task.task_type}")
 
-    tokens, start_indices, end_indices = crop_sequences(tokens, start_indices, end_indices, max_seq_len)
+    cropped = crop_sequences(tokens, start_indices, end_indices, max_seq_len)
+    if cropped is None:
+        return None
+    tokens, start_indices, end_indices = cropped
     input_ids = stack_sequences(tokens, tokenizer.get_bos_token_id(), seq_len=max_seq_len)
     losses, predictions = core_forward(model, input_ids)
 
@@ -289,15 +297,23 @@ def evaluate_core(model: Model, tokenizer: CoreTokenizer, bundle_dir: str | Path
         task_start = time.perf_counter()
         data = load_task_data(bundle_dir, task, max_per_task=max_per_task)
         correct = 0
+        scored = 0
+        skipped = 0
         for idx in tqdm(range(len(data)), desc=task.label, unit="ex", leave=False):
-            correct += int(evaluate_example(idx, model, tokenizer, data, task, max_seq_len))
-        accuracy = correct / len(data) if data else 0.0
+            result = evaluate_example(idx, model, tokenizer, data, task, max_seq_len)
+            if result is None:
+                skipped += 1
+                continue
+            scored += 1
+            correct += int(result)
+        accuracy = correct / scored if scored else 0.0
         centered = centered_score(accuracy, task.random_baseline)
         task_results[task.label] = {
             "accuracy": accuracy,
             "centered": centered,
             "random_baseline": task.random_baseline,
-            "examples": len(data),
+            "examples": scored,
+            "skipped_examples": skipped,
             "elapsed_sec": time.perf_counter() - task_start,
         }
 
@@ -362,7 +378,7 @@ def write_core_artifacts(run_dir: Path, checkpoint_step: int, metrics: dict) -> 
     csv_path = eval_dir / "core.csv"
     with csv_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["Task", "Accuracy", "Centered", "Random baseline", "Examples", "Elapsed sec"])
+        writer.writerow(["Task", "Accuracy", "Centered", "Random baseline", "Examples", "Skipped", "Elapsed sec"])
         for task_name, task_metrics in metrics["tasks"].items():
             writer.writerow(
                 [
@@ -371,10 +387,11 @@ def write_core_artifacts(run_dir: Path, checkpoint_step: int, metrics: dict) -> 
                     f"{task_metrics['centered']:.6f}",
                     f"{task_metrics['random_baseline']:.6f}",
                     task_metrics["examples"],
+                    task_metrics.get("skipped_examples", 0),
                     f"{task_metrics['elapsed_sec']:.6f}",
                 ]
             )
-        writer.writerow(["CORE", "", f"{metrics['core']:.6f}", "", "", f"{metrics['elapsed_sec']:.6f}"])
+        writer.writerow(["CORE", "", f"{metrics['core']:.6f}", "", "", "", f"{metrics['elapsed_sec']:.6f}"])
 
     summary_path = eval_dir / "core_summary.md"
     summary_path.write_text(format_core_summary(metrics), encoding="utf-8")
@@ -391,8 +408,8 @@ def format_core_summary(metrics: dict) -> str:
         f"- core: `{metrics['core']:.6f}`",
         f"- elapsed_sec: `{metrics['elapsed_sec']:.2f}`",
         "",
-        f"{'task':<35} {'acc':>10} {'centered':>10} {'baseline':>10} {'examples':>10}",
-        "-" * 81,
+        f"{'task':<35} {'acc':>10} {'centered':>10} {'baseline':>10} {'examples':>10} {'skipped':>10}",
+        "-" * 92,
     ]
     for task_name, task_metrics in metrics["tasks"].items():
         lines.append(
@@ -400,7 +417,8 @@ def format_core_summary(metrics: dict) -> str:
             f"{task_metrics['accuracy']:>10.6f} "
             f"{task_metrics['centered']:>10.6f} "
             f"{task_metrics['random_baseline']:>10.2f} "
-            f"{task_metrics['examples']:>10}"
+            f"{task_metrics['examples']:>10} "
+            f"{task_metrics.get('skipped_examples', 0):>10}"
         )
     return "\n".join(lines) + "\n"
 
@@ -411,7 +429,8 @@ def run_core_eval(
     step: int | None,
     max_per_task: int,
     bundle_dir: str | Path,
-) -> tuple[int, dict]:
+    run_inference_bench: bool,
+) -> tuple[int, dict, dict | None]:
     bundle_dir = ensure_eval_bundle(bundle_dir)
     config = load_config(run_dir / "config.toml")
     distributed = create_distributed_context(config.distributed, config.train)
@@ -434,7 +453,16 @@ def run_core_eval(
         "max_per_task": max_per_task,
         **result,
     }
-    return checkpoint_step, metrics
+    inference_metrics = None
+    if run_inference_bench:
+        inference_metrics = benchmark_inference(
+            model,
+            tokenizer.encoding,
+            config.model,
+            run_dir=run_dir,
+            checkpoint_step=checkpoint_step,
+        )
+    return checkpoint_step, metrics, inference_metrics
 
 
 def main(argv: list[str] | None = None):
@@ -443,20 +471,30 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--step", type=int, default=None, help="Checkpoint step to evaluate. Defaults to latest.")
     parser.add_argument("--max-per-task", type=int, default=-1, help="Max examples per CORE task. -1 evaluates all.")
     parser.add_argument("--bundle-dir", default=str(DEFAULT_BUNDLE_DIR), help="Path to nanochat eval_bundle directory.")
+    inference_group = parser.add_mutually_exclusive_group()
+    inference_group.add_argument("--inference-bench", action="store_true", help="Run inference benchmark even for partial CORE.")
+    inference_group.add_argument("--no-inference-bench", action="store_true", help="Skip inference benchmark even for full CORE.")
     args = parser.parse_args(argv)
 
     run_dir = Path(args.run_dir)
-    checkpoint_step, metrics = run_core_eval(
+    run_inference_bench = args.inference_bench or (args.max_per_task == -1 and not args.no_inference_bench)
+    checkpoint_step, metrics, inference_metrics = run_core_eval(
         run_dir,
         step=args.step,
         max_per_task=args.max_per_task,
         bundle_dir=args.bundle_dir,
+        run_inference_bench=run_inference_bench,
     )
     metrics_path, csv_path, core_summary_path = write_core_artifacts(run_dir, checkpoint_step, metrics)
+    inference_paths = ()
+    if inference_metrics is not None:
+        inference_paths = write_inference_artifacts(run_dir, checkpoint_step, inference_metrics)
     _, summary_json_path, scorecard_path, _ = summarize_and_write(run_dir)
     print(f"wrote {metrics_path}")
     print(f"wrote {csv_path}")
     print(f"wrote {core_summary_path}")
+    for path in inference_paths:
+        print(f"wrote {path}")
     print(f"wrote {summary_json_path}")
     print(f"wrote {scorecard_path}")
 

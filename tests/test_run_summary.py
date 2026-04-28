@@ -79,9 +79,12 @@ def healthy_rows():
             "train/loss": 4.0,
             "train/ppl": 54.6,
             "train/bpb": 2.0,
+            "train/bytes": 100,
+            "train/bytes_seen": 100,
             "val/loss": 4.5,
             "val/ppl": 90.0,
             "val/bpb": 2.2,
+            "val/bytes": 50,
             "val/domain/web/loss": 4.0,
             "val/domain/web/ppl": 54.6,
             "val/domain/web/bpb": 2.0,
@@ -115,6 +118,8 @@ def healthy_rows():
             "train/loss": 3.0,
             "train/ppl": 20.1,
             "train/bpb": 1.5,
+            "train/bytes": 100,
+            "train/bytes_seen": 200,
             "train/tokens_seen": 32,
             "time/tokens_per_sec": 30.0,
             "time/train_tokens_per_gpu_hour": 144000.0,
@@ -134,9 +139,12 @@ def healthy_rows():
             "train/loss": 2.5,
             "train/ppl": 12.2,
             "train/bpb": 1.25,
+            "train/bytes": 100,
+            "train/bytes_seen": 300,
             "val/loss": 3.0,
             "val/ppl": 20.1,
             "val/bpb": 1.4,
+            "val/bytes": 50,
             "train/tokens_seen": 48,
             "time/train_tokens_per_sec": 40.0,
             "time/train_tokens_per_gpu_hour": 144000.0,
@@ -156,9 +164,12 @@ def healthy_rows():
             "train/loss": 2.0,
             "train/ppl": 7.4,
             "train/bpb": 1.0,
+            "train/bytes": 100,
+            "train/bytes_seen": 400,
             "val/loss": 2.8,
             "val/ppl": 16.4,
             "val/bpb": 1.3,
+            "val/bytes": 50,
             "val/domain/web/loss": 3.2,
             "val/domain/web/ppl": 24.5,
             "val/domain/web/bpb": 1.6,
@@ -226,6 +237,13 @@ def test_summarize_run_computes_quality_health_speed_and_checkpoint_evals(tmp_pa
         "core": 0.3,
         "tasks": {"toy": {"accuracy": 0.5, "centered": 0.3, "random_baseline": 25.0, "examples": 10}},
     }))
+    (eval_dir_2 / "inference_metrics.json").write_text(json.dumps({
+        "checkpoint_step": 3,
+        "mode": "full_context_no_kv_cache",
+        "prefill_tokens_per_sec": 120.0,
+        "decode_tokens_per_sec": 60.0,
+        "ttft_sec": 0.01,
+    }))
 
     summary = run_summary.summarize_run(run_dir)
 
@@ -252,12 +270,18 @@ def test_summarize_run_computes_quality_health_speed_and_checkpoint_evals(tmp_pa
     assert summary["performance"]["peak_gpu_memory_bytes"] == 400
     assert summary["performance"]["avg_gpu_utilization_pct"] == pytest.approx(45.0)
     assert summary["performance"]["avg_gpu_power_w"] == pytest.approx(115.0)
+    assert summary["epiplexity"]["train_bpb_auc"] == pytest.approx(175.0)
+    assert summary["epiplexity"]["train_bpb_auc_per_byte"] == pytest.approx(0.4375)
+    assert summary["epiplexity"]["val_bpb_auc"] == pytest.approx(50.0)
+    assert summary["epiplexity"]["val_bpb_auc_per_byte"] == pytest.approx(1 / 3)
     assert summary["checkpoint_evals"]["count"] == 2
     assert summary["checkpoint_evals"]["latest"]["checkpoint_step"] == 3
     assert summary["checkpoint_evals"]["best_loss"]["checkpoint_step"] == 3
     assert summary["benchmark_core"]["count"] == 2
     assert summary["benchmark_core"]["latest"]["core"] == 0.3
     assert summary["benchmark_core"]["best"]["checkpoint_step"] == 3
+    assert summary["inference_benchmark"]["count"] == 1
+    assert summary["inference_benchmark"]["latest"]["decode_tokens_per_sec"] == 60.0
     assert summary["registry_record"]["checkpoint_eval_count"] == 2
     assert summary["registry_record"]["avg_mfu"] == pytest.approx(25.0)
     assert summary["registry_record"]["final_mfu"] == 40.0
@@ -274,6 +298,13 @@ def test_summarize_run_computes_quality_health_speed_and_checkpoint_evals(tmp_pa
     assert summary["registry_record"]["latest_core"] == 0.3
     assert summary["registry_record"]["best_core"] == 0.3
     assert summary["registry_record"]["latest_core_step"] == 3
+    assert summary["registry_record"]["latest_decode_tokens_per_sec"] == 60.0
+    assert summary["registry_record"]["latest_prefill_tokens_per_sec"] == 120.0
+    assert summary["registry_record"]["latest_ttft_sec"] == 0.01
+    assert summary["registry_record"]["train_epiplexity_bpb_auc"] == pytest.approx(175.0)
+    assert summary["registry_record"]["train_epiplexity_bpb_auc_per_byte"] == pytest.approx(0.4375)
+    assert summary["registry_record"]["val_epiplexity_bpb_auc"] == pytest.approx(50.0)
+    assert summary["registry_record"]["val_epiplexity_bpb_auc_per_byte"] == pytest.approx(1 / 3)
     assert summary["domain_validation"]["training"]["web"]["first_loss"] == 4.0
     assert summary["domain_validation"]["training"]["web"]["final_loss"] == 3.2
     assert summary["domain_validation"]["training"]["web"]["best_bpb"] == 1.6
@@ -283,7 +314,9 @@ def test_summarize_run_computes_quality_health_speed_and_checkpoint_evals(tmp_pa
     assert "Training Native Validation" in scorecard
     assert "Checkpoint Native Validation" in scorecard
     assert "Performance" in scorecard
+    assert "Epiplexity Proxy" in scorecard
     assert "Benchmark CORE" in scorecard
+    assert "Inference Benchmark" in scorecard
     assert "Training Domain Validation" in scorecard
     assert "Checkpoint Domain Validation" in scorecard
     assert summary["status"] == "healthy"
@@ -336,6 +369,8 @@ def test_write_summary_artifacts_and_cli_register(tmp_path, monkeypatch):
     assert records[0]["latest_checkpoint_loss"] is None
     assert records[0]["latest_domain_mean_loss"] is None
     assert records[0]["latest_core"] is None
+    assert records[0]["latest_decode_tokens_per_sec"] is None
+    assert records[0]["train_epiplexity_bpb_auc"] == pytest.approx(175.0)
 
 
 def test_register_run_upserts_and_list_runs_prints_table(tmp_path, capsys):
@@ -354,6 +389,13 @@ def test_register_run_upserts_and_list_runs_prints_table(tmp_path, capsys):
         "core": 0.42,
         "tasks": {"toy": {"accuracy": 0.5, "centered": 0.42, "random_baseline": 25.0, "examples": 10}},
     }))
+    (eval_dir / "inference_metrics.json").write_text(json.dumps({
+        "checkpoint_step": 3,
+        "mode": "full_context_no_kv_cache",
+        "prefill_tokens_per_sec": 120.0,
+        "decode_tokens_per_sec": 60.0,
+        "ttft_sec": 0.01,
+    }))
     registry_path = tmp_path / "runs" / "registry.jsonl"
 
     run_registry.main([str(run_dir), "--registry-path", str(registry_path)])
@@ -365,6 +407,7 @@ def test_register_run_upserts_and_list_runs_prints_table(tmp_path, capsys):
     assert records[0]["latest_checkpoint_bpb"] == 1.2
     assert records[0]["latest_domain_mean_loss"] == 3.0
     assert records[0]["latest_core"] == 0.42
+    assert records[0]["latest_decode_tokens_per_sec"] == 60.0
 
     run_registry.list_main(["--registry-path", str(registry_path)])
     output = capsys.readouterr().out
@@ -372,7 +415,27 @@ def test_register_run_upserts_and_list_runs_prints_table(tmp_path, capsys):
     assert "ckpt_loss" in output
     assert "domain" in output
     assert "core" in output
+    assert "decode/s" in output
     assert "mfu" in output
     assert "tok/gpu-hr" in output
     assert "unit" in output
     assert "healthy" in output
+
+
+def test_epiplexity_proxy_handles_flat_missing_and_old_rows():
+    flat = [
+        {"train/bpb": 1.0, "train/bytes_seen": 10},
+        {"train/bpb": 1.0, "train/bytes_seen": 20},
+    ]
+    assert run_summary._train_bpb_auc(flat, type("Train", (), {"seq_len": 8})())["bpb_auc"] == 0.0
+
+    missing = [{"train/bpb": 1.0, "train/bytes_seen": 10}]
+    assert run_summary._train_bpb_auc(missing, type("Train", (), {"seq_len": 8})())["bpb_auc"] is None
+
+    old_rows = [
+        {"train/loss": 4.0, "train/bpb": 2.0, "train/tokens_seen": 16},
+        {"train/loss": 2.0, "train/bpb": 1.0, "train/tokens_seen": 32},
+    ]
+    estimate = run_summary._train_bpb_auc(old_rows, type("Train", (), {"seq_len": 8})())
+    assert estimate["bpb_auc"] > 0.0
+    assert estimate["bpb_auc_per_byte"] > 0.0

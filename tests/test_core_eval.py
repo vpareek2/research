@@ -133,6 +133,10 @@ def test_crop_sequences_adjusts_continuation_spans():
     assert ends == [4]
 
 
+def test_crop_sequences_returns_none_when_continuation_is_cropped_away():
+    assert core_eval.crop_sequences([[1, 2, 3, 4, 5]], [1], [2], 3) is None
+
+
 def test_scoring_helpers_and_centered_formula():
     losses = jnp.asarray([[0.1, 0.2, 0.3], [0.9, 0.8, 0.7]])
     assert core_eval.score_multiple_choice(losses, [1, 1], [4, 4], 0)
@@ -191,11 +195,12 @@ def test_eval_core_cli_writes_artifacts_and_refreshes_summary(tmp_path, monkeypa
         "elapsed_sec": 0.1,
     }
 
-    def fake_run_core_eval(run_path, *, step, max_per_task, bundle_dir):
+    def fake_run_core_eval(run_path, *, step, max_per_task, bundle_dir, run_inference_bench):
         assert run_path == run_dir
         assert step == 1
         assert max_per_task == 5
-        return 1, metrics
+        assert not run_inference_bench
+        return 1, metrics, None
 
     monkeypatch.setattr(core_eval, "run_core_eval", fake_run_core_eval)
     monkeypatch.setattr(sys, "argv", ["eval-core", str(run_dir), "--step", "1", "--max-per-task", "5"])
@@ -209,3 +214,58 @@ def test_eval_core_cli_writes_artifacts_and_refreshes_summary(tmp_path, monkeypa
     assert (run_dir / "summary" / "run_summary.json").exists()
     summary = run_summary.summarize_run(run_dir)
     assert summary["benchmark_core"]["latest"]["core"] == 0.25
+
+
+def test_eval_core_cli_inference_bench_flags(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "unit"
+    write_run(run_dir)
+    metrics = {
+        "run_dir": str(run_dir),
+        "checkpoint_step": 1,
+        "max_per_task": -1,
+        "core": 0.25,
+        "tasks": {},
+        "elapsed_sec": 0.1,
+    }
+    inference_metrics = {
+        "run_dir": str(run_dir),
+        "checkpoint_step": 1,
+        "mode": "full_context_no_kv_cache",
+        "batch_size": 1,
+        "prompt_count": 3,
+        "prompt_tokens": 4,
+        "decode_tokens": 4,
+        "seq_len": 8,
+        "prefill_elapsed_sec": 0.1,
+        "decode_elapsed_sec": 0.2,
+        "ttft_sec": 0.01,
+        "prefill_tokens_per_sec": 120.0,
+        "decode_tokens_per_sec": 60.0,
+        "memory_used_bytes": None,
+        "memory_peak_bytes": None,
+    }
+    seen = []
+
+    def fake_run_core_eval(run_path, *, step, max_per_task, bundle_dir, run_inference_bench):
+        seen.append(run_inference_bench)
+        return 1, metrics | {"max_per_task": max_per_task}, inference_metrics if run_inference_bench else None
+
+    monkeypatch.setattr(core_eval, "run_core_eval", fake_run_core_eval)
+
+    core_eval.main([str(run_dir)])
+    assert seen[-1] is True
+    assert (run_dir / "evals" / "step_1" / "inference_metrics.json").exists()
+
+    (run_dir / "evals" / "step_1" / "inference_metrics.json").unlink()
+    core_eval.main([str(run_dir), "--max-per-task", "5"])
+    assert seen[-1] is False
+    assert not (run_dir / "evals" / "step_1" / "inference_metrics.json").exists()
+
+    core_eval.main([str(run_dir), "--max-per-task", "5", "--inference-bench"])
+    assert seen[-1] is True
+    assert (run_dir / "evals" / "step_1" / "inference_metrics.json").exists()
+
+    (run_dir / "evals" / "step_1" / "inference_metrics.json").unlink()
+    core_eval.main([str(run_dir), "--no-inference-bench"])
+    assert seen[-1] is False
+    assert not (run_dir / "evals" / "step_1" / "inference_metrics.json").exists()

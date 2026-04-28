@@ -277,6 +277,8 @@ def _is_scalar(value: Any) -> bool:
 def _should_log_to_wandb(key: str, value: Any) -> bool:
     if key in {"step", "sample/path"} or not _is_scalar(value):
         return False
+    if key in {"train/bytes", "train/bytes_seen"}:
+        return False
     if key.endswith("/ppl"):
         return False
     if key.startswith("val/domain/") and not key.endswith("/loss"):

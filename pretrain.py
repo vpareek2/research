@@ -63,6 +63,7 @@ def train_step(model: Model, optimizer: nnx.Optimizer, input_ids: jax.Array, tok
     param_norm = tree_l2_norm(nnx.state(model, nnx.Param))
     return loss_value, {
         "train/bpb": loss_metrics["bpb"],
+        "train/bytes": loss_metrics["bytes"],
         "train/grad_norm": grad_norm,
         "train/param_norm": param_norm,
     }
@@ -186,6 +187,7 @@ def main():
     make_eval_domain_dataloaders(config.eval, config.data, train_config)
     train_iter, _ = make_dataloaders(config.data, train_config)
     checkpoint_manager = create_checkpoint_manager(logger.run_dir, train_config.keep_last)
+    train_bytes_seen = jnp.asarray(0, dtype=jnp.float32)
 
     start_step = 0
     if args.resume:
@@ -214,6 +216,7 @@ def main():
                     sharded_batch = shard_batch(batch, distributed)
                 with trace_profiler.annotate("train_step"), timer.phase("train_step"):
                     loss_value, train_metrics = train_step(model, optimizer, sharded_batch["input_ids"], token_bytes)
+                train_bytes_seen = train_bytes_seen + train_metrics["train/bytes"]
                 if should_log:
                     with trace_profiler.annotate("train_sync"), timer.phase("train_sync"):
                         loss_value.block_until_ready()
@@ -223,6 +226,7 @@ def main():
                         {
                             "train/loss": loss_value,
                             "train/bpb": train_metrics["train/bpb"],
+                            "train/bytes": train_metrics["train/bytes"],
                             "train/grad_norm": train_metrics["train/grad_norm"],
                             "train/param_norm": train_metrics["train/param_norm"],
                         },
@@ -235,6 +239,8 @@ def main():
                         "train/loss": loss_value,
                         "train/ppl": jnp.exp(loss_value),
                         "train/bpb": train_metrics["train/bpb"],
+                        "train/bytes": train_metrics["train/bytes"],
+                        "train/bytes_seen": train_bytes_seen,
                         "train/grad_norm": train_metrics["train/grad_norm"],
                         "train/param_norm": train_metrics["train/param_norm"],
                         "optim/lr": lr_schedule(step),
@@ -262,6 +268,8 @@ def main():
                         device_metrics["val/loss"] = val_result.loss
                         device_metrics["val/ppl"] = val_result.ppl
                         device_metrics["val/bpb"] = val_result.bpb
+                        device_metrics["val/bytes"] = val_result.bytes
+                        device_metrics["val/tokens"] = val_result.tokens
                         for name, result in domain_results.items():
                             prefix = f"val/domain/{name}"
                             device_metrics[f"{prefix}/loss"] = result.loss

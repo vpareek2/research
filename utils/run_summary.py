@@ -55,6 +55,17 @@ def load_core_eval_metrics(run_dir: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+def load_inference_benchmark_metrics(run_dir: str | Path) -> list[dict[str, Any]]:
+    evals_dir = Path(run_dir) / "evals"
+    if not evals_dir.exists():
+        return []
+
+    rows = []
+    for path in sorted(evals_dir.glob("step_*/inference_metrics.json"), key=_eval_metrics_sort_key):
+        rows.append(json.loads(path.read_text(encoding="utf-8")))
+    return rows
+
+
 def summarize_run(run_dir: str | Path) -> dict[str, Any]:
     run_dir = Path(run_dir)
     config = load_config(run_dir / "config.toml")
@@ -62,6 +73,7 @@ def summarize_run(run_dir: str | Path) -> dict[str, Any]:
     rows = load_run_rows(run_dir)
     eval_rows = load_checkpoint_eval_metrics(run_dir)
     core_rows = load_core_eval_metrics(run_dir)
+    inference_rows = load_inference_benchmark_metrics(run_dir)
     final_row = rows[-1]
     val_rows = [row for row in rows if "val/loss" in row]
     train_tokens_target = config.train.steps * config.train.batch_size * config.train.seq_len
@@ -72,6 +84,8 @@ def summarize_run(run_dir: str | Path) -> dict[str, Any]:
     domain_validation = _domain_validation_summary(rows, eval_rows)
     performance = _performance_summary(rows)
     core_benchmark = _core_benchmark_summary(core_rows)
+    inference_benchmark = _inference_benchmark_summary(inference_rows)
+    epiplexity = _epiplexity_summary(rows, val_rows, config.train)
     status, decision_hint = _verdict(config, rows, final_row, val_rows, health)
 
     summary = {
@@ -116,6 +130,8 @@ def summarize_run(run_dir: str | Path) -> dict[str, Any]:
         "checkpoint_evals": checkpoint_evals,
         "domain_validation": domain_validation,
         "benchmark_core": core_benchmark,
+        "inference_benchmark": inference_benchmark,
+        "epiplexity": epiplexity,
         "status": status,
         "decision_hint": decision_hint,
     }
@@ -134,6 +150,9 @@ def format_scorecard(summary: dict[str, Any]) -> str:
     evals = summary["checkpoint_evals"]
     domains = summary.get("domain_validation", {})
     core_benchmark = summary.get("benchmark_core", {})
+    inference_benchmark = summary.get("inference_benchmark", {})
+    epiplexity = summary.get("epiplexity", {})
+    score = summary.get("score", {})
 
     lines = [
         "# Run Scorecard",
@@ -142,7 +161,36 @@ def format_scorecard(summary: dict[str, Any]) -> str:
         f"- run_dir: `{run['run_dir']}`",
         f"- status: `{summary['status']}`",
         f"- decision_hint: `{summary['decision_hint']}`",
-        "",
+    ]
+
+    if score:
+        lines.extend(
+            [
+                f"- score: `{_format_optional(score.get('final_score'))}`",
+                f"- score_eligible: `{score.get('eligible')}`",
+                f"- baseline: `{_format_optional(score.get('baseline_run_name'))}`",
+            ]
+        )
+        if not score.get("eligible") and score.get("missing"):
+            lines.append(f"- score_missing: `{', '.join(score['missing'])}`")
+
+    if score.get("eligible"):
+        lines.extend(
+            [
+                "",
+                "## Run Score",
+                "",
+                f"- final_score: `{_format_optional(score.get('final_score'))}`",
+                f"- quality: `{_format_optional(_nested_metric(score, ['quality', 'value']))}`",
+                f"- training_efficiency: `{_format_optional(_nested_metric(score, ['training_efficiency', 'value']))}`",
+                f"- inference_efficiency: `{_format_optional(_nested_metric(score, ['inference_efficiency', 'value']))}`",
+                f"- health: `{_format_optional(_nested_metric(score, ['health', 'value']))}`",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
         "## Model",
         "",
         f"- params: `{model['params']}`",
@@ -194,7 +242,15 @@ def format_scorecard(summary: dict[str, Any]) -> str:
         f"- peak_gpu_memory_bytes: `{_format_optional(performance.get('peak_gpu_memory_bytes'))}`",
         f"- avg_gpu_utilization_pct: `{_format_optional(performance.get('avg_gpu_utilization_pct'))}`",
         f"- avg_gpu_power_w: `{_format_optional(performance.get('avg_gpu_power_w'))}`",
-    ]
+        "",
+        "## Epiplexity Proxy",
+        "",
+        f"- train_bpb_auc: `{_format_optional(epiplexity.get('train_bpb_auc'))}`",
+        f"- train_bpb_auc_per_byte: `{_format_optional(epiplexity.get('train_bpb_auc_per_byte'))}`",
+        f"- val_bpb_auc: `{_format_optional(epiplexity.get('val_bpb_auc'))}`",
+        f"- val_bpb_auc_per_byte: `{_format_optional(epiplexity.get('val_bpb_auc_per_byte'))}`",
+        ]
+    )
 
     if evals["count"]:
         latest_eval = evals["latest"] or {}
@@ -288,6 +344,21 @@ def format_scorecard(summary: dict[str, Any]) -> str:
                 f"{_format_optional(task_metrics.get('examples')):>10}"
             )
 
+    if inference_benchmark.get("count"):
+        latest_inference = inference_benchmark.get("latest") or {}
+        lines.extend(
+            [
+                "",
+                "## Inference Benchmark",
+                "",
+                f"- latest_step: `{_format_optional(latest_inference.get('checkpoint_step'))}`",
+                f"- mode: `{_format_optional(latest_inference.get('mode'))}`",
+                f"- decode_tokens_per_sec: `{_format_optional(latest_inference.get('decode_tokens_per_sec'))}`",
+                f"- prefill_tokens_per_sec: `{_format_optional(latest_inference.get('prefill_tokens_per_sec'))}`",
+                f"- ttft_sec: `{_format_optional(latest_inference.get('ttft_sec'))}`",
+            ]
+        )
+
     return "\n".join(lines) + "\n"
 
 
@@ -332,7 +403,9 @@ def registry_record(summary: dict[str, Any]) -> dict[str, Any]:
     quality = summary["quality"]
     speed = summary["speed"]
     performance = summary.get("performance", {})
+    epiplexity = summary.get("epiplexity", {})
     health = summary["health"]
+    score = summary.get("score", {})
     return {
         "run_name": run["name"],
         "run_dir": run["run_dir"],
@@ -348,6 +421,14 @@ def registry_record(summary: dict[str, Any]) -> dict[str, Any]:
         "nan_count": health["nan_count"],
         "status": summary["status"],
         "decision_hint": summary["decision_hint"],
+        "score": score.get("final_score"),
+        "score_eligible": score.get("eligible"),
+        "score_missing": score.get("missing"),
+        "baseline_run_name": score.get("baseline_run_name"),
+        "quality_score": _nested_metric(score, ["quality", "value"]),
+        "training_efficiency_score": _nested_metric(score, ["training_efficiency", "value"]),
+        "inference_efficiency_score": _nested_metric(score, ["inference_efficiency", "value"]),
+        "health_score": _nested_metric(score, ["health", "value"]),
         "avg_mfu": performance.get("avg_mfu"),
         "final_mfu": performance.get("final_mfu"),
         "train_tokens_per_gpu_hour": performance.get("avg_train_tokens_per_gpu_hour"),
@@ -361,6 +442,17 @@ def registry_record(summary: dict[str, Any]) -> dict[str, Any]:
         "latest_core": _nested_metric(summary, ["benchmark_core", "latest", "core"]),
         "best_core": _nested_metric(summary, ["benchmark_core", "best", "core"]),
         "latest_core_step": _nested_metric(summary, ["benchmark_core", "latest", "checkpoint_step"]),
+        "latest_decode_tokens_per_sec": _nested_metric(
+            summary, ["inference_benchmark", "latest", "decode_tokens_per_sec"]
+        ),
+        "latest_prefill_tokens_per_sec": _nested_metric(
+            summary, ["inference_benchmark", "latest", "prefill_tokens_per_sec"]
+        ),
+        "latest_ttft_sec": _nested_metric(summary, ["inference_benchmark", "latest", "ttft_sec"]),
+        "train_epiplexity_bpb_auc": epiplexity.get("train_bpb_auc"),
+        "train_epiplexity_bpb_auc_per_byte": epiplexity.get("train_bpb_auc_per_byte"),
+        "val_epiplexity_bpb_auc": epiplexity.get("val_bpb_auc"),
+        "val_epiplexity_bpb_auc_per_byte": epiplexity.get("val_bpb_auc_per_byte"),
         **_latest_checkpoint_domain_rollup(summary),
     }
 
@@ -445,6 +537,136 @@ def _core_benchmark_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "count": len(rows),
         "latest": rows[-1] if rows else None,
         "best": max(finite_rows, key=lambda row: float(row["core"])) if finite_rows else None,
+    }
+
+
+def _inference_benchmark_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "count": len(rows),
+        "latest": rows[-1] if rows else None,
+    }
+
+
+def _epiplexity_summary(rows: list[dict[str, Any]], val_rows: list[dict[str, Any]], train_config) -> dict[str, Any]:
+    train = _train_bpb_auc(rows, train_config)
+    val = _val_bpb_auc(val_rows, train_config)
+    return {
+        "train_bpb_auc": train["bpb_auc"],
+        "train_bpb_auc_per_byte": train["bpb_auc_per_byte"],
+        "train_bytes": train["bytes"],
+        "train_points": train["points"],
+        "val_bpb_auc": val["bpb_auc"],
+        "val_bpb_auc_per_byte": val["bpb_auc_per_byte"],
+        "val_bytes": val["bytes"],
+        "val_points": val["points"],
+    }
+
+
+def _train_bpb_auc(rows: list[dict[str, Any]], train_config) -> dict[str, Any]:
+    points = _points_from_cumulative_bytes(rows, "train/bpb", "train/bytes_seen")
+    if points is None:
+        points = _points_from_row_bytes(
+            rows,
+            "train/bpb",
+            "train/bytes",
+            "train/loss",
+            token_delta_key="train/tokens_seen",
+            target_token_ratio=(train_config.seq_len - 1) / train_config.seq_len,
+        )
+    return _auc_from_bpb_points(points)
+
+
+def _val_bpb_auc(val_rows: list[dict[str, Any]], train_config) -> dict[str, Any]:
+    default_target_tokens = train_config.eval_steps * train_config.batch_size * (train_config.seq_len - 1)
+    points = _points_from_row_bytes(
+        val_rows,
+        "val/bpb",
+        "val/bytes",
+        "val/loss",
+        default_target_tokens=default_target_tokens,
+    )
+    return _auc_from_bpb_points(points)
+
+
+def _points_from_cumulative_bytes(rows: list[dict[str, Any]], bpb_key: str, bytes_seen_key: str) -> list[tuple[float, float]] | None:
+    points = []
+    for row in rows:
+        bpb = _number_or_none(row.get(bpb_key))
+        bytes_seen = _number_or_none(row.get(bytes_seen_key))
+        if bpb is None:
+            continue
+        if bytes_seen is None:
+            return None
+        points.append((float(bpb), float(bytes_seen)))
+    return points
+
+
+def _points_from_row_bytes(
+    rows: list[dict[str, Any]],
+    bpb_key: str,
+    bytes_key: str,
+    loss_key: str,
+    *,
+    token_delta_key: str | None = None,
+    target_token_ratio: float = 1.0,
+    default_target_tokens: int | None = None,
+) -> list[tuple[float, float]]:
+    points = []
+    cumulative_bytes = 0.0
+    previous_tokens = 0.0
+    for row in rows:
+        bpb = _number_or_none(row.get(bpb_key))
+        if bpb is None:
+            continue
+
+        row_bytes = _number_or_none(row.get(bytes_key))
+        if row_bytes is None:
+            target_tokens = default_target_tokens
+            if target_tokens is None and token_delta_key is not None:
+                tokens_seen = _number_or_none(row.get(token_delta_key))
+                if tokens_seen is not None:
+                    target_tokens = max(0.0, float(tokens_seen) - previous_tokens) * target_token_ratio
+                    previous_tokens = float(tokens_seen)
+            row_bytes = _estimate_row_bytes(row, loss_key, bpb_key, target_tokens)
+
+        if row_bytes is None or row_bytes <= 0:
+            continue
+        cumulative_bytes += float(row_bytes)
+        points.append((float(bpb), cumulative_bytes))
+    return points
+
+
+def _estimate_row_bytes(row: dict[str, Any], loss_key: str, bpb_key: str, target_tokens: float | int | None) -> float | None:
+    loss = _number_or_none(row.get(loss_key))
+    bpb = _number_or_none(row.get(bpb_key))
+    if loss is None or bpb is None or bpb <= 0 or target_tokens is None or target_tokens <= 0:
+        return None
+    return float(loss) * float(target_tokens) / (math.log(2) * float(bpb))
+
+
+def _auc_from_bpb_points(points: list[tuple[float, float]] | None) -> dict[str, Any]:
+    if not points or len(points) < 2:
+        return {"bpb_auc": None, "bpb_auc_per_byte": None, "bytes": None, "points": len(points or [])}
+
+    final_bpb = points[-1][0]
+    previous_bytes = 0.0
+    total_bytes = 0.0
+    auc = 0.0
+    for bpb, cumulative_bytes in points:
+        delta_bytes = cumulative_bytes - previous_bytes
+        if delta_bytes <= 0:
+            continue
+        auc += max(0.0, bpb - final_bpb) * delta_bytes
+        total_bytes += delta_bytes
+        previous_bytes = cumulative_bytes
+
+    if total_bytes <= 0:
+        return {"bpb_auc": None, "bpb_auc_per_byte": None, "bytes": None, "points": len(points)}
+    return {
+        "bpb_auc": auc,
+        "bpb_auc_per_byte": auc / total_bytes,
+        "bytes": total_bytes,
+        "points": len(points),
     }
 
 

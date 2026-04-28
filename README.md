@@ -409,6 +409,7 @@ Use `eval-core` to run nanochat's CORE benchmark against a saved checkpoint:
 uv run eval-core runs/tiny_shakespeare_smoke
 uv run eval-core runs/tiny_shakespeare_smoke --step 100
 uv run eval-core runs/tiny_shakespeare_smoke --max-per-task 100
+uv run eval-core runs/tiny_shakespeare_smoke --max-per-task 5 --inference-bench
 ```
 
 The command downloads `eval_bundle.zip` into `data/eval_bundle` if needed, then
@@ -418,7 +419,39 @@ writes:
 runs/<name>/evals/step_<step>/core_metrics.json
 runs/<name>/evals/step_<step>/core.csv
 runs/<name>/evals/step_<step>/core_summary.md
+runs/<name>/evals/step_<step>/inference_metrics.json
+runs/<name>/evals/step_<step>/inference_summary.md
 ```
+
+Full CORE runs include the inference benchmark by default. Partial CORE runs skip
+it unless `--inference-bench` is passed. The current inference benchmark uses
+the repo's simple KV-cache decode path.
+
+## Run An Experiment
+
+Use `experiment` when a run should enter the comparison ladder:
+
+```bash
+uv run experiment configs/tinystories_soak.toml
+```
+
+This command runs pretraining, checkpoint validation, full CORE plus inference,
+then writes a baseline-relative score into the registry. The first scored run in
+the registry becomes the baseline by default and scores around `25`; later runs
+are scored relative to it. To force a different baseline:
+
+```bash
+uv run experiment configs/tinystories_soak.toml --baseline-run runs/baseline_name
+```
+
+The registry chart is regenerated at:
+
+```text
+runs/registry.html
+```
+
+Open the [run score progression chart](runs/registry.html) to see both all
+scored runs and only new best scores.
 
 ## Summarize A Run
 
@@ -496,5 +529,5 @@ XLA_FLAGS=--xla_force_host_platform_device_count=4 JAX_PLATFORMS=cpu uv run pyte
 Compile check:
 
 ```bash
-uv run python -m py_compile config.py data.py distributed.py model.py prepare_data.py pretrain.py logs.py profiling.py checkpoint.py sample.py lr_schedule.py utils/inspect_batch.py utils/param_count.py utils/train_budget.py
+uv run python -m py_compile config.py data.py distributed.py kv_cache.py model.py prepare_data.py pretrain.py logs.py profiling.py checkpoint.py sample.py lr_schedule.py utils/inspect_batch.py utils/param_count.py utils/train_budget.py
 ```

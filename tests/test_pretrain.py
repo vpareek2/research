@@ -100,6 +100,8 @@ def test_train_step_returns_classic_train_metrics():
     assert bool(jnp.isfinite(value))
     assert metrics["train/bpb"].shape == ()
     assert bool(jnp.isfinite(metrics["train/bpb"]))
+    assert metrics["train/bytes"].shape == ()
+    assert int(metrics["train/bytes"]) == input_ids.size - input_ids.shape[0]
     assert metrics["train/grad_norm"].shape == ()
     assert metrics["train/param_norm"].shape == ()
     assert bool(jnp.isfinite(metrics["train/grad_norm"]))
@@ -113,6 +115,8 @@ def test_sync_metric_scalars_returns_python_floats():
             "train/ppl": jnp.asarray(3.5, dtype=jnp.float32),
             "train/grad_norm": jnp.asarray(0.75, dtype=jnp.float32),
             "train/param_norm": jnp.asarray(12.0, dtype=jnp.float32),
+            "train/bytes": jnp.asarray(14, dtype=jnp.float32),
+            "train/bytes_seen": jnp.asarray(28, dtype=jnp.float32),
             "optim/lr": jnp.asarray(1e-3, dtype=jnp.float32),
         }
     )
@@ -122,6 +126,8 @@ def test_sync_metric_scalars_returns_python_floats():
         "train/ppl",
         "train/grad_norm",
         "train/param_norm",
+        "train/bytes",
+        "train/bytes_seen",
         "optim/lr",
     }
     assert metrics["train/loss"] == pytest.approx(1.25)

@@ -246,6 +246,8 @@ def test_wandb_first_run_logs_scalars_and_samples(tmp_path, monkeypatch):
             "step": 0,
             "train/loss": 1.0,
             "train/ppl": 2.7,
+            "train/bytes": 128,
+            "train/bytes_seen": 256,
             "val/loss": 1.5,
             "val/ppl": 4.5,
             "val/bpb": 0.9,
@@ -276,6 +278,8 @@ def test_wandb_first_run_logs_scalars_and_samples(tmp_path, monkeypatch):
     assert first_log["perf/mfu"] == 12.5
     assert first_log["system/gpu_memory_used_bytes"] == 1024
     assert "train/ppl" not in first_log
+    assert "train/bytes" not in first_log
+    assert "train/bytes_seen" not in first_log
     assert "val/ppl" not in first_log
     assert "val/tokens" not in first_log
     assert "val/domain/web/ppl" not in first_log
