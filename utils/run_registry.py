@@ -46,7 +46,7 @@ def _format_registry(rows: list[dict[str, Any]]) -> str:
 
     header = (
         f"{'run':<28} {'status':<10} {'tokens':>12} {'best_val':>10} "
-        f"{'ckpt_loss':>10} {'domain':>10} {'mfu':>8} {'tok/gpu-hr':>12}"
+        f"{'ckpt_loss':>10} {'domain':>10} {'core':>8} {'mfu':>8} {'tok/gpu-hr':>12}"
     )
     lines = [header, "-" * len(header)]
     for row in rows:
@@ -57,6 +57,7 @@ def _format_registry(rows: list[dict[str, Any]]) -> str:
             f"{_fmt(row.get('best_val_loss')):>10} "
             f"{_fmt(row.get('latest_checkpoint_loss')):>10} "
             f"{_fmt(row.get('latest_domain_mean_loss')):>10} "
+            f"{_fmt(row.get('latest_core')):>8} "
             f"{_fmt(row.get('avg_mfu')):>8} "
             f"{_fmt(row.get('train_tokens_per_gpu_hour')):>12}"
         )

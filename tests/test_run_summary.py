@@ -216,6 +216,16 @@ def test_summarize_run_computes_quality_health_speed_and_checkpoint_evals(tmp_pa
             "code": {"loss": 4.0, "ppl": 54.6, "bpb": 2.0},
         },
     }))
+    (eval_dir_1 / "core_metrics.json").write_text(json.dumps({
+        "checkpoint_step": 1,
+        "core": 0.2,
+        "tasks": {"toy": {"accuracy": 0.4, "centered": 0.2, "random_baseline": 25.0, "examples": 10}},
+    }))
+    (eval_dir_2 / "core_metrics.json").write_text(json.dumps({
+        "checkpoint_step": 3,
+        "core": 0.3,
+        "tasks": {"toy": {"accuracy": 0.5, "centered": 0.3, "random_baseline": 25.0, "examples": 10}},
+    }))
 
     summary = run_summary.summarize_run(run_dir)
 
@@ -245,6 +255,9 @@ def test_summarize_run_computes_quality_health_speed_and_checkpoint_evals(tmp_pa
     assert summary["checkpoint_evals"]["count"] == 2
     assert summary["checkpoint_evals"]["latest"]["checkpoint_step"] == 3
     assert summary["checkpoint_evals"]["best_loss"]["checkpoint_step"] == 3
+    assert summary["benchmark_core"]["count"] == 2
+    assert summary["benchmark_core"]["latest"]["core"] == 0.3
+    assert summary["benchmark_core"]["best"]["checkpoint_step"] == 3
     assert summary["registry_record"]["checkpoint_eval_count"] == 2
     assert summary["registry_record"]["avg_mfu"] == pytest.approx(25.0)
     assert summary["registry_record"]["final_mfu"] == 40.0
@@ -258,6 +271,9 @@ def test_summarize_run_computes_quality_health_speed_and_checkpoint_evals(tmp_pa
     assert summary["registry_record"]["latest_domain_mean_loss"] == pytest.approx(3.5)
     assert summary["registry_record"]["latest_domain_worst_name"] == "code"
     assert summary["registry_record"]["latest_domain_worst_loss"] == 4.0
+    assert summary["registry_record"]["latest_core"] == 0.3
+    assert summary["registry_record"]["best_core"] == 0.3
+    assert summary["registry_record"]["latest_core_step"] == 3
     assert summary["domain_validation"]["training"]["web"]["first_loss"] == 4.0
     assert summary["domain_validation"]["training"]["web"]["final_loss"] == 3.2
     assert summary["domain_validation"]["training"]["web"]["best_bpb"] == 1.6
@@ -267,6 +283,7 @@ def test_summarize_run_computes_quality_health_speed_and_checkpoint_evals(tmp_pa
     assert "Training Native Validation" in scorecard
     assert "Checkpoint Native Validation" in scorecard
     assert "Performance" in scorecard
+    assert "Benchmark CORE" in scorecard
     assert "Training Domain Validation" in scorecard
     assert "Checkpoint Domain Validation" in scorecard
     assert summary["status"] == "healthy"
@@ -318,6 +335,7 @@ def test_write_summary_artifacts_and_cli_register(tmp_path, monkeypatch):
     assert records[0]["checkpoint_eval_count"] == 0
     assert records[0]["latest_checkpoint_loss"] is None
     assert records[0]["latest_domain_mean_loss"] is None
+    assert records[0]["latest_core"] is None
 
 
 def test_register_run_upserts_and_list_runs_prints_table(tmp_path, capsys):
@@ -331,6 +349,11 @@ def test_register_run_upserts_and_list_runs_prints_table(tmp_path, capsys):
         "bpb": 1.2,
         "domains": {"web": {"loss": 3.0, "ppl": 20.1, "bpb": 1.5}},
     }))
+    (eval_dir / "core_metrics.json").write_text(json.dumps({
+        "checkpoint_step": 3,
+        "core": 0.42,
+        "tasks": {"toy": {"accuracy": 0.5, "centered": 0.42, "random_baseline": 25.0, "examples": 10}},
+    }))
     registry_path = tmp_path / "runs" / "registry.jsonl"
 
     run_registry.main([str(run_dir), "--registry-path", str(registry_path)])
@@ -341,12 +364,14 @@ def test_register_run_upserts_and_list_runs_prints_table(tmp_path, capsys):
     assert records[0]["latest_checkpoint_loss"] == 2.7
     assert records[0]["latest_checkpoint_bpb"] == 1.2
     assert records[0]["latest_domain_mean_loss"] == 3.0
+    assert records[0]["latest_core"] == 0.42
 
     run_registry.list_main(["--registry-path", str(registry_path)])
     output = capsys.readouterr().out
     assert "run" in output
     assert "ckpt_loss" in output
     assert "domain" in output
+    assert "core" in output
     assert "mfu" in output
     assert "tok/gpu-hr" in output
     assert "unit" in output

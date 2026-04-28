@@ -44,12 +44,24 @@ def load_checkpoint_eval_metrics(run_dir: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+def load_core_eval_metrics(run_dir: str | Path) -> list[dict[str, Any]]:
+    evals_dir = Path(run_dir) / "evals"
+    if not evals_dir.exists():
+        return []
+
+    rows = []
+    for path in sorted(evals_dir.glob("step_*/core_metrics.json"), key=_eval_metrics_sort_key):
+        rows.append(json.loads(path.read_text(encoding="utf-8")))
+    return rows
+
+
 def summarize_run(run_dir: str | Path) -> dict[str, Any]:
     run_dir = Path(run_dir)
     config = load_config(run_dir / "config.toml")
     metadata = _load_optional_json(run_dir / "metadata.json")
     rows = load_run_rows(run_dir)
     eval_rows = load_checkpoint_eval_metrics(run_dir)
+    core_rows = load_core_eval_metrics(run_dir)
     final_row = rows[-1]
     val_rows = [row for row in rows if "val/loss" in row]
     train_tokens_target = config.train.steps * config.train.batch_size * config.train.seq_len
@@ -59,6 +71,7 @@ def summarize_run(run_dir: str | Path) -> dict[str, Any]:
     checkpoint_evals = _checkpoint_eval_summary(eval_rows)
     domain_validation = _domain_validation_summary(rows, eval_rows)
     performance = _performance_summary(rows)
+    core_benchmark = _core_benchmark_summary(core_rows)
     status, decision_hint = _verdict(config, rows, final_row, val_rows, health)
 
     summary = {
@@ -102,6 +115,7 @@ def summarize_run(run_dir: str | Path) -> dict[str, Any]:
         "performance": performance,
         "checkpoint_evals": checkpoint_evals,
         "domain_validation": domain_validation,
+        "benchmark_core": core_benchmark,
         "status": status,
         "decision_hint": decision_hint,
     }
@@ -119,6 +133,7 @@ def format_scorecard(summary: dict[str, Any]) -> str:
     performance = summary.get("performance", {})
     evals = summary["checkpoint_evals"]
     domains = summary.get("domain_validation", {})
+    core_benchmark = summary.get("benchmark_core", {})
 
     lines = [
         "# Run Scorecard",
@@ -246,6 +261,33 @@ def format_scorecard(summary: dict[str, Any]) -> str:
                 f"{_format_optional(best_bpb.get('bpb')):>12}"
             )
 
+    if core_benchmark.get("count"):
+        latest_core = core_benchmark.get("latest") or {}
+        best_core = core_benchmark.get("best") or {}
+        lines.extend(
+            [
+                "",
+                "## Benchmark CORE",
+                "",
+                f"- count: `{core_benchmark['count']}`",
+                f"- latest_step: `{_format_optional(latest_core.get('checkpoint_step'))}`",
+                f"- latest_core: `{_format_optional(latest_core.get('core'))}`",
+                f"- best_step: `{_format_optional(best_core.get('checkpoint_step'))}`",
+                f"- best_core: `{_format_optional(best_core.get('core'))}`",
+                "",
+                f"{'task':<35} {'accuracy':>10} {'centered':>10} {'baseline':>10} {'examples':>10}",
+                "-" * 81,
+            ]
+        )
+        for task_name, task_metrics in (latest_core.get("tasks") or {}).items():
+            lines.append(
+                f"{task_name:<35} "
+                f"{_format_optional(task_metrics.get('accuracy')):>10} "
+                f"{_format_optional(task_metrics.get('centered')):>10} "
+                f"{_format_optional(task_metrics.get('random_baseline')):>10} "
+                f"{_format_optional(task_metrics.get('examples')):>10}"
+            )
+
     return "\n".join(lines) + "\n"
 
 
@@ -316,6 +358,9 @@ def registry_record(summary: dict[str, Any]) -> dict[str, Any]:
         "latest_checkpoint_bpb": _nested_metric(summary, ["checkpoint_evals", "latest", "bpb"]),
         "best_checkpoint_loss": _nested_metric(summary, ["checkpoint_evals", "best_loss", "loss"]),
         "best_checkpoint_bpb": _nested_metric(summary, ["checkpoint_evals", "best_bpb", "bpb"]),
+        "latest_core": _nested_metric(summary, ["benchmark_core", "latest", "core"]),
+        "best_core": _nested_metric(summary, ["benchmark_core", "best", "core"]),
+        "latest_core_step": _nested_metric(summary, ["benchmark_core", "latest", "checkpoint_step"]),
         **_latest_checkpoint_domain_rollup(summary),
     }
 
@@ -391,6 +436,15 @@ def _checkpoint_eval_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "latest": rows[-1] if rows else None,
         "best_loss": min(finite_loss_rows, key=lambda row: float(row["loss"])) if finite_loss_rows else None,
         "best_bpb": min(finite_bpb_rows, key=lambda row: float(row["bpb"])) if finite_bpb_rows else None,
+    }
+
+
+def _core_benchmark_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    finite_rows = [row for row in rows if _is_finite(row.get("core"))]
+    return {
+        "count": len(rows),
+        "latest": rows[-1] if rows else None,
+        "best": max(finite_rows, key=lambda row: float(row["core"])) if finite_rows else None,
     }
 
 

@@ -401,6 +401,25 @@ runs/<name>/evals/step_<step>/metrics.json
 runs/<name>/evals/step_<step>/summary.md
 ```
 
+## Evaluate CORE
+
+Use `eval-core` to run nanochat's CORE benchmark against a saved checkpoint:
+
+```bash
+uv run eval-core runs/tiny_shakespeare_smoke
+uv run eval-core runs/tiny_shakespeare_smoke --step 100
+uv run eval-core runs/tiny_shakespeare_smoke --max-per-task 100
+```
+
+The command downloads `eval_bundle.zip` into `data/eval_bundle` if needed, then
+writes:
+
+```text
+runs/<name>/evals/step_<step>/core_metrics.json
+runs/<name>/evals/step_<step>/core.csv
+runs/<name>/evals/step_<step>/core_summary.md
+```
+
 ## Summarize A Run
 
 Successful training runs automatically write:
