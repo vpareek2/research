@@ -14,10 +14,18 @@ import jax
 
 from checkpoint import create_checkpoint_manager, restore_model_checkpoint
 from config import load_config
-from data import domain_eval_steps, load_eval_domain_token_bytes, load_token_bytes, make_eval_domain_dataloaders, make_val_dataloader
+from data import (
+    REQUIRED_EVAL_DOMAINS,
+    domain_eval_steps,
+    load_eval_domain_token_bytes,
+    load_token_bytes,
+    make_eval_domain_dataloaders,
+    make_val_dataloader,
+)
 from distributed import create_distributed_context, place_replicated_model
 from evals import LossEvalResult, evaluate_domain_losses, evaluate_loss
 from model import Model
+from utils.run_summary import summarize_and_write
 
 
 def write_eval_artifacts(
@@ -42,32 +50,57 @@ def write_eval_artifacts(
         f.write("\n")
 
     summary_path = eval_dir / "summary.md"
-    summary_path.write_text(
-        "# Checkpoint Eval\n\n"
-        f"- run: `{run_dir}`\n"
-        f"- checkpoint_step: `{checkpoint_step}`\n"
-        f"- eval_steps: `{result.eval_steps}`\n"
-        f"- examples: `{result.examples}`\n"
-        f"- tokens: `{result.tokens}`\n"
-        f"- loss: `{result.loss:.6f}`\n"
-        f"- ppl: `{result.ppl:.6f}`\n"
-        f"- bpb: `{result.bpb:.6f}`\n"
-        f"- bytes: `{result.bytes}`\n"
-        f"- elapsed_sec: `{result.elapsed_sec:.6f}`\n"
-        f"- tokens_per_sec: `{result.tokens_per_sec:.2f}`\n",
-        encoding="utf-8",
-    )
-    if domains:
-        with summary_path.open("a", encoding="utf-8") as f:
-            f.write("\n## Domains\n\n")
-            f.write(f"{'domain':<12} {'loss':>10} {'ppl':>10} {'bpb':>10} {'tokens':>10}\n")
-            f.write("-" * 58 + "\n")
-            for name, domain_result in domains.items():
-                f.write(
-                    f"{name:<12} {domain_result.loss:>10.6f} {domain_result.ppl:>10.6f} "
-                    f"{domain_result.bpb:>10.6f} {domain_result.tokens:>10}\n"
-                )
+    summary_path.write_text(_format_eval_summary(run_dir, checkpoint_step, result, domains), encoding="utf-8")
     return metrics_path, summary_path
+
+
+def _format_eval_summary(
+    run_dir: Path,
+    checkpoint_step: int,
+    result: LossEvalResult,
+    domains: dict[str, LossEvalResult] | None,
+) -> str:
+    lines = [
+        "# Checkpoint Eval",
+        "",
+        f"- run: `{run_dir}`",
+        f"- checkpoint_step: `{checkpoint_step}`",
+        "",
+        "## Native Validation",
+        "",
+        f"- eval_steps: `{result.eval_steps}`",
+        f"- examples: `{result.examples}`",
+        f"- tokens: `{result.tokens}`",
+        f"- loss: `{result.loss:.6f}`",
+        f"- ppl: `{result.ppl:.6f}`",
+        f"- bpb: `{result.bpb:.6f}`",
+        f"- bytes: `{result.bytes}`",
+        f"- elapsed_sec: `{result.elapsed_sec:.6f}`",
+        f"- tokens_per_sec: `{result.tokens_per_sec:.2f}`",
+    ]
+    if domains:
+        lines.extend(
+            [
+                "",
+                "## Domain Validation",
+                "",
+                f"{'domain':<12} {'loss':>10} {'ppl':>10} {'bpb':>10} {'tokens':>10}",
+                "-" * 58,
+            ]
+        )
+        for name in _ordered_domain_names(domains):
+            domain_result = domains[name]
+            lines.append(
+                f"{name:<12} {domain_result.loss:>10.6f} {domain_result.ppl:>10.6f} "
+                f"{domain_result.bpb:>10.6f} {domain_result.tokens:>10}"
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _ordered_domain_names(domains: dict[str, LossEvalResult]) -> list[str]:
+    known = [name for name in REQUIRED_EVAL_DOMAINS if name in domains]
+    extras = sorted(name for name in domains if name not in REQUIRED_EVAL_DOMAINS)
+    return known + extras
 
 
 def run_eval(run_dir: Path, *, step: int | None, eval_steps: int | None) -> tuple[int, LossEvalResult, dict[str, LossEvalResult]]:
@@ -116,8 +149,11 @@ def main():
     run_dir = Path(args.run_dir)
     checkpoint_step, result, domains = run_eval(run_dir, step=args.step, eval_steps=args.eval_steps)
     metrics_path, summary_path = write_eval_artifacts(run_dir, checkpoint_step, result, domains)
+    _, summary_json_path, scorecard_path, _ = summarize_and_write(run_dir)
     print(f"wrote {metrics_path}")
     print(f"wrote {summary_path}")
+    print(f"wrote {summary_json_path}")
+    print(f"wrote {scorecard_path}")
 
 
 if __name__ == "__main__":

@@ -210,11 +210,12 @@ def test_metric_header_and_row_formatting():
         "train/ppl": 19936.25,
         "train/grad_norm": 8.78,
         "time/tokens_per_sec": 30632.0,
+        "perf/mfu": 12.3,
         "val/loss": 9.0258,
     }
 
-    assert metric_header() == "  step |       loss |        ppl |      grad |    tok/s |        val"
-    assert format_metrics_row(metrics) == "    20 |     9.9001 |   19936.25 |      8.78 |    30632 |     9.0258"
+    assert metric_header() == "  step |       loss |        ppl |      grad |    tok/s |      mfu |        val"
+    assert format_metrics_row(metrics) == "    20 |     9.9001 |   19936.25 |      8.78 |    30632 |    12.3% |     9.0258"
 
 
 def test_metric_row_without_val_loss():
@@ -226,7 +227,7 @@ def test_metric_row_without_val_loss():
         "time/tokens_per_sec": 20006.0,
     }
 
-    assert format_metrics_row(metrics) == "    21 |     8.9149 |    7430.12 |      9.16 |    20006 |           "
+    assert format_metrics_row(metrics) == "    21 |     8.9149 |    7430.12 |      9.16 |    20006 |          |           "
 
 
 def test_add_timing_metrics_reports_loop_and_train_throughput():
@@ -255,6 +256,33 @@ def test_add_timing_metrics_reports_loop_and_train_throughput():
     assert metrics["time/train_step_sec"] == 0.1
     assert metrics["time/step_sec"] == 0.2
     assert metrics["time/tokens_per_sec"] == 160.0
+    assert metrics["time/train_tokens_per_sec"] == 320.0
+
+
+def test_add_timing_metrics_uses_train_sync_for_train_throughput():
+    train_cfg = TrainConfig(
+        seed=0,
+        batch_size=4,
+        seq_len=8,
+        steps=2,
+        lr=1e-3,
+        decay=0.1,
+        log_every=1,
+        eval_every=1,
+        eval_steps=1,
+        checkpoint_every=2,
+        keep_last=2,
+    )
+    timer = StepTimer()
+    timer.add("step", 0.2)
+    timer.add("train_step", 0.02)
+    timer.add("train_sync", 0.08)
+    metrics = {"step": 0}
+
+    add_timing_metrics(metrics, timer, train_cfg)
+
+    assert metrics["time/train_step_sec"] == 0.02
+    assert metrics["time/train_sync_sec"] == 0.08
     assert metrics["time/train_tokens_per_sec"] == 320.0
 
 

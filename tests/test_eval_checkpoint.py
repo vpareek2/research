@@ -138,6 +138,34 @@ domain_eval_steps = 1
     )
 
 
+def write_run_metrics(run_dir):
+    rows = [
+        {
+            "step": 0,
+            "train/loss": 4.0,
+            "val/loss": 4.5,
+            "val/bpb": 2.2,
+            "train/tokens_seen": 16,
+            "health/nan_count": 0,
+            "health/loss_spike_count": 0,
+            "health/grad_norm_spike_count": 0,
+        },
+        {
+            "step": 1,
+            "train/loss": 3.0,
+            "val/loss": 3.5,
+            "val/bpb": 1.8,
+            "train/tokens_seen": 32,
+            "health/nan_count": 0,
+            "health/loss_spike_count": 0,
+            "health/grad_norm_spike_count": 0,
+        },
+    ]
+    with (run_dir / "metrics.jsonl").open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+
+
 def make_run(tmp_path):
     data_dir = tmp_path / "prepared"
     data_dir.mkdir()
@@ -149,6 +177,7 @@ def make_run(tmp_path):
     run_dir = tmp_path / "runs" / "unit"
     run_dir.mkdir(parents=True)
     write_run_config(run_dir, data_dir, eval_root)
+    write_run_metrics(run_dir)
 
     model_config = tiny_model_config()
     tc = train_config()
@@ -193,9 +222,15 @@ def test_eval_checkpoint_cli_writes_latest_eval_artifacts(tmp_path, monkeypatch)
 
     metrics_path = run_dir / "evals" / "step_1" / "metrics.json"
     summary_path = run_dir / "evals" / "step_1" / "summary.md"
+    run_summary_path = run_dir / "summary" / "run_summary.json"
+    scorecard_path = run_dir / "summary" / "scorecard.md"
     metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
 
     assert summary_path.exists()
+    assert run_summary_path.exists()
+    assert scorecard_path.exists()
+    assert "Native Validation" in summary_path.read_text(encoding="utf-8")
+    assert "Domain Validation" in summary_path.read_text(encoding="utf-8")
     assert metrics["run_dir"] == str(run_dir)
     assert metrics["checkpoint_step"] == 1
     assert metrics["eval_steps"] == 1
@@ -208,6 +243,8 @@ def test_eval_checkpoint_cli_writes_latest_eval_artifacts(tmp_path, monkeypatch)
     assert metrics["tokens_per_sec"] > 0.0
     assert set(metrics["domains"]) == set(REQUIRED_EVAL_DOMAINS)
     assert metrics["domains"]["web"]["loss"] > 0.0
+    refreshed_summary = json.loads(run_summary_path.read_text(encoding="utf-8"))
+    assert refreshed_summary["checkpoint_evals"]["latest"]["checkpoint_step"] == 1
 
 
 def test_eval_checkpoint_cli_supports_explicit_step(tmp_path, monkeypatch):

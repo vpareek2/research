@@ -82,9 +82,29 @@ def healthy_rows():
             "val/loss": 4.5,
             "val/ppl": 90.0,
             "val/bpb": 2.2,
+            "val/domain/web/loss": 4.0,
+            "val/domain/web/ppl": 54.6,
+            "val/domain/web/bpb": 2.0,
+            "val/domain/web/tokens": 16,
+            "val/domain/code/loss": 5.0,
+            "val/domain/code/ppl": 148.4,
+            "val/domain/code/bpb": 2.5,
+            "val/domain/code/tokens": 16,
             "train/tokens_seen": 16,
             "time/tokens_per_sec": 10.0,
             "time/train_tokens_per_sec": 20.0,
+            "time/train_tokens_per_gpu_hour": 72000.0,
+            "perf/mfu": 10.0,
+            "perf/flops_per_token": 1000,
+            "perf/flops_per_step": 16000,
+            "perf/peak_flops_per_device": 100000.0,
+            "perf/peak_flops_total": 100000.0,
+            "system/device_count": 1,
+            "system/device_kind": "unit gpu",
+            "system/gpu_memory_used_bytes": 100,
+            "system/gpu_memory_peak_bytes": 100,
+            "system/gpu_utilization_pct": 30.0,
+            "system/gpu_power_w": 100.0,
             "health/nan_count": 0,
             "health/loss_spike_count": 0,
             "health/grad_norm_spike_count": 0,
@@ -97,6 +117,12 @@ def healthy_rows():
             "train/bpb": 1.5,
             "train/tokens_seen": 32,
             "time/tokens_per_sec": 30.0,
+            "time/train_tokens_per_gpu_hour": 144000.0,
+            "perf/mfu": 20.0,
+            "system/gpu_memory_used_bytes": 200,
+            "system/gpu_memory_peak_bytes": 200,
+            "system/gpu_utilization_pct": 40.0,
+            "system/gpu_power_w": 110.0,
             "sample/path": "sample.txt",
             "health/nan_count": 0,
             "health/loss_spike_count": 0,
@@ -113,6 +139,12 @@ def healthy_rows():
             "val/bpb": 1.4,
             "train/tokens_seen": 48,
             "time/train_tokens_per_sec": 40.0,
+            "time/train_tokens_per_gpu_hour": 144000.0,
+            "perf/mfu": 30.0,
+            "system/gpu_memory_used_bytes": 300,
+            "system/gpu_memory_peak_bytes": 300,
+            "system/gpu_utilization_pct": 50.0,
+            "system/gpu_power_w": 120.0,
             "health/nan_count": 0,
             "health/loss_spike_count": 0,
             "health/grad_norm_spike_count": 0,
@@ -138,7 +170,19 @@ def healthy_rows():
             "train/tokens_seen": 64,
             "time/tokens_per_sec": 50.0,
             "time/train_tokens_per_sec": 60.0,
+            "time/train_tokens_per_gpu_hour": 216000.0,
             "time/elapsed_sec": 12.0,
+            "perf/mfu": 40.0,
+            "perf/flops_per_token": 1000,
+            "perf/flops_per_step": 16000,
+            "perf/peak_flops_per_device": 100000.0,
+            "perf/peak_flops_total": 100000.0,
+            "system/device_count": 1,
+            "system/device_kind": "unit gpu",
+            "system/gpu_memory_used_bytes": 400,
+            "system/gpu_memory_peak_bytes": 400,
+            "system/gpu_utilization_pct": 60.0,
+            "system/gpu_power_w": 130.0,
             "health/nan_count": 0,
             "health/loss_spike_count": 0,
             "health/grad_norm_spike_count": 0,
@@ -167,7 +211,10 @@ def test_summarize_run_computes_quality_health_speed_and_checkpoint_evals(tmp_pa
         "loss": 2.7,
         "ppl": 14.9,
         "bpb": 1.2,
-        "domains": {"web": {"loss": 3.0, "ppl": 20.1, "bpb": 1.5}},
+        "domains": {
+            "web": {"loss": 3.0, "ppl": 20.1, "bpb": 1.5},
+            "code": {"loss": 4.0, "ppl": 54.6, "bpb": 2.0},
+        },
     }))
 
     summary = run_summary.summarize_run(run_dir)
@@ -188,13 +235,40 @@ def test_summarize_run_computes_quality_health_speed_and_checkpoint_evals(tmp_pa
     assert summary["health"]["final_train_val_gap"] == 0.8
     assert summary["speed"]["avg_tokens_per_sec"] == pytest.approx(30.0)
     assert summary["speed"]["avg_train_tokens_per_sec"] == pytest.approx(40.0)
+    assert summary["performance"]["final_mfu"] == 40.0
+    assert summary["performance"]["avg_mfu"] == pytest.approx(25.0)
+    assert summary["performance"]["flops_per_token"] == 1000
+    assert summary["performance"]["avg_train_tokens_per_gpu_hour"] == pytest.approx(144000.0)
+    assert summary["performance"]["peak_gpu_memory_bytes"] == 400
+    assert summary["performance"]["avg_gpu_utilization_pct"] == pytest.approx(45.0)
+    assert summary["performance"]["avg_gpu_power_w"] == pytest.approx(115.0)
     assert summary["checkpoint_evals"]["count"] == 2
     assert summary["checkpoint_evals"]["latest"]["checkpoint_step"] == 3
     assert summary["checkpoint_evals"]["best_loss"]["checkpoint_step"] == 3
+    assert summary["registry_record"]["checkpoint_eval_count"] == 2
+    assert summary["registry_record"]["avg_mfu"] == pytest.approx(25.0)
+    assert summary["registry_record"]["final_mfu"] == 40.0
+    assert summary["registry_record"]["train_tokens_per_gpu_hour"] == pytest.approx(144000.0)
+    assert summary["registry_record"]["peak_gpu_memory_bytes"] == 400
+    assert summary["registry_record"]["latest_checkpoint_step"] == 3
+    assert summary["registry_record"]["latest_checkpoint_loss"] == 2.7
+    assert summary["registry_record"]["latest_checkpoint_bpb"] == 1.2
+    assert summary["registry_record"]["best_checkpoint_loss"] == 2.7
+    assert summary["registry_record"]["best_checkpoint_bpb"] == 1.2
+    assert summary["registry_record"]["latest_domain_mean_loss"] == pytest.approx(3.5)
+    assert summary["registry_record"]["latest_domain_worst_name"] == "code"
+    assert summary["registry_record"]["latest_domain_worst_loss"] == 4.0
+    assert summary["domain_validation"]["training"]["web"]["first_loss"] == 4.0
     assert summary["domain_validation"]["training"]["web"]["final_loss"] == 3.2
     assert summary["domain_validation"]["training"]["web"]["best_bpb"] == 1.6
+    assert summary["domain_validation"]["training"]["web"]["delta_loss"] == pytest.approx(-0.8)
     assert summary["domain_validation"]["checkpoint_evals"]["web"]["best_loss"]["checkpoint_step"] == 3
-    assert "Domain Validation" in run_summary.format_scorecard(summary)
+    scorecard = run_summary.format_scorecard(summary)
+    assert "Training Native Validation" in scorecard
+    assert "Checkpoint Native Validation" in scorecard
+    assert "Performance" in scorecard
+    assert "Training Domain Validation" in scorecard
+    assert "Checkpoint Domain Validation" in scorecard
     assert summary["status"] == "healthy"
     assert summary["decision_hint"] == "scale"
 
@@ -241,10 +315,22 @@ def test_write_summary_artifacts_and_cli_register(tmp_path, monkeypatch):
     assert len(records) == 1
     assert records[0]["run_name"] == "unit"
     assert records[0]["status"] == "healthy"
+    assert records[0]["checkpoint_eval_count"] == 0
+    assert records[0]["latest_checkpoint_loss"] is None
+    assert records[0]["latest_domain_mean_loss"] is None
 
 
 def test_register_run_upserts_and_list_runs_prints_table(tmp_path, capsys):
     run_dir = make_run(tmp_path, healthy_rows())
+    eval_dir = run_dir / "evals" / "step_3"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "metrics.json").write_text(json.dumps({
+        "checkpoint_step": 3,
+        "loss": 2.7,
+        "ppl": 14.9,
+        "bpb": 1.2,
+        "domains": {"web": {"loss": 3.0, "ppl": 20.1, "bpb": 1.5}},
+    }))
     registry_path = tmp_path / "runs" / "registry.jsonl"
 
     run_registry.main([str(run_dir), "--registry-path", str(registry_path)])
@@ -252,9 +338,16 @@ def test_register_run_upserts_and_list_runs_prints_table(tmp_path, capsys):
 
     records = [json.loads(line) for line in registry_path.read_text(encoding="utf-8").splitlines()]
     assert len(records) == 1
+    assert records[0]["latest_checkpoint_loss"] == 2.7
+    assert records[0]["latest_checkpoint_bpb"] == 1.2
+    assert records[0]["latest_domain_mean_loss"] == 3.0
 
     run_registry.list_main(["--registry-path", str(registry_path)])
     output = capsys.readouterr().out
     assert "run" in output
+    assert "ckpt_loss" in output
+    assert "domain" in output
+    assert "mfu" in output
+    assert "tok/gpu-hr" in output
     assert "unit" in output
     assert "healthy" in output

@@ -58,6 +58,7 @@ def summarize_run(run_dir: str | Path) -> dict[str, Any]:
     quality = _quality_summary(rows, val_rows)
     checkpoint_evals = _checkpoint_eval_summary(eval_rows)
     domain_validation = _domain_validation_summary(rows, eval_rows)
+    performance = _performance_summary(rows)
     status, decision_hint = _verdict(config, rows, final_row, val_rows, health)
 
     summary = {
@@ -98,6 +99,7 @@ def summarize_run(run_dir: str | Path) -> dict[str, Any]:
             "avg_train_tokens_per_sec": _mean_metric(rows, "time/train_tokens_per_sec"),
             "final_elapsed_sec": _number_or_none(final_row.get("time/elapsed_sec")),
         },
+        "performance": performance,
         "checkpoint_evals": checkpoint_evals,
         "domain_validation": domain_validation,
         "status": status,
@@ -114,6 +116,7 @@ def format_scorecard(summary: dict[str, Any]) -> str:
     quality = summary["quality"]
     health = summary["health"]
     speed = summary["speed"]
+    performance = summary.get("performance", {})
     evals = summary["checkpoint_evals"]
     domains = summary.get("domain_validation", {})
 
@@ -142,10 +145,11 @@ def format_scorecard(summary: dict[str, Any]) -> str:
         f"- tokens_seen: `{_format_optional(training['tokens_seen'])}`",
         f"- configured_tokens: `{training['configured_tokens']}`",
         "",
-        "## Quality",
+        "## Training Native Validation",
         "",
         f"- final_train_loss: `{_format_optional(quality['final_train_loss'])}`",
         f"- best_train_loss: `{_format_optional(quality['best_train_loss'])}`",
+        f"- first_val_loss: `{_format_optional(quality['first_val_loss'])}`",
         f"- final_val_loss: `{_format_optional(quality['final_val_loss'])}`",
         f"- best_val_loss: `{_format_optional(quality['best_val_loss'])}`",
         f"- final_val_bpb: `{_format_optional(quality['final_val_bpb'])}`",
@@ -165,6 +169,16 @@ def format_scorecard(summary: dict[str, Any]) -> str:
         f"- avg_tokens_per_sec: `{_format_optional(speed['avg_tokens_per_sec'])}`",
         f"- avg_train_tokens_per_sec: `{_format_optional(speed['avg_train_tokens_per_sec'])}`",
         f"- final_elapsed_sec: `{_format_optional(speed['final_elapsed_sec'])}`",
+        "",
+        "## Performance",
+        "",
+        f"- final_mfu: `{_format_optional(performance.get('final_mfu'))}`",
+        f"- avg_mfu: `{_format_optional(performance.get('avg_mfu'))}`",
+        f"- flops_per_token: `{_format_optional(performance.get('flops_per_token'))}`",
+        f"- avg_train_tokens_per_gpu_hour: `{_format_optional(performance.get('avg_train_tokens_per_gpu_hour'))}`",
+        f"- peak_gpu_memory_bytes: `{_format_optional(performance.get('peak_gpu_memory_bytes'))}`",
+        f"- avg_gpu_utilization_pct: `{_format_optional(performance.get('avg_gpu_utilization_pct'))}`",
+        f"- avg_gpu_power_w: `{_format_optional(performance.get('avg_gpu_power_w'))}`",
     ]
 
     if evals["count"]:
@@ -174,7 +188,7 @@ def format_scorecard(summary: dict[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                "## Checkpoint Evals",
+                "## Checkpoint Native Validation",
                 "",
                 f"- count: `{evals['count']}`",
                 f"- latest_step: `{_format_optional(latest_eval.get('checkpoint_step'))}`",
@@ -191,19 +205,45 @@ def format_scorecard(summary: dict[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                "## Domain Validation",
+                "## Training Domain Validation",
                 "",
-                f"{'domain':<12} {'final_loss':>12} {'best_loss':>12} {'final_bpb':>12} {'best_bpb':>12}",
-                "-" * 64,
+                f"{'domain':<12} {'first_loss':>12} {'final_loss':>12} {'best_loss':>12} {'delta':>12} {'final_bpb':>12} {'best_bpb':>12}",
+                "-" * 90,
             ]
         )
         for name, domain in training_domains.items():
             lines.append(
                 f"{name:<12} "
+                f"{_format_optional(domain.get('first_loss')):>12} "
                 f"{_format_optional(domain.get('final_loss')):>12} "
                 f"{_format_optional(domain.get('best_loss')):>12} "
+                f"{_format_optional(domain.get('delta_loss')):>12} "
                 f"{_format_optional(domain.get('final_bpb')):>12} "
                 f"{_format_optional(domain.get('best_bpb')):>12}"
+            )
+
+    checkpoint_domains = domains.get("checkpoint_evals", {})
+    if checkpoint_domains:
+        lines.extend(
+            [
+                "",
+                "## Checkpoint Domain Validation",
+                "",
+                f"{'domain':<12} {'latest_step':>12} {'latest_loss':>12} {'best_loss':>12} {'latest_bpb':>12} {'best_bpb':>12}",
+                "-" * 77,
+            ]
+        )
+        for name, domain in checkpoint_domains.items():
+            latest = domain.get("latest") or {}
+            best_loss = domain.get("best_loss") or {}
+            best_bpb = domain.get("best_bpb") or {}
+            lines.append(
+                f"{name:<12} "
+                f"{_format_optional(latest.get('checkpoint_step')):>12} "
+                f"{_format_optional(latest.get('loss')):>12} "
+                f"{_format_optional(best_loss.get('loss')):>12} "
+                f"{_format_optional(latest.get('bpb')):>12} "
+                f"{_format_optional(best_bpb.get('bpb')):>12}"
             )
 
     return "\n".join(lines) + "\n"
@@ -249,6 +289,7 @@ def registry_record(summary: dict[str, Any]) -> dict[str, Any]:
     training = summary["training"]
     quality = summary["quality"]
     speed = summary["speed"]
+    performance = summary.get("performance", {})
     health = summary["health"]
     return {
         "run_name": run["name"],
@@ -265,6 +306,17 @@ def registry_record(summary: dict[str, Any]) -> dict[str, Any]:
         "nan_count": health["nan_count"],
         "status": summary["status"],
         "decision_hint": summary["decision_hint"],
+        "avg_mfu": performance.get("avg_mfu"),
+        "final_mfu": performance.get("final_mfu"),
+        "train_tokens_per_gpu_hour": performance.get("avg_train_tokens_per_gpu_hour"),
+        "peak_gpu_memory_bytes": performance.get("peak_gpu_memory_bytes"),
+        "checkpoint_eval_count": summary["checkpoint_evals"]["count"],
+        "latest_checkpoint_step": _nested_metric(summary, ["checkpoint_evals", "latest", "checkpoint_step"]),
+        "latest_checkpoint_loss": _nested_metric(summary, ["checkpoint_evals", "latest", "loss"]),
+        "latest_checkpoint_bpb": _nested_metric(summary, ["checkpoint_evals", "latest", "bpb"]),
+        "best_checkpoint_loss": _nested_metric(summary, ["checkpoint_evals", "best_loss", "loss"]),
+        "best_checkpoint_bpb": _nested_metric(summary, ["checkpoint_evals", "best_bpb", "bpb"]),
+        **_latest_checkpoint_domain_rollup(summary),
     }
 
 
@@ -312,6 +364,25 @@ def _health_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _performance_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "device_count": _last_metric(rows, "system/device_count"),
+        "device_kind": _last_value(rows, "system/device_kind"),
+        "flops_per_token": _last_metric(rows, "perf/flops_per_token"),
+        "flops_per_step": _last_metric(rows, "perf/flops_per_step"),
+        "peak_flops_per_device": _last_metric(rows, "perf/peak_flops_per_device"),
+        "peak_flops_total": _last_metric(rows, "perf/peak_flops_total"),
+        "final_mfu": _last_metric(rows, "perf/mfu"),
+        "avg_mfu": _mean_metric(rows, "perf/mfu"),
+        "avg_train_tokens_per_gpu_hour": _mean_metric(rows, "time/train_tokens_per_gpu_hour"),
+        "final_train_tokens_per_gpu_hour": _last_metric(rows, "time/train_tokens_per_gpu_hour"),
+        "peak_gpu_memory_bytes": _max_metric(rows, "system/gpu_memory_peak_bytes")
+        or _max_metric(rows, "system/gpu_memory_used_bytes"),
+        "avg_gpu_utilization_pct": _mean_metric(rows, "system/gpu_utilization_pct"),
+        "avg_gpu_power_w": _mean_metric(rows, "system/gpu_power_w"),
+    }
+
+
 def _checkpoint_eval_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     finite_loss_rows = [row for row in rows if _is_finite(row.get("loss"))]
     finite_bpb_rows = [row for row in rows if _is_finite(row.get("bpb"))]
@@ -335,9 +406,13 @@ def _domain_validation_summary(rows: list[dict[str, Any]], eval_rows: list[dict[
     training = {}
     for name in names:
         prefix = f"val/domain/{name}"
+        first_loss = _first_metric(rows, f"{prefix}/loss")
+        final_loss = _last_metric(rows, f"{prefix}/loss")
         training[name] = {
-            "final_loss": _last_metric(rows, f"{prefix}/loss"),
+            "first_loss": first_loss,
+            "final_loss": final_loss,
             "best_loss": _min_metric(rows, f"{prefix}/loss"),
+            "delta_loss": final_loss - first_loss if final_loss is not None and first_loss is not None else None,
             "final_ppl": _last_metric(rows, f"{prefix}/ppl"),
             "final_bpb": _last_metric(rows, f"{prefix}/bpb"),
             "best_bpb": _min_metric(rows, f"{prefix}/bpb"),
@@ -425,6 +500,13 @@ def _last_metric(rows: list[dict[str, Any]], key: str) -> float | None:
     return None
 
 
+def _last_value(rows: list[dict[str, Any]], key: str) -> Any | None:
+    for row in reversed(rows):
+        if key in row and row[key] is not None:
+            return row[key]
+    return None
+
+
 def _min_metric(rows: list[dict[str, Any]], key: str) -> float | None:
     values = [_number_or_none(row.get(key)) for row in rows]
     values = [value for value in values if value is not None]
@@ -441,6 +523,39 @@ def _mean_metric(rows: list[dict[str, Any]], key: str) -> float | None:
     values = [_number_or_none(row.get(key)) for row in rows]
     values = [value for value in values if value is not None]
     return mean(values) if values else None
+
+
+def _nested_metric(row: dict[str, Any], path: list[str]) -> float | int | None:
+    value: Any = row
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return _number_or_none(value)
+
+
+def _latest_checkpoint_domain_rollup(summary: dict[str, Any]) -> dict[str, Any]:
+    latest = summary["checkpoint_evals"].get("latest") or {}
+    domains = latest.get("domains") or {}
+    domain_losses = [
+        (name, _number_or_none(metrics.get("loss")))
+        for name, metrics in domains.items()
+        if isinstance(metrics, dict)
+    ]
+    domain_losses = [(name, loss) for name, loss in domain_losses if loss is not None]
+    if not domain_losses:
+        return {
+            "latest_domain_mean_loss": None,
+            "latest_domain_worst_name": None,
+            "latest_domain_worst_loss": None,
+        }
+
+    worst_name, worst_loss = max(domain_losses, key=lambda item: item[1])
+    return {
+        "latest_domain_mean_loss": mean(loss for _, loss in domain_losses),
+        "latest_domain_worst_name": worst_name,
+        "latest_domain_worst_loss": worst_loss,
+    }
 
 
 def _number_or_none(value: Any) -> float | int | None:

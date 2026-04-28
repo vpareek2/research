@@ -29,6 +29,7 @@ from logs import setup_run
 from profiling import StepTimer, TraceProfiler
 from sample import generate, write_sample
 from train_debug import debug_nans_enabled, raise_for_nonfinite_training_state
+from utils.perf import PerfMonitor
 from utils.run_summary import summarize_and_write
 
 
@@ -107,18 +108,21 @@ def print_startup(config: RunConfig, *, resume: bool, distributed: DistributedCo
 
 
 def metric_header() -> str:
-    return f"{'step':>6} | {'loss':>10} | {'ppl':>10} | {'grad':>9} | {'tok/s':>8} | {'val':>10}"
+    return f"{'step':>6} | {'loss':>10} | {'ppl':>10} | {'grad':>9} | {'tok/s':>8} | {'mfu':>8} | {'val':>10}"
 
 
 def format_metrics_row(metrics: dict) -> str:
     val_loss = metrics.get("val/loss")
     val_text = f"{val_loss:>10.4f}" if val_loss is not None else f"{'':>10}"
+    mfu = metrics.get("perf/mfu")
+    mfu_text = f"{mfu:>7.1f}%" if mfu is not None else f"{'':>8}"
     return (
         f"{metrics['step']:>6} | "
         f"{metrics['train/loss']:>10.4f} | "
         f"{metrics['train/ppl']:>10.2f} | "
         f"{metrics['train/grad_norm']:>9.2f} | "
         f"{metrics['time/tokens_per_sec']:>8.0f} | "
+        f"{mfu_text} | "
         f"{val_text}"
     )
 
@@ -127,10 +131,11 @@ def add_timing_metrics(metrics: dict, timer: StepTimer, train_config) -> dict:
     tokens_per_step = train_config.batch_size * train_config.seq_len
     step_sec = timer.get("step")
     train_step_sec = timer.get("train_step")
+    train_elapsed_sec = train_step_sec + timer.get("train_sync")
     metrics.update(timer.metrics())
     metrics["time/step_sec"] = step_sec
     metrics["time/tokens_per_sec"] = tokens_per_step / step_sec if step_sec > 0.0 else 0.0
-    metrics["time/train_tokens_per_sec"] = tokens_per_step / train_step_sec if train_step_sec > 0.0 else 0.0
+    metrics["time/train_tokens_per_sec"] = tokens_per_step / train_elapsed_sec if train_elapsed_sec > 0.0 else 0.0
     return metrics
 
 
@@ -158,6 +163,7 @@ def main():
     model_config = config.model
     lr_schedule = build_lr_schedule(train_config)
     distributed = create_distributed_context(config.distributed, train_config)
+    perf_monitor = PerfMonitor.from_distributed(config.model, distributed)
     print_startup(config, resume=args.resume, distributed=distributed)
     logger = setup_run(args.config, config, resume=args.resume)
     trace_profiler = TraceProfiler(config.profiling, logger.run_dir)
@@ -198,6 +204,7 @@ def main():
             trace_profiler.begin_step(step)
             timer = StepTimer()
             metrics = None
+            should_log = step % train_config.log_every == 0
             with trace_profiler.annotate("step", step=step), timer.phase("step"):
                 with trace_profiler.annotate("data"), timer.phase("data"):
                     batch = next(train_iter)
@@ -207,6 +214,9 @@ def main():
                     sharded_batch = shard_batch(batch, distributed)
                 with trace_profiler.annotate("train_step"), timer.phase("train_step"):
                     loss_value, train_metrics = train_step(model, optimizer, sharded_batch["input_ids"], token_bytes)
+                if should_log:
+                    with trace_profiler.annotate("train_sync"), timer.phase("train_sync"):
+                        loss_value.block_until_ready()
                 if debug_nans:
                     raise_for_nonfinite_training_state(
                         step,
@@ -220,7 +230,6 @@ def main():
                         optimizer=nnx.state(optimizer),
                     )
 
-                should_log = step % train_config.log_every == 0
                 if should_log:
                     device_metrics = {
                         "train/loss": loss_value,
@@ -301,6 +310,7 @@ def main():
 
             if metrics is not None:
                 add_timing_metrics(metrics, timer, train_config)
+                perf_monitor.enrich(metrics)
                 if not printed_metric_header:
                     print(metric_header())
                     printed_metric_header = True
