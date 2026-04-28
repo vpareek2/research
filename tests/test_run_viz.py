@@ -1,6 +1,6 @@
 import json
 
-from utils.run_viz import write_registry_charts
+from utils.run_viz import write_readme_chart, write_registry_charts
 
 
 def test_registry_chart_contains_all_and_new_best_sections(tmp_path):
@@ -34,3 +34,15 @@ def test_registry_chart_handles_empty_registry(tmp_path):
     path = write_registry_charts(registry)
 
     assert "No scored runs yet" in path.read_text(encoding="utf-8")
+
+
+def test_readme_chart_writes_svg(tmp_path):
+    registry = tmp_path / "registry.jsonl"
+    registry.write_text(json.dumps({"run_name": "a", "score": 25.0}) + "\n", encoding="utf-8")
+
+    path = write_readme_chart(registry, tmp_path / "chart.svg")
+    text = path.read_text(encoding="utf-8")
+
+    assert text.startswith("<svg")
+    assert "New best scores" in text
+    assert "All scored runs" in text

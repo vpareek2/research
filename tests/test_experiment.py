@@ -30,8 +30,10 @@ def test_experiment_runs_train_evals_scores_and_registers(monkeypatch, tmp_path)
     )
     registry_path = tmp_path / "registry.jsonl"
     chart_path = tmp_path / "registry.html"
+    readme_chart_path = tmp_path / "chart.svg"
     monkeypatch.setattr(experiment, "register_summary", lambda current, path: registry_path)
     monkeypatch.setattr(experiment, "write_registry_charts", lambda registry, chart=None: chart_path)
+    monkeypatch.setattr(experiment, "write_readme_chart", lambda registry, chart=None: readme_chart_path)
 
     experiment.main([str(config_path), "--registry-path", str(registry_path)])
 

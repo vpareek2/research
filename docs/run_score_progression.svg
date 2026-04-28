@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 758" role="img" aria-label="Run score progression charts">
+<style>
+  text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2933; }
+  .muted { fill: #52606d; }
+  .grid { stroke: #edf1f5; }
+  .axis { stroke: #9aa5b1; }
+  .line { fill: none; stroke: #2563eb; stroke-width: 2.5; }
+  .point { fill: #1d4ed8; }
+  .panel { fill: #ffffff; stroke: #d8dee9; }
+</style>
+<rect width="920" height="758" fill="#ffffff"/>
+<text x="24" y="28" font-size="20" font-weight="700">Run Score Progression</text>
+<g transform="translate(0 32)">
+<rect class="panel" x="8" y="0" width="904" height="320"/>
+<text x="24" y="28" font-size="16" font-weight="700">New best scores</text>
+<line class="grid" x1="60" y1="272.0" x2="896" y2="272.0"/>
+<text class="muted" x="52" y="276.0" text-anchor="end" font-size="12">24.99</text>
+<line class="grid" x1="60" y1="215.5" x2="896" y2="215.5"/>
+<text class="muted" x="52" y="219.5" text-anchor="end" font-size="12">25.02</text>
+<line class="grid" x1="60" y1="159.0" x2="896" y2="159.0"/>
+<text class="muted" x="52" y="163.0" text-anchor="end" font-size="12">25.06</text>
+<line class="grid" x1="60" y1="102.5" x2="896" y2="102.5"/>
+<text class="muted" x="52" y="106.5" text-anchor="end" font-size="12">25.09</text>
+<line class="grid" x1="60" y1="46.0" x2="896" y2="46.0"/>
+<text class="muted" x="52" y="50.0" text-anchor="end" font-size="12">25.12</text>
+<line class="axis" x1="60" y1="272" x2="896" y2="272"/>
+<line class="axis" x1="60" y1="46" x2="60" y2="272"/>
+<polyline class="line" points="60.0,253.2 896.0,64.8"/>
+<circle class="point" cx="60.0" cy="253.2" r="4.5"><title>tinystories_smoke: 25.000</title></circle>
+<text class="muted" x="60.0" y="302" text-anchor="middle" font-size="11">tinystories_s...</text>
+<circle class="point" cx="896.0" cy="64.8" r="4.5"><title>tinystories_smoke_x: 25.110</title></circle>
+<text class="muted" x="896.0" y="302" text-anchor="middle" font-size="11">tinystories_s...</text>
+</g>
+<g transform="translate(0 406)">
+<rect class="panel" x="8" y="0" width="904" height="320"/>
+<text x="24" y="28" font-size="16" font-weight="700">All scored runs</text>
+<line class="grid" x1="60" y1="272.0" x2="896" y2="272.0"/>
+<text class="muted" x="52" y="276.0" text-anchor="end" font-size="12">24.99</text>
+<line class="grid" x1="60" y1="215.5" x2="896" y2="215.5"/>
+<text class="muted" x="52" y="219.5" text-anchor="end" font-size="12">25.02</text>
+<line class="grid" x1="60" y1="159.0" x2="896" y2="159.0"/>
+<text class="muted" x="52" y="163.0" text-anchor="end" font-size="12">25.06</text>
+<line class="grid" x1="60" y1="102.5" x2="896" y2="102.5"/>
+<text class="muted" x="52" y="106.5" text-anchor="end" font-size="12">25.09</text>
+<line class="grid" x1="60" y1="46.0" x2="896" y2="46.0"/>
+<text class="muted" x="52" y="50.0" text-anchor="end" font-size="12">25.12</text>
+<line class="axis" x1="60" y1="272" x2="896" y2="272"/>
+<line class="axis" x1="60" y1="46" x2="60" y2="272"/>
+<polyline class="line" points="60.0,253.2 896.0,64.8"/>
+<circle class="point" cx="60.0" cy="253.2" r="4.5"><title>tinystories_smoke: 25.000</title></circle>
+<text class="muted" x="60.0" y="302" text-anchor="middle" font-size="11">tinystories_s...</text>
+<circle class="point" cx="896.0" cy="64.8" r="4.5"><title>tinystories_smoke_x: 25.110</title></circle>
+<text class="muted" x="896.0" y="302" text-anchor="middle" font-size="11">tinystories_s...</text>
+</g>
+</svg>

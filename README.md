@@ -14,6 +14,8 @@ A small JAX/Flax NNX opinionated language-model research repo focused on reprodu
 
 Local artifacts are the source of truth. W&B is only a dashboard and comparison layer.
 
+![Run score progression](docs/run_score_progression.svg)
+
 ## Setup
 
 Install dependencies with uv:
@@ -226,7 +228,7 @@ The normal workflow is:
 ```bash
 uv run prepare-data configs/data/eval_domains.toml
 uv run prepare-data configs/data/tinystories.toml
-uv run pretrain configs/tinystories_soak.toml
+uv run experiment configs/your_experiment.toml
 ```
 
 The first command writes `data/eval_domains/gpt2/`. The second writes
@@ -300,9 +302,7 @@ uv run train-budget configs/smoke.toml --tokens 2000000000
 
 The utility always reports `tokens_per_step`, configured steps, and configured tokens. For prepared token datasets, it reads `manifest.json` and also reports train tokens, steps per epoch, usable epoch tokens, and configured/target epochs:
 
-```bash
-uv run train-budget configs/tinystories_smoke.toml
-```
+Use a prepared-token experiment config to report dataset-derived epoch counts.
 
 Raw text configs do not infer dataset token counts; pass `--tokens` when you only need target-step math.
 
@@ -311,9 +311,9 @@ Raw text configs do not infer dataset token counts; pass `--tokens` when you onl
 Use `profile` to summarize timing metrics from a completed run:
 
 ```bash
-uv run profile runs/tinystories_timing_53m
+uv run profile runs/<run_name>
 # equivalent:
-uv run profile summary runs/tinystories_timing_53m
+uv run profile summary runs/<run_name>
 ```
 
 The command reads `metrics.jsonl`, skips the first 20 steps by default, prints
@@ -330,7 +330,7 @@ Use `profile analyze` to write a compact LLM-readable report from timing metrics
 and an optional NSys report:
 
 ```bash
-uv run profile analyze runs/tinystories_nsys_53m
+uv run profile analyze runs/<run_name>
 ```
 
 The command writes:
@@ -366,7 +366,7 @@ output_dir = "profiles"
 Then launch the run through the `profile` helper:
 
 ```bash
-uv run profile nsys configs/tinystories_timing.toml --force-run-dir
+uv run profile nsys configs/your_experiment.toml --force-run-dir
 ```
 
 The helper writes the temporary NSys report outside `runs/`, lets `pretrain`
@@ -432,7 +432,7 @@ the repo's simple KV-cache decode path.
 Use `experiment` when a run should enter the comparison ladder:
 
 ```bash
-uv run experiment configs/tinystories_soak.toml
+uv run experiment configs/your_experiment.toml
 ```
 
 This command runs pretraining, checkpoint validation, full CORE plus inference,
@@ -441,17 +441,20 @@ the registry becomes the baseline by default and scores around `25`; later runs
 are scored relative to it. To force a different baseline:
 
 ```bash
-uv run experiment configs/tinystories_soak.toml --baseline-run runs/baseline_name
+uv run experiment configs/your_experiment.toml --baseline-run runs/baseline_name
 ```
 
-The registry chart is regenerated at:
+The local registry chart is regenerated at:
 
 ```text
 runs/registry.html
 ```
 
-Open the [run score progression chart](runs/registry.html) to see both all
-scored runs and only new best scores.
+The README chart above is regenerated at:
+
+```text
+docs/run_score_progression.svg
+```
 
 ## Summarize A Run
 

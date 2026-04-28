@@ -12,6 +12,9 @@ from typing import Any
 from utils.run_summary import DEFAULT_REGISTRY_PATH
 
 
+DEFAULT_README_CHART_PATH = Path("docs") / "run_score_progression.svg"
+
+
 def write_registry_charts(
     registry_path: str | Path = DEFAULT_REGISTRY_PATH,
     output_path: str | Path | None = None,
@@ -22,6 +25,18 @@ def write_registry_charts(
     rows = _scored_rows(_load_registry(registry_path))
     best_rows = _new_best_rows(rows)
     output_path.write_text(_render_page(rows, best_rows), encoding="utf-8")
+    return output_path
+
+
+def write_readme_chart(
+    registry_path: str | Path = DEFAULT_REGISTRY_PATH,
+    output_path: str | Path = DEFAULT_README_CHART_PATH,
+) -> Path:
+    registry_path = Path(registry_path)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    rows = _scored_rows(_load_registry(registry_path))
+    output_path.write_text(_render_readme_svg(rows, _new_best_rows(rows)), encoding="utf-8")
     return output_path
 
 
@@ -85,6 +100,74 @@ def _render_page(rows: list[dict[str, Any]], best_rows: list[dict[str, Any]]) ->
 </body>
 </html>
 """
+
+
+def _render_readme_svg(rows: list[dict[str, Any]], best_rows: list[dict[str, Any]]) -> str:
+    width, panel_height, gap = 920, 320, 54
+    height = panel_height * 2 + gap + 64
+    best = _render_svg_panel(best_rows, "New best scores", 32, width, panel_height)
+    all_runs = _render_svg_panel(rows, "All scored runs", 32 + panel_height + gap, width, panel_height)
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Run score progression charts">
+<style>
+  text {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2933; }}
+  .muted {{ fill: #52606d; }}
+  .grid {{ stroke: #edf1f5; }}
+  .axis {{ stroke: #9aa5b1; }}
+  .line {{ fill: none; stroke: #2563eb; stroke-width: 2.5; }}
+  .point {{ fill: #1d4ed8; }}
+  .panel {{ fill: #ffffff; stroke: #d8dee9; }}
+</style>
+<rect width="{width}" height="{height}" fill="#ffffff"/>
+<text x="24" y="28" font-size="20" font-weight="700">Run Score Progression</text>
+{best}
+{all_runs}
+</svg>
+"""
+
+
+def _render_svg_panel(rows: list[dict[str, Any]], title: str, y_offset: int, width: int, height: int) -> str:
+    left, right, top, bottom = 60, 24, 46, 48
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    parts = [f'<g transform="translate(0 {y_offset})">', f'<rect class="panel" x="8" y="0" width="{width-16}" height="{height}"/>']
+    parts.append(f'<text x="24" y="28" font-size="16" font-weight="700">{html.escape(title)}</text>')
+    if not rows:
+        parts.append('<text class="muted" x="24" y="72" font-size="13">No scored runs yet.</text>')
+        parts.append("</g>")
+        return "\n".join(parts)
+
+    scores = [row["_score"] for row in rows]
+    y_min, y_max = min(scores), max(scores)
+    if y_min == y_max:
+        y_min -= 1.0
+        y_max += 1.0
+    else:
+        pad = (y_max - y_min) * 0.1
+        y_min -= pad
+        y_max += pad
+
+    def xy(i: int, score: float) -> tuple[float, float]:
+        x = left + (plot_w * i / max(1, len(rows) - 1))
+        y = top + plot_h * (1.0 - (score - y_min) / (y_max - y_min))
+        return x, y
+
+    for frac in range(5):
+        tick = y_min + (y_max - y_min) * frac / 4
+        _, y = xy(0, tick)
+        parts.append(f'<line class="grid" x1="{left}" y1="{y:.1f}" x2="{width-right}" y2="{y:.1f}"/>')
+        parts.append(f'<text class="muted" x="{left-8}" y="{y+4:.1f}" text-anchor="end" font-size="12">{tick:.2f}</text>')
+    parts.append(f'<line class="axis" x1="{left}" y1="{height-bottom}" x2="{width-right}" y2="{height-bottom}"/>')
+    parts.append(f'<line class="axis" x1="{left}" y1="{top}" x2="{left}" y2="{height-bottom}"/>')
+    points = [xy(i, row["_score"]) for i, row in enumerate(rows)]
+    parts.append(f'<polyline class="line" points="{" ".join(f"{x:.1f},{y:.1f}" for x, y in points)}"/>')
+    for i, row in enumerate(rows):
+        x, y = points[i]
+        name = html.escape(str(row.get("run_name", "")))
+        parts.append(f'<circle class="point" cx="{x:.1f}" cy="{y:.1f}" r="4.5"><title>{name}: {row["_score"]:.3f}</title></circle>')
+        if len(rows) <= 10:
+            parts.append(f'<text class="muted" x="{x:.1f}" y="{height-18}" text-anchor="middle" font-size="11">{_short(name)}</text>')
+    parts.append("</g>")
+    return "\n".join(parts)
 
 
 def _render_chart(rows: list[dict[str, Any]], chart_id: str) -> str:

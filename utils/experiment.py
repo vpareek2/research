@@ -19,7 +19,7 @@ from utils.run_summary import (
     summarize_run,
     write_summary_artifacts,
 )
-from utils.run_viz import write_registry_charts
+from utils.run_viz import DEFAULT_README_CHART_PATH, write_readme_chart, write_registry_charts
 
 
 def main(argv: list[str] | None = None):
@@ -27,6 +27,11 @@ def main(argv: list[str] | None = None):
     parser.add_argument("config", help="Training config TOML.")
     parser.add_argument("--registry-path", default=str(DEFAULT_REGISTRY_PATH), help="Registry JSONL path.")
     parser.add_argument("--chart-path", default=None, help="Output HTML chart path. Defaults beside registry.")
+    parser.add_argument(
+        "--readme-chart-path",
+        default=str(DEFAULT_README_CHART_PATH),
+        help="Tracked SVG chart path for the README.",
+    )
     parser.add_argument("--baseline-run", default=None, help="Optional baseline run directory for relative scoring.")
     args = parser.parse_args(argv)
 
@@ -50,11 +55,13 @@ def main(argv: list[str] | None = None):
     json_path, md_path = write_summary_artifacts(run_dir, summary, markdown)
     registry_path = register_summary(summary, args.registry_path)
     chart_path = write_registry_charts(registry_path, args.chart_path)
+    readme_chart_path = write_readme_chart(registry_path, args.readme_chart_path)
 
     print(f"wrote {json_path}")
     print(f"wrote {md_path}")
     print(f"wrote {registry_path}")
     print(f"wrote {chart_path}")
+    print(f"wrote {readme_chart_path}")
 
 
 def _run(command: list[str]) -> None:

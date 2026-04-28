@@ -19,7 +19,8 @@ uv run experiment configs/x.toml
 
 This runs training, checkpoint validation, full CORE plus inference, writes the
 scored summary, upserts `runs/registry.jsonl`, and regenerates
-`runs/registry.html`.
+`runs/registry.html` plus the tracked README chart at
+`docs/run_score_progression.svg`.
 
 ```text
 RunScore =
