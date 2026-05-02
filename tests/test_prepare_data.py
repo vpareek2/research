@@ -89,6 +89,23 @@ def test_prepare_texts_streams_generator(tmp_path):
     assert (output_dir / "token_bytes.bin").exists()
 
 
+def test_prepare_texts_respects_max_tokens(tmp_path):
+    output_dir = tmp_path / "prepared"
+    config = PrepareConfig(
+        source=SourceConfig(type="text", path="input.txt"),
+        tokenizer=TokenizerConfig(name="gpt2", append_eot=True),
+        output=OutputConfig(path=str(output_dir), dtype="uint32", val_fraction=0.2, max_tokens=5),
+    )
+
+    manifest = prepare_texts(["hello world", "this should be truncated"], config)
+
+    tokens = np.memmap(output_dir / "tokens.bin", dtype=np.uint32, mode="r")
+    assert len(tokens) == 5
+    assert manifest["max_tokens"] == 5
+    assert manifest["num_tokens"] == 5
+    assert manifest["train_tokens"] == 4
+
+
 def test_load_texts_streams_local_file(tmp_path):
     path = tmp_path / "input.txt"
     path.write_text("hello\nworld\n", encoding="utf-8")
@@ -120,6 +137,7 @@ append_eot = true
 path = "{tmp_path / 'out'}"
 dtype = "uint32"
 val_fraction = 0.2
+max_tokens = 1234
 '''.strip()
     )
 
@@ -127,6 +145,7 @@ val_fraction = 0.2
 
     assert config.hf.prompt_for_token is False
     assert config.hf.token_env == "MY_HF_TOKEN"
+    assert config.output.max_tokens == 1234
 
 
 def test_resolve_hf_token_prefers_env(monkeypatch):

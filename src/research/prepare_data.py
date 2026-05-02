@@ -51,6 +51,7 @@ class OutputConfig:
     path: str
     dtype: str = "uint32"
     val_fraction: float = 0.001
+    max_tokens: int | None = None
     tokens_per_domain: int | None = None
     seed: int = 0
 
@@ -59,6 +60,8 @@ class OutputConfig:
             raise ValueError(f"Only uint32 prepared token dtype is supported, got {self.dtype}")
         if not 0.0 < self.val_fraction < 1.0:
             raise ValueError(f"val_fraction must be between 0 and 1, got {self.val_fraction}")
+        if self.max_tokens is not None and self.max_tokens <= 0:
+            raise ValueError(f"max_tokens must be positive, got {self.max_tokens}")
         if self.tokens_per_domain is not None and self.tokens_per_domain <= 0:
             raise ValueError(f"tokens_per_domain must be positive, got {self.tokens_per_domain}")
 
@@ -209,6 +212,8 @@ def prepare_dataset(config: PrepareConfig):
         print(f"path: {config.source.path}")
     print(f"output: {config.output.path}")
     print(f"tokenizer: {config.tokenizer.name} append_eot={config.tokenizer.append_eot}")
+    if config.output.max_tokens is not None:
+        print(f"max_tokens: {config.output.max_tokens}")
 
     hf_auth = "not_applicable"
     if config.source.type == "hf":
@@ -229,12 +234,21 @@ def prepare_texts(texts: Iterable[str], config: PrepareConfig, *, hf_auth: str =
     token_bytes_path = output_dir / TOKEN_BYTES_FILENAME
 
     print("Writing tokens...")
-    token_count = _write_tokens_bin(
-        texts,
-        tokenizer=tokenizer,
-        append_eot=config.tokenizer.append_eot,
-        tokens_path=tokens_path,
-    )
+    if config.output.max_tokens is None:
+        token_count = _write_tokens_bin(
+            texts,
+            tokenizer=tokenizer,
+            append_eot=config.tokenizer.append_eot,
+            tokens_path=tokens_path,
+        )
+    else:
+        token_count = _write_limited_tokens_bin(
+            texts,
+            tokenizer=tokenizer,
+            append_eot=config.tokenizer.append_eot,
+            tokens_path=tokens_path,
+            max_tokens=config.output.max_tokens,
+        )
     split_idx = int(token_count * (1.0 - config.output.val_fraction))
     print(f"tokens: {token_count} train={split_idx} val={token_count - split_idx}")
 
@@ -260,6 +274,7 @@ def prepare_texts(texts: Iterable[str], config: PrepareConfig, *, hf_auth: str =
         "hf_auth": hf_auth,
         "dtype": config.output.dtype,
         "val_fraction": config.output.val_fraction,
+        "max_tokens": config.output.max_tokens,
         "num_tokens": token_count,
         "splits": {
             "train": {"start": 0, "end": split_idx, "tokens": split_idx},

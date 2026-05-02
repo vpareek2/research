@@ -65,15 +65,28 @@ enabled = false
     )
 
 
-def write_data_prepare_config(path: Path, output: Path):
+def write_data_prepare_config(path: Path, output: Path, *, source_type: str = "text", max_tokens: int | None = None):
     source_path = path.parent / "source.txt"
     source_path.write_text("hello\n", encoding="utf-8")
-    path.write_text(
-        f"""
+    if source_type == "hf":
+        source_block = """
+[source]
+type = "hf"
+dataset = "fake/dataset"
+split = "train"
+text_column = "text"
+streaming = true
+"""
+    else:
+        source_block = f"""
 [source]
 type = "text"
 path = "{source_path}"
-
+"""
+    max_tokens_line = f"max_tokens = {max_tokens}\n" if max_tokens is not None else ""
+    path.write_text(
+        f"""
+{source_block}
 [tokenizer]
 name = "gpt2"
 append_eot = true
@@ -82,6 +95,7 @@ append_eot = true
 path = "{output}"
 dtype = "uint32"
 val_fraction = 0.1
+{max_tokens_line}
 """,
         encoding="utf-8",
     )
@@ -134,6 +148,52 @@ def make_configs(tmp_path):
     write_eval_prepare_config(eval_prepare, eval_root)
     write_run_config(config_path, data_dir, eval_root, data_prepare, eval_prepare)
     return config_path, data_dir, eval_root
+
+
+def test_preflight_rejects_uncapped_hf_data_prepare(tmp_path, monkeypatch):
+    data_dir = tmp_path / "prepared"
+    eval_root = tmp_path / "eval_domains"
+    data_prepare = tmp_path / "data_prep.toml"
+    eval_prepare = tmp_path / "eval_prep.toml"
+    config_path = tmp_path / "run.toml"
+    write_data_prepare_config(data_prepare, data_dir, source_type="hf")
+    write_eval_prepare_config(eval_prepare, eval_root)
+    write_run_config(config_path, data_dir, eval_root, data_prepare, eval_prepare)
+    monkeypatch.setattr("research.preflight.shutil.which", lambda name: name)
+
+    with pytest.raises(PreflightError, match="output.max_tokens"):
+        run_preflight(config_path, interactive=False, runner=fake_runner)
+
+
+def test_preflight_rejects_hf_data_cap_below_target_train_tokens(tmp_path, monkeypatch):
+    data_dir = tmp_path / "prepared"
+    eval_root = tmp_path / "eval_domains"
+    data_prepare = tmp_path / "data_prep.toml"
+    eval_prepare = tmp_path / "eval_prep.toml"
+    config_path = tmp_path / "run.toml"
+    write_data_prepare_config(data_prepare, data_dir, source_type="hf", max_tokens=16)
+    write_eval_prepare_config(eval_prepare, eval_root)
+    write_run_config(config_path, data_dir, eval_root, data_prepare, eval_prepare)
+    monkeypatch.setattr("research.preflight.shutil.which", lambda name: name)
+
+    with pytest.raises(PreflightError, match="below target.tokens"):
+        run_preflight(config_path, interactive=False, runner=fake_runner)
+
+
+def test_preflight_accepts_hf_data_cap_above_target_train_tokens(tmp_path, monkeypatch):
+    data_dir = tmp_path / "prepared"
+    eval_root = tmp_path / "eval_domains"
+    data_prepare = tmp_path / "data_prep.toml"
+    eval_prepare = tmp_path / "eval_prep.toml"
+    config_path = tmp_path / "run.toml"
+    write_data_prepare_config(data_prepare, data_dir, source_type="hf", max_tokens=64)
+    write_eval_prepare_config(eval_prepare, eval_root)
+    write_run_config(config_path, data_dir, eval_root, data_prepare, eval_prepare)
+    monkeypatch.setattr("research.preflight.shutil.which", lambda name: name)
+
+    result = run_preflight(config_path, interactive=False, runner=fake_runner)
+
+    assert result.failures == []
 
 
 def test_preflight_allows_missing_prepared_artifacts(tmp_path, monkeypatch):

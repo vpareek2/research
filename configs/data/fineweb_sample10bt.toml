@@ -18,3 +18,4 @@ append_eot = true
 path = "data/fineweb_sample10bt_gpt2"
 dtype = "uint32"
 val_fraction = 0.001
+max_tokens = 2100000000

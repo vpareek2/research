@@ -255,8 +255,22 @@ def _check_dataset_prepare_config(result: PreflightResult, prepare_config: Prepa
         result.fail("data.prepare_config", f"output.path {prepare_config.output.path!r} != data.path {result.config.data.path!r}")
     elif prepare_config.tokenizer.name != result.config.data.tokenizer:
         result.fail("data.prepare_config", f"tokenizer {prepare_config.tokenizer.name!r} != data.tokenizer {result.config.data.tokenizer!r}")
+    elif prepare_config.source is not None and prepare_config.source.type == "hf" and prepare_config.output.max_tokens is None:
+        result.fail("data.prepare_config", "HF dataset preparation requires output.max_tokens to avoid uncapped dataset tokenization")
+    elif prepare_config.output.max_tokens is not None and _prepared_train_token_cap(prepare_config) < result.config.target.tokens:
+        result.fail(
+            "data.prepare_config",
+            f"output.max_tokens leaves {_prepared_train_token_cap(prepare_config):,} train tokens after val split, "
+            f"below target.tokens={result.config.target.tokens:,}",
+        )
     else:
         result.ok("data.prepare_config", result.config.data.prepare_config or "")
+
+
+def _prepared_train_token_cap(prepare_config: PrepareConfig) -> int:
+    if prepare_config.output.max_tokens is None:
+        return 0
+    return int(prepare_config.output.max_tokens * (1.0 - prepare_config.output.val_fraction))
 
 
 def _check_eval_prepare_config(result: PreflightResult, prepare_config: PrepareConfig):
