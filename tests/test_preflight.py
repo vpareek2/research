@@ -7,7 +7,16 @@ import pytest
 from research.preflight import PreflightError, data_artifact_status, eval_artifact_status, prepare_missing_artifacts, run_preflight
 
 
-def write_run_config(path: Path, data_dir: Path, eval_root: Path, data_prepare: Path, eval_prepare: Path):
+def write_run_config(
+    path: Path,
+    data_dir: Path,
+    eval_root: Path,
+    data_prepare: Path,
+    eval_prepare: Path,
+    *,
+    eval_steps: int = 1,
+    domain_eval_steps: int = 1,
+):
     path.write_text(
         f"""
 [experiment]
@@ -43,7 +52,7 @@ lr = 0.001
 decay = 0.1
 log_every = 1
 eval_every = 1
-eval_steps = 1
+eval_steps = {eval_steps}
 checkpoint_every = 2
 keep_last = 2
 
@@ -55,7 +64,7 @@ prepare_config = "{data_prepare}"
 
 [eval]
 domain_root = "{eval_root}"
-domain_eval_steps = 1
+domain_eval_steps = {domain_eval_steps}
 prepare_config = "{eval_prepare}"
 
 [wandb]
@@ -101,7 +110,7 @@ val_fraction = 0.1
     )
 
 
-def write_eval_prepare_config(path: Path, output: Path):
+def write_eval_prepare_config(path: Path, output: Path, *, tokens_per_domain: int = 16):
     lines = [
         'kind = "eval_domains"',
         "",
@@ -112,7 +121,7 @@ def write_eval_prepare_config(path: Path, output: Path):
         "[output]",
         f'path = "{output}"',
         'dtype = "uint32"',
-        "tokens_per_domain = 16",
+        f"tokens_per_domain = {tokens_per_domain}",
         "",
     ]
     for name in ("web", "knowledge", "books", "news", "code", "math", "reasoning", "docs", "dialogue"):
@@ -186,7 +195,7 @@ def test_preflight_accepts_hf_data_cap_above_target_train_tokens(tmp_path, monke
     data_prepare = tmp_path / "data_prep.toml"
     eval_prepare = tmp_path / "eval_prep.toml"
     config_path = tmp_path / "run.toml"
-    write_data_prepare_config(data_prepare, data_dir, source_type="hf", max_tokens=64)
+    write_data_prepare_config(data_prepare, data_dir, source_type="hf", max_tokens=640)
     write_eval_prepare_config(eval_prepare, eval_root)
     write_run_config(config_path, data_dir, eval_root, data_prepare, eval_prepare)
     monkeypatch.setattr("research.preflight.shutil.which", lambda name: name)
@@ -194,6 +203,36 @@ def test_preflight_accepts_hf_data_cap_above_target_train_tokens(tmp_path, monke
     result = run_preflight(config_path, interactive=False, runner=fake_runner)
 
     assert result.failures == []
+
+
+def test_preflight_rejects_train_eval_capacity_below_eval_workload(tmp_path, monkeypatch):
+    data_dir = tmp_path / "prepared"
+    eval_root = tmp_path / "eval_domains"
+    data_prepare = tmp_path / "data_prep.toml"
+    eval_prepare = tmp_path / "eval_prep.toml"
+    config_path = tmp_path / "run.toml"
+    write_data_prepare_config(data_prepare, data_dir, source_type="hf", max_tokens=64)
+    write_eval_prepare_config(eval_prepare, eval_root)
+    write_run_config(config_path, data_dir, eval_root, data_prepare, eval_prepare, eval_steps=3)
+    monkeypatch.setattr("research.preflight.shutil.which", lambda name: name)
+
+    with pytest.raises(PreflightError, match="train eval capacity"):
+        run_preflight(config_path, interactive=False, runner=fake_runner)
+
+
+def test_preflight_rejects_domain_eval_capacity_below_eval_workload(tmp_path, monkeypatch):
+    data_dir = tmp_path / "prepared"
+    eval_root = tmp_path / "eval_domains"
+    data_prepare = tmp_path / "data_prep.toml"
+    eval_prepare = tmp_path / "eval_prep.toml"
+    config_path = tmp_path / "run.toml"
+    write_data_prepare_config(data_prepare, data_dir, source_type="hf", max_tokens=640)
+    write_eval_prepare_config(eval_prepare, eval_root, tokens_per_domain=15)
+    write_run_config(config_path, data_dir, eval_root, data_prepare, eval_prepare)
+    monkeypatch.setattr("research.preflight.shutil.which", lambda name: name)
+
+    with pytest.raises(PreflightError, match="domain eval capacity"):
+        run_preflight(config_path, interactive=False, runner=fake_runner)
 
 
 def test_preflight_allows_missing_prepared_artifacts(tmp_path, monkeypatch):

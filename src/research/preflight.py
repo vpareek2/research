@@ -18,7 +18,7 @@ import jax
 import tiktoken
 
 from research.config import RunConfig, load_config
-from research.data import eval_domain_root, load_validated_token_manifest, validate_eval_domain_pack
+from research.data import REQUIRED_EVAL_DOMAINS, domain_eval_steps, eval_domain_root, load_token_manifest, load_validated_token_manifest, validate_eval_domain_pack
 from research.distributed import create_distributed_context
 from research.logs import _has_wandb_netrc_key
 from research.prepare_data import PrepareConfig, load_prepare_config, prepare_dataset, resolve_hf_token
@@ -97,6 +97,7 @@ def run_preflight(
     _check_run_dir(result)
     _check_budget(result)
     _check_prepare_configs(result)
+    _check_artifact_capacity(result)
     _check_auth(result, interactive=interactive, runner=runner)
 
     result.artifacts.append(data_artifact_status(config))
@@ -273,6 +274,12 @@ def _prepared_train_token_cap(prepare_config: PrepareConfig) -> int:
     return int(prepare_config.output.max_tokens * (1.0 - prepare_config.output.val_fraction))
 
 
+def _prepared_val_token_cap(prepare_config: PrepareConfig) -> int:
+    if prepare_config.output.max_tokens is None:
+        return 0
+    return prepare_config.output.max_tokens - _prepared_train_token_cap(prepare_config)
+
+
 def _check_eval_prepare_config(result: PreflightResult, prepare_config: PrepareConfig):
     expected_path = str(eval_domain_root(result.config.eval, result.config.data))
     if prepare_config.kind != "eval_domains":
@@ -283,6 +290,73 @@ def _check_eval_prepare_config(result: PreflightResult, prepare_config: PrepareC
         result.fail("eval.prepare_config", f"tokenizer {prepare_config.tokenizer.name!r} != data.tokenizer {result.config.data.tokenizer!r}")
     else:
         result.ok("eval.prepare_config", result.config.eval.prepare_config or "")
+
+
+def _check_artifact_capacity(result: PreflightResult):
+    if result.config.data.source == "tokens":
+        _check_train_val_capacity(result)
+    _check_eval_domain_capacity(result)
+
+
+def _check_train_val_capacity(result: PreflightResult):
+    required_val_tokens = result.config.train.eval_steps * result.config.train.batch_size * result.config.train.seq_len
+    if result.data_prepare_config is not None and result.data_prepare_config.output.max_tokens is not None:
+        val_cap = _prepared_val_token_cap(result.data_prepare_config)
+        if val_cap < required_val_tokens:
+            result.fail(
+                "train eval capacity",
+                f"data.prepare_config val split leaves at most {val_cap:,} tokens, "
+                f"but eval requires {required_val_tokens:,} tokens "
+                f"(eval_steps={result.config.train.eval_steps} * batch_size={result.config.train.batch_size} * seq_len={result.config.train.seq_len})",
+            )
+            return
+
+    data_path = Path(result.config.data.path)
+    if not (data_path / "manifest.json").exists():
+        return
+    try:
+        manifest = load_validated_token_manifest(result.config.data)
+    except Exception:
+        return
+    val_tokens = int(manifest["splits"]["val"]["tokens"])
+    if val_tokens < required_val_tokens:
+        result.fail(
+            "train eval capacity",
+            f"prepared val split has {val_tokens:,} tokens, but eval requires {required_val_tokens:,} tokens "
+            f"(eval_steps={result.config.train.eval_steps} * batch_size={result.config.train.batch_size} * seq_len={result.config.train.seq_len})",
+        )
+
+
+def _check_eval_domain_capacity(result: PreflightResult):
+    steps = domain_eval_steps(result.config.eval, result.config.train)
+    required_tokens = steps * result.config.train.batch_size * result.config.train.seq_len
+    if result.eval_prepare_config is not None and result.eval_prepare_config.output.tokens_per_domain is not None:
+        if result.eval_prepare_config.output.tokens_per_domain < required_tokens:
+            result.fail(
+                "domain eval capacity",
+                f"eval.prepare_config tokens_per_domain={result.eval_prepare_config.output.tokens_per_domain:,}, "
+                f"but domain eval requires {required_tokens:,} tokens "
+                f"(domain_eval_steps={steps} * batch_size={result.config.train.batch_size} * seq_len={result.config.train.seq_len})",
+            )
+            return
+
+    eval_root = eval_domain_root(result.config.eval, result.config.data)
+    if not (eval_root / "manifest.json").exists():
+        return
+    try:
+        validate_eval_domain_pack(result.config.eval, result.config.data)
+    except Exception:
+        return
+    for name in REQUIRED_EVAL_DOMAINS:
+        domain_manifest = load_token_manifest(eval_root / name)
+        domain_tokens = int(domain_manifest["num_tokens"])
+        if domain_tokens < required_tokens:
+            result.fail(
+                "domain eval capacity",
+                f"eval domain {name!r} has {domain_tokens:,} tokens, but domain eval requires {required_tokens:,} tokens "
+                f"(domain_eval_steps={steps} * batch_size={result.config.train.batch_size} * seq_len={result.config.train.seq_len})",
+            )
+            return
 
 
 def _check_auth(

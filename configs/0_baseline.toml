@@ -1,5 +1,5 @@
 [experiment]
-name = "first_117m_fineweb_2b"
+name = "0_baseline"
 out_dir = "runs"
 
 [model]
@@ -43,7 +43,7 @@ lr = 0.001
 decay = 0.1
 log_every = 10
 eval_every = 250
-eval_steps = 20
+eval_steps = 10
 checkpoint_every = 500
 keep_last = 4
 
@@ -59,7 +59,7 @@ tokenizer = "gpt2"
 prepare_config = "configs/data/fineweb_sample10bt.toml"
 
 [eval]
-domain_eval_steps = 20
+domain_eval_steps = 1
 prepare_config = "configs/data/eval_domains.toml"
 
 [sampling]
