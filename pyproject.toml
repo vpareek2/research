@@ -22,23 +22,22 @@ dependencies = [
 ]
 
 [project.scripts]
-pretrain = "pretrain:main"
-experiment = "utils.experiment:main"
-eval-checkpoint = "utils.eval_checkpoint:main"
-eval-core = "utils.core_eval:main"
-summarize-run = "utils.run_summary:main"
-register-run = "utils.run_registry:main"
-list-runs = "utils.run_registry:list_main"
-prepare-data = "prepare_data:main"
-inspect-batch = "utils.inspect_batch:main"
-param-count = "utils.param_count:main"
-profile = "utils.profile_run:main"
-train-budget = "utils.train_budget:main"
+pretrain = "research.pretrain:main"
+experiment = "research.utils.experiment:main"
+eval-checkpoint = "research.utils.eval_checkpoint:main"
+eval-core = "research.utils.core_eval:main"
+summarize-run = "research.utils.run_summary:main"
+register-run = "research.utils.run_registry:main"
+list-runs = "research.utils.run_registry:list_main"
+prepare-data = "research.prepare_data:main"
+inspect-batch = "research.utils.inspect_batch:main"
+param-count = "research.utils.param_count:main"
+profile = "research.utils.profile_run:main"
+train-budget = "research.utils.train_budget:main"
 
 [build-system]
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-py-modules = ["checkpoint", "config", "data", "distributed", "evals", "kv_cache", "model", "prepare_data", "pretrain", "logs", "profiling", "sample", "lr_schedule", "train_debug"]
-packages = ["utils"]
+[tool.setuptools.packages.find]
+where = ["src"]

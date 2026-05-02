@@ -8,8 +8,8 @@ import jax
 import jax.numpy as jnp
 import tiktoken
 
-from config import ModelConfig, SamplingConfig
-from model import Model
+from research.config import ModelConfig, SamplingConfig
+from research.model import Model
 
 
 def _sample_next_token(logits: jax.Array, key: jax.Array, temperature: float, top_k: int | None) -> jax.Array:

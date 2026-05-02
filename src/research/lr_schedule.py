@@ -9,7 +9,7 @@ from collections.abc import Callable
 
 import jax.numpy as jnp
 
-from config import TrainConfig
+from research.config import TrainConfig
 
 
 def ratio_to_steps(total_steps: int, ratio: float) -> int:

@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 import pytest
 
-from train_debug import DEBUG_NANS_ENV, debug_nans_enabled, find_nonfinite_leaf, raise_for_nonfinite_training_state
+from research.train_debug import DEBUG_NANS_ENV, debug_nans_enabled, find_nonfinite_leaf, raise_for_nonfinite_training_state
 
 
 def test_debug_nans_enabled(monkeypatch):

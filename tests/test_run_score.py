@@ -1,4 +1,4 @@
-from utils.run_score import BASE_SCORE, attach_score, score_summary
+from research.utils.run_score import BASE_SCORE, attach_score, score_summary
 
 
 def _summary(**overrides):

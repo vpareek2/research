@@ -19,7 +19,7 @@ import numpy as np
 import tiktoken
 from tqdm.auto import tqdm
 
-from data import REQUIRED_EVAL_DOMAINS, TOKEN_BYTES_FILENAME, build_token_bytes
+from research.data import REQUIRED_EVAL_DOMAINS, TOKEN_BYTES_FILENAME, build_token_bytes
 
 
 @dataclass

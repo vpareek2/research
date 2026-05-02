@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from utils.profile_run import (
+from research.utils.profile_run import (
     build_nsys_plan,
     format_summary,
     load_metrics,

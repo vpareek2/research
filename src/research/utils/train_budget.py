@@ -8,8 +8,8 @@ import argparse
 import math
 from dataclasses import dataclass
 
-from config import RunConfig, load_config
-from data import load_validated_token_manifest
+from research.config import RunConfig, load_config
+from research.data import load_validated_token_manifest
 
 
 @dataclass(frozen=True)

@@ -1,7 +1,7 @@
 import pytest
 
-from config import LRScheduleConfig, TrainConfig
-from lr_schedule import build_lr_schedule, describe_lr_schedule
+from research.config import LRScheduleConfig, TrainConfig
+from research.lr_schedule import build_lr_schedule, describe_lr_schedule
 
 
 def train_config(**overrides):

@@ -1,7 +1,7 @@
 import pytest
 
-from config import ProfilingConfig
-from profiling import StepTimer, TraceProfiler
+from research.config import ProfilingConfig
+from research.profiling import StepTimer, TraceProfiler
 
 
 class FakeContext:
@@ -51,8 +51,8 @@ def test_step_timer_metrics_use_time_prefix_and_sec_suffix():
 
 def test_disabled_trace_profiler_is_noop(tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr("profiling.jax.profiler.start_trace", lambda path: calls.append(("start", path)))
-    monkeypatch.setattr("profiling.jax.profiler.stop_trace", lambda: calls.append(("stop",)))
+    monkeypatch.setattr("research.profiling.jax.profiler.start_trace", lambda path: calls.append(("start", path)))
+    monkeypatch.setattr("research.profiling.jax.profiler.stop_trace", lambda: calls.append(("stop",)))
 
     profiler = TraceProfiler(ProfilingConfig(enabled=False, profiler="none"), tmp_path)
     profiler.begin_step(100)
@@ -68,8 +68,8 @@ def test_disabled_trace_profiler_is_noop(tmp_path, monkeypatch):
 
 def test_trace_profiler_starts_and_stops_exact_window(tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr("profiling.jax.profiler.start_trace", lambda path: calls.append(("start", path)))
-    monkeypatch.setattr("profiling.jax.profiler.stop_trace", lambda: calls.append(("stop",)))
+    monkeypatch.setattr("research.profiling.jax.profiler.start_trace", lambda path: calls.append(("start", path)))
+    monkeypatch.setattr("research.profiling.jax.profiler.stop_trace", lambda: calls.append(("stop",)))
 
     profiler = TraceProfiler(ProfilingConfig(enabled=True, profiler="jax", start_step=2, steps=2), tmp_path)
 
@@ -97,18 +97,18 @@ def test_trace_profiler_starts_and_stops_exact_window(tmp_path, monkeypatch):
 def test_trace_profiler_annotates_with_jax_and_nvtx(tmp_path, monkeypatch):
     calls = []
 
-    monkeypatch.setattr("profiling.jax.profiler.start_trace", lambda path: calls.append(("start", path)))
-    monkeypatch.setattr("profiling.jax.profiler.stop_trace", lambda: calls.append(("stop",)))
+    monkeypatch.setattr("research.profiling.jax.profiler.start_trace", lambda path: calls.append(("start", path)))
+    monkeypatch.setattr("research.profiling.jax.profiler.stop_trace", lambda: calls.append(("stop",)))
     monkeypatch.setattr(
-        "profiling.jax.profiler.StepTraceAnnotation",
+        "research.profiling.jax.profiler.StepTraceAnnotation",
         lambda name, **kwargs: FakeContext(calls, ("jax_step_enter", name, kwargs), ("jax_step_exit", name)),
     )
     monkeypatch.setattr(
-        "profiling.jax.profiler.TraceAnnotation",
+        "research.profiling.jax.profiler.TraceAnnotation",
         lambda name: FakeContext(calls, ("jax_enter", name), ("jax_exit", name)),
     )
     monkeypatch.setattr(
-        "profiling.nvtx.annotate",
+        "research.profiling.nvtx.annotate",
         lambda name: FakeContext(calls, ("nvtx_enter", name), ("nvtx_exit", name)),
     )
 
@@ -131,18 +131,18 @@ def test_trace_profiler_annotates_with_jax_and_nvtx(tmp_path, monkeypatch):
 def test_nsys_trace_profiler_uses_nvtx_without_jax_trace(tmp_path, monkeypatch):
     calls = []
 
-    monkeypatch.setattr("profiling.jax.profiler.start_trace", lambda path: calls.append(("start", path)))
-    monkeypatch.setattr("profiling.jax.profiler.stop_trace", lambda: calls.append(("stop",)))
+    monkeypatch.setattr("research.profiling.jax.profiler.start_trace", lambda path: calls.append(("start", path)))
+    monkeypatch.setattr("research.profiling.jax.profiler.stop_trace", lambda: calls.append(("stop",)))
     monkeypatch.setattr(
-        "profiling.jax.profiler.StepTraceAnnotation",
+        "research.profiling.jax.profiler.StepTraceAnnotation",
         lambda name, **kwargs: FakeContext(calls, ("jax_step_enter", name, kwargs), ("jax_step_exit", name)),
     )
     monkeypatch.setattr(
-        "profiling.jax.profiler.TraceAnnotation",
+        "research.profiling.jax.profiler.TraceAnnotation",
         lambda name: FakeContext(calls, ("jax_enter", name), ("jax_exit", name)),
     )
     monkeypatch.setattr(
-        "profiling.nvtx.annotate",
+        "research.profiling.nvtx.annotate",
         lambda name: FakeContext(calls, ("nvtx_enter", name), ("nvtx_exit", name)),
     )
 

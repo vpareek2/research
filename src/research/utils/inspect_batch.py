@@ -9,8 +9,8 @@ from pathlib import Path
 import numpy as np
 import tiktoken
 
-from config import load_config
-from data import load_validated_token_manifest
+from research.config import load_config
+from research.data import load_validated_token_manifest
 
 
 def _load_batch_record(run_dir: Path, step: int) -> dict:

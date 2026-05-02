@@ -10,7 +10,7 @@ from pathlib import Path
 from statistics import mean
 from typing import Any
 
-from utils.run_summary import DEFAULT_REGISTRY_PATH, SUMMARY_DIR_NAME, SUMMARY_JSON_NAME, summarize_run
+from research.utils.run_summary import DEFAULT_REGISTRY_PATH, SUMMARY_DIR_NAME, SUMMARY_JSON_NAME, summarize_run
 
 
 BASE_SCORE = 25.0

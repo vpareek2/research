@@ -4,9 +4,9 @@ import jax.numpy as jnp
 import pytest
 from flax import nnx
 
-from config import ModelConfig, PrecisionConfig
-from kv_cache import init_kv_cache
-from model import Model, _precompute_rope, rope
+from research.config import ModelConfig, PrecisionConfig
+from research.kv_cache import init_kv_cache
+from research.model import Model, _precompute_rope, rope
 
 
 def tiny_model_config(**overrides):

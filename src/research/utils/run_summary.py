@@ -12,8 +12,8 @@ from pathlib import Path
 from statistics import mean
 from typing import Any
 
-from config import load_config
-from utils.param_count import count_params
+from research.config import load_config
+from research.utils.param_count import count_params
 
 
 SUMMARY_DIR_NAME = "summary"

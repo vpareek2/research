@@ -10,9 +10,9 @@ from flax import nnx
 import optax
 import tiktoken
 
-from checkpoint import create_checkpoint_manager, restore_latest_checkpoint, save_checkpoint
-from config import RunConfig, load_config
-from data import (
+from research.checkpoint import create_checkpoint_manager, restore_latest_checkpoint, save_checkpoint
+from research.config import RunConfig, load_config
+from research.data import (
     domain_eval_steps,
     eval_domain_root,
     load_eval_domain_token_bytes,
@@ -21,16 +21,16 @@ from data import (
     make_eval_domain_dataloaders,
     make_val_dataloader,
 )
-from distributed import DistributedContext, create_distributed_context, place_replicated_state, shard_batch
-from evals import evaluate_domain_losses, evaluate_loss, loss_with_bpb
-from lr_schedule import build_lr_schedule, describe_lr_schedule
-from model import Model
-from logs import setup_run
-from profiling import StepTimer, TraceProfiler
-from sample import generate, write_sample
-from train_debug import debug_nans_enabled, raise_for_nonfinite_training_state
-from utils.perf import PerfMonitor
-from utils.run_summary import summarize_and_write
+from research.distributed import DistributedContext, create_distributed_context, place_replicated_state, shard_batch
+from research.evals import evaluate_domain_losses, evaluate_loss, loss_with_bpb
+from research.lr_schedule import build_lr_schedule, describe_lr_schedule
+from research.model import Model
+from research.logs import setup_run
+from research.profiling import StepTimer, TraceProfiler
+from research.sample import generate, write_sample
+from research.train_debug import debug_nans_enabled, raise_for_nonfinite_training_state
+from research.utils.perf import PerfMonitor
+from research.utils.run_summary import summarize_and_write
 
 
 def tree_l2_norm(tree) -> jax.Array:

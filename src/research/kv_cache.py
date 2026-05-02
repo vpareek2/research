@@ -7,7 +7,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from config import ModelConfig
+from research.config import ModelConfig
 
 
 class LayerKVCache(NamedTuple):

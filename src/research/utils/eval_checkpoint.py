@@ -12,9 +12,9 @@ from pathlib import Path
 from flax import nnx
 import jax
 
-from checkpoint import create_checkpoint_manager, restore_model_checkpoint
-from config import load_config
-from data import (
+from research.checkpoint import create_checkpoint_manager, restore_model_checkpoint
+from research.config import load_config
+from research.data import (
     REQUIRED_EVAL_DOMAINS,
     domain_eval_steps,
     load_eval_domain_token_bytes,
@@ -22,10 +22,10 @@ from data import (
     make_eval_domain_dataloaders,
     make_val_dataloader,
 )
-from distributed import create_distributed_context, place_replicated_model
-from evals import LossEvalResult, evaluate_domain_losses, evaluate_loss
-from model import Model
-from utils.run_summary import summarize_and_write
+from research.distributed import create_distributed_context, place_replicated_model
+from research.evals import LossEvalResult, evaluate_domain_losses, evaluate_loss
+from research.model import Model
+from research.utils.run_summary import summarize_and_write
 
 
 def write_eval_artifacts(

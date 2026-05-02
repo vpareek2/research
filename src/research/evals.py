@@ -14,9 +14,9 @@ import jax.numpy as jnp
 from flax import nnx
 import optax
 
-from data import Batch
-from distributed import DistributedContext, shard_batch
-from model import Model
+from research.data import Batch
+from research.distributed import DistributedContext, shard_batch
+from research.model import Model
 
 
 @dataclass(frozen=True)

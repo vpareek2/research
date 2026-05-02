@@ -3,7 +3,7 @@ from pathlib import Path
 import jax.numpy as jnp
 import pytest
 
-from config import DataConfig, DistributedConfig, LRScheduleConfig, PrecisionConfig, ProfilingConfig, dtype_from_name, load_config
+from research.config import DataConfig, DistributedConfig, LRScheduleConfig, PrecisionConfig, ProfilingConfig, dtype_from_name, load_config
 
 
 def write_config(

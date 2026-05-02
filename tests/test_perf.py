@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from config import ModelConfig
-from utils.perf import NvmlMonitor, PerfMonitor, estimate_flops_per_token, peak_flops_for_device
+from research.config import ModelConfig
+from research.utils.perf import NvmlMonitor, PerfMonitor, estimate_flops_per_token, peak_flops_for_device
 
 
 def tiny_model_config(**overrides):

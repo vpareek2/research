@@ -25,8 +25,8 @@ import numpy as np
 import optax
 import tiktoken
 
-from config import RunConfig
-from data import Batch
+from research.config import RunConfig
+from research.data import Batch
 
 
 class HealthMonitor:

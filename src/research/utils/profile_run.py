@@ -18,7 +18,7 @@ import subprocess
 import sys
 from typing import Any
 
-from config import load_config
+from research.config import load_config
 
 
 DEFAULT_WARMUP_STEPS = 20

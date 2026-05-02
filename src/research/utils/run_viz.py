@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from utils.run_summary import DEFAULT_REGISTRY_PATH
+from research.utils.run_summary import DEFAULT_REGISTRY_PATH
 
 
 DEFAULT_README_CHART_PATH = Path("docs") / "run_score_progression.svg"

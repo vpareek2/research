@@ -11,7 +11,7 @@ import time
 import jax
 import nvtx
 
-from config import ProfilingConfig
+from research.config import ProfilingConfig
 
 
 class StepTimer:

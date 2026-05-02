@@ -12,7 +12,7 @@ import jax
 import numpy as np
 import tiktoken
 
-from config import DataConfig, EvalConfig, TrainConfig
+from research.config import DataConfig, EvalConfig, TrainConfig
 
 
 Batch = dict[str, jax.Array]

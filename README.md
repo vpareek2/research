@@ -538,5 +538,5 @@ XLA_FLAGS=--xla_force_host_platform_device_count=4 JAX_PLATFORMS=cpu uv run pyte
 Compile check:
 
 ```bash
-uv run python -m py_compile config.py data.py distributed.py kv_cache.py model.py prepare_data.py pretrain.py logs.py profiling.py checkpoint.py sample.py lr_schedule.py utils/inspect_batch.py utils/param_count.py utils/train_budget.py
+uv run python -m py_compile src/research/*.py src/research/utils/*.py
 ```

@@ -6,8 +6,8 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from config import ModelConfig, PrecisionConfig, dtype_from_name
-from kv_cache import KVCache, LayerKVCache
+from research.config import ModelConfig, PrecisionConfig, dtype_from_name
+from research.kv_cache import KVCache, LayerKVCache
 
 def _precompute_rope(seq_len, head_dim, theta, dtype):
     """

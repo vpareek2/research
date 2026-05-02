@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 import tiktoken
 
-from config import DataConfig, EvalConfig, TrainConfig
-from data import (
+from research.config import DataConfig, EvalConfig, TrainConfig
+from research.data import (
     REQUIRED_EVAL_DOMAINS,
     TokenDataset,
     TokenMemmapDataset,

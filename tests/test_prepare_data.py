@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 import tiktoken
 
-from data import REQUIRED_EVAL_DOMAINS
-from prepare_data import (
+from research.data import REQUIRED_EVAL_DOMAINS
+from research.prepare_data import (
     DomainConfig,
     HfConfig,
     OutputConfig,

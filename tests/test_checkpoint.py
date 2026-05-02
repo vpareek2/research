@@ -3,11 +3,11 @@ import optax
 import jax.numpy as jnp
 from flax import nnx
 
-from checkpoint import create_checkpoint_manager, restore_latest_checkpoint, restore_model_checkpoint, save_checkpoint
-from config import DataConfig, ModelConfig, TrainConfig
-from data import make_dataloaders
-from evals import loss
-from model import Model
+from research.checkpoint import create_checkpoint_manager, restore_latest_checkpoint, restore_model_checkpoint, save_checkpoint
+from research.config import DataConfig, ModelConfig, TrainConfig
+from research.data import make_dataloaders
+from research.evals import loss
+from research.model import Model
 
 
 def tiny_model_config():

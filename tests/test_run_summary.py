@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from utils import run_registry, run_summary
+from research.utils import run_registry, run_summary
 
 
 def write_config(run_dir, *, steps=4):

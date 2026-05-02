@@ -9,9 +9,9 @@ from pathlib import Path
 import subprocess
 import sys
 
-from config import load_config
-from utils.run_score import attach_score, select_baseline_summary
-from utils.run_summary import (
+from research.config import load_config
+from research.utils.run_score import attach_score, select_baseline_summary
+from research.utils.run_summary import (
     DEFAULT_REGISTRY_PATH,
     format_scorecard,
     register_summary,
@@ -19,7 +19,7 @@ from utils.run_summary import (
     summarize_run,
     write_summary_artifacts,
 )
-from utils.run_viz import DEFAULT_README_CHART_PATH, write_readme_chart, write_registry_charts
+from research.utils.run_viz import DEFAULT_README_CHART_PATH, write_readme_chart, write_registry_charts
 
 
 def main(argv: list[str] | None = None):
@@ -39,9 +39,9 @@ def main(argv: list[str] | None = None):
     config = load_config(config_path)
     run_dir = Path(config.experiment.out_dir) / config.experiment.name
 
-    _run([sys.executable, "-m", "pretrain", str(config_path)])
-    _run([sys.executable, "-m", "utils.eval_checkpoint", str(run_dir)])
-    _run([sys.executable, "-m", "utils.core_eval", str(run_dir)])
+    _run([sys.executable, "-m", "research.pretrain", str(config_path)])
+    _run([sys.executable, "-m", "research.utils.eval_checkpoint", str(run_dir)])
+    _run([sys.executable, "-m", "research.utils.core_eval", str(run_dir)])
 
     summary = summarize_run(run_dir)
     validate_final_eval_alignment(summary)

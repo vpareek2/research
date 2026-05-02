@@ -7,7 +7,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 
-from config import ModelConfig, load_config
+from research.config import ModelConfig, load_config
 
 
 @dataclass(frozen=True)

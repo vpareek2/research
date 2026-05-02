@@ -5,7 +5,7 @@ import types
 import numpy as np
 import pytest
 
-from config import (
+from research.config import (
     DataConfig,
     ExperimentConfig,
     WandbConfig,
@@ -14,7 +14,7 @@ from config import (
     SamplingConfig,
     TrainConfig,
 )
-from logs import HealthMonitor, setup_run
+from research.logs import HealthMonitor, setup_run
 
 
 def make_config(out_dir, *, wandb=False):

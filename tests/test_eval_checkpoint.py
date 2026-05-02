@@ -6,12 +6,12 @@ import optax
 import pytest
 from flax import nnx
 
-from checkpoint import create_checkpoint_manager, save_checkpoint
-from config import DataConfig, ModelConfig, TrainConfig
-from data import REQUIRED_EVAL_DOMAINS, make_dataloaders
-from evals import LossEvalResult
-from model import Model
-from utils import eval_checkpoint
+from research.checkpoint import create_checkpoint_manager, save_checkpoint
+from research.config import DataConfig, ModelConfig, TrainConfig
+from research.data import REQUIRED_EVAL_DOMAINS, make_dataloaders
+from research.evals import LossEvalResult
+from research.model import Model
+from research.utils import eval_checkpoint
 
 
 def tiny_model_config():

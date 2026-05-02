@@ -9,8 +9,8 @@ from flax import nnx
 import grain.python as grain_py
 import orbax.checkpoint as ocp
 
-from data import Batch
-from model import Model
+from research.data import Batch
+from research.model import Model
 
 
 def create_checkpoint_manager(run_dir: Path, keep_last: int) -> ocp.CheckpointManager:

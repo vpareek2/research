@@ -3,8 +3,8 @@ import json
 import numpy as np
 import pytest
 
-from config import load_config
-from utils.train_budget import build_budget, format_budget, steps_for_tokens, steps_per_epoch, tokens_per_step
+from research.config import load_config
+from research.utils.train_budget import build_budget, format_budget, steps_for_tokens, steps_per_epoch, tokens_per_step
 
 
 def write_config(path):

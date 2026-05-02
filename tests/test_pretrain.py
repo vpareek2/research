@@ -4,12 +4,12 @@ import optax
 import pytest
 from flax import nnx
 
-from config import DataConfig, DistributedConfig, ExperimentConfig, ModelConfig, PrecisionConfig, ProfilingConfig, RunConfig, SamplingConfig, TrainConfig, WandbConfig
-from distributed import create_distributed_context
-from evals import loss
-from lr_schedule import build_lr_schedule
-from model import Model
-from pretrain import (
+from research.config import DataConfig, DistributedConfig, ExperimentConfig, ModelConfig, PrecisionConfig, ProfilingConfig, RunConfig, SamplingConfig, TrainConfig, WandbConfig
+from research.distributed import create_distributed_context
+from research.evals import loss
+from research.lr_schedule import build_lr_schedule
+from research.model import Model
+from research.pretrain import (
     add_timing_metrics,
     format_metrics_row,
     make_muon_dimension_numbers,
@@ -21,7 +21,7 @@ from pretrain import (
     train_step,
     tree_l2_norm,
 )
-from profiling import StepTimer
+from research.profiling import StepTimer
 
 
 def tiny_model_config():
@@ -300,7 +300,7 @@ def test_maybe_write_completion_summary_only_writes_for_completed_runs(monkeypat
         calls.append(run_dir)
         return tmp_path / "run_summary.json", tmp_path / "scorecard.md"
 
-    monkeypatch.setattr("pretrain.write_completion_summary", fake_write)
+    monkeypatch.setattr("research.pretrain.write_completion_summary", fake_write)
 
     assert maybe_write_completion_summary(tmp_path / "run", completed=False) is None
     assert calls == []
@@ -343,7 +343,7 @@ def test_save_final_checkpoint_if_needed_saves_missing_final_step(monkeypatch):
     def fake_save_checkpoint(manager_arg, **kwargs):
         calls.append((manager_arg, kwargs))
 
-    monkeypatch.setattr("pretrain.save_checkpoint", fake_save_checkpoint)
+    monkeypatch.setattr("research.pretrain.save_checkpoint", fake_save_checkpoint)
 
     saved = save_final_checkpoint_if_needed(
         manager,
@@ -384,7 +384,7 @@ def test_save_final_checkpoint_if_needed_skips_existing_final_step(monkeypatch):
         checkpoint_every=5,
         keep_last=2,
     )
-    monkeypatch.setattr("pretrain.save_checkpoint", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr("research.pretrain.save_checkpoint", lambda *args, **kwargs: calls.append((args, kwargs)))
 
     saved = save_final_checkpoint_if_needed(
         manager,

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from utils import experiment
+from research.utils import experiment
 
 
 def test_experiment_runs_train_evals_scores_and_registers(monkeypatch, tmp_path):
@@ -39,7 +39,7 @@ def test_experiment_runs_train_evals_scores_and_registers(monkeypatch, tmp_path)
 
     experiment.main([str(config_path), "--registry-path", str(registry_path)])
 
-    assert [command[2] for command in commands] == ["pretrain", "utils.eval_checkpoint", "utils.core_eval"]
+    assert [command[2] for command in commands] == ["research.pretrain", "research.utils.eval_checkpoint", "research.utils.core_eval"]
     assert commands[0][-1] == str(config_path)
     assert commands[1][-1] == str(run_dir)
     assert commands[2][-1] == str(run_dir)

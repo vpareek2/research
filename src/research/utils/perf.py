@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from config import ModelConfig
+from research.config import ModelConfig
 
 
 SECONDS_PER_GPU_HOUR = 3600.0

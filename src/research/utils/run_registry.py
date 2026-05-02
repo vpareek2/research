@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from utils.run_summary import DEFAULT_REGISTRY_PATH, register_summary, summarize_and_write
+from research.utils.run_summary import DEFAULT_REGISTRY_PATH, register_summary, summarize_and_write
 
 
 def main(argv: list[str] | None = None):

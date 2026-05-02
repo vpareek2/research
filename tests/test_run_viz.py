@@ -1,6 +1,6 @@
 import json
 
-from utils.run_viz import write_readme_chart, write_registry_charts
+from research.utils.run_viz import write_readme_chart, write_registry_charts
 
 
 def test_registry_chart_contains_all_and_new_best_sections(tmp_path):

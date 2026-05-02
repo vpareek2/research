@@ -4,10 +4,10 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from config import DistributedConfig, ModelConfig, TrainConfig
-from distributed import create_distributed_context
-from evals import bpb_from_losses, evaluate_loss
-from model import Model
+from research.config import DistributedConfig, ModelConfig, TrainConfig
+from research.distributed import create_distributed_context
+from research.evals import bpb_from_losses, evaluate_loss
+from research.model import Model
 
 
 def tiny_model_config():

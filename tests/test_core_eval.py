@@ -5,7 +5,7 @@ import urllib.request
 import jax.numpy as jnp
 import pytest
 
-from utils import core_eval, run_summary
+from research.utils import core_eval, run_summary
 
 
 def write_core_bundle(root):

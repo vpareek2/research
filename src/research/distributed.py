@@ -9,7 +9,7 @@ import jax
 import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
-from config import DistributedConfig, TrainConfig
+from research.config import DistributedConfig, TrainConfig
 
 
 @dataclass(frozen=True)

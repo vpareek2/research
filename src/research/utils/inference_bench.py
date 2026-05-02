@@ -15,9 +15,9 @@ import jax
 import jax.numpy as jnp
 import tiktoken
 
-from config import ModelConfig, dtype_from_name
-from kv_cache import init_kv_cache
-from model import Model
+from research.config import ModelConfig, dtype_from_name
+from research.kv_cache import init_kv_cache
+from research.model import Model
 
 
 MODE = "kv_cache_decode_loop_prefill"

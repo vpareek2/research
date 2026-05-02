@@ -3,8 +3,8 @@ import json
 import numpy as np
 import tiktoken
 
-from config import DataConfig, ExperimentConfig, ModelConfig, RunConfig, SamplingConfig, TrainConfig
-from utils.inspect_batch import inspect_batch
+from research.config import DataConfig, ExperimentConfig, ModelConfig, RunConfig, SamplingConfig, TrainConfig
+from research.utils.inspect_batch import inspect_batch
 
 
 def _write_run_config(run_dir, data_path):

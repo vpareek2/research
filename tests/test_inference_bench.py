@@ -4,9 +4,9 @@ from flax import nnx
 import pytest
 import tiktoken
 
-from config import ModelConfig
-from model import Model
-from utils import inference_bench
+from research.config import ModelConfig
+from research.model import Model
+from research.utils import inference_bench
 
 
 def tiny_model_config():

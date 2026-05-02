@@ -4,9 +4,9 @@ import jax
 import tiktoken
 from flax import nnx
 
-from config import ModelConfig, SamplingConfig
-from model import Model
-from sample import generate, write_sample
+from research.config import ModelConfig, SamplingConfig
+from research.model import Model
+from research.sample import generate, write_sample
 
 
 def tiny_model_config():

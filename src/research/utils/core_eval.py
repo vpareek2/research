@@ -26,12 +26,12 @@ import tiktoken
 from tqdm import tqdm
 import yaml
 
-from checkpoint import create_checkpoint_manager, restore_model_checkpoint
-from config import load_config
-from distributed import create_distributed_context, place_replicated_model
-from model import Model
-from utils.inference_bench import benchmark_inference, write_inference_artifacts
-from utils.run_summary import summarize_and_write
+from research.checkpoint import create_checkpoint_manager, restore_model_checkpoint
+from research.config import load_config
+from research.distributed import create_distributed_context, place_replicated_model
+from research.model import Model
+from research.utils.inference_bench import benchmark_inference, write_inference_artifacts
+from research.utils.run_summary import summarize_and_write
 
 
 EVAL_BUNDLE_URL = "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip"
