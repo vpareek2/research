@@ -55,7 +55,9 @@ Main sections:
 - `[profiling]`: lightweight timing and future profiler capture settings
 - `[train]`: batch size, steps, peak learning rate, eval/checkpoint cadence
 - `[train.lr_schedule]`: optional LR schedule; defaults to linear warmup + cosine decay
-- `[data]`: either raw text data or prepared token data
+- `[target]`: intended token budget; defaults to 2B tokens
+- `[data]`: either raw text data or prepared token data, plus optional prep config
+- `[eval]`: domain validation settings and optional eval-domain prep config
 - `[sampling]`: optional deterministic prompt sampling during eval
 - `[wandb]`: optional online logging
 
@@ -161,6 +163,13 @@ Prepared token configs read offline `.bin` files with `np.memmap`:
 source = "tokens"
 path = "data/tinystories_gpt2"
 tokenizer = "gpt2"
+prepare_config = "configs/data/tinystories.toml"
+
+[eval]
+prepare_config = "configs/data/eval_domains.toml"
+
+[target]
+tokens = 2000000000
 ```
 
 Prepared token directories contain:
@@ -226,13 +235,14 @@ uv run prepare-data configs/data/eval_domains.toml
 The normal workflow is:
 
 ```bash
-uv run prepare-data configs/data/eval_domains.toml
-uv run prepare-data configs/data/tinystories.toml
+uv run preflight configs/your_experiment.toml
 uv run experiment configs/your_experiment.toml
 ```
 
-The first command writes `data/eval_domains/gpt2/`. The second writes
-`data/tinystories_gpt2/`. Pretraining infers the eval pack path from
+`preflight` checks local/cloud readiness, auth, config consistency, target-token
+budget, and prepared-data state. `experiment` prepares missing eval-domain and
+train-data artifacts from the prep configs referenced by the run config, then
+launches training/eval/scoring. Pretraining infers the eval pack path from
 `[data].tokenizer`, unless `[eval].domain_root` overrides it.
 
 Training logs `val/domain/<domain>/loss`, `ppl`, `bpb`, and `tokens` to

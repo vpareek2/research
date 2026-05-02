@@ -3,7 +3,7 @@ from pathlib import Path
 import jax.numpy as jnp
 import pytest
 
-from research.config import DataConfig, DistributedConfig, LRScheduleConfig, PrecisionConfig, ProfilingConfig, dtype_from_name, load_config
+from research.config import DataConfig, DistributedConfig, LRScheduleConfig, PrecisionConfig, ProfilingConfig, TargetConfig, dtype_from_name, load_config
 
 
 def write_config(
@@ -15,6 +15,8 @@ def write_config(
     distributed_section: str = "",
     profiling_section: str = "",
     eval_section: str = "",
+    target_section: str = "",
+    data_extra: str = "",
 ):
     wandb_section = """
 [wandb]
@@ -44,6 +46,7 @@ tied = false
 {distributed_section}
 {profiling_section}
 {eval_section}
+{target_section}
 
 [train]
 seed = 0
@@ -63,6 +66,7 @@ keep_last = 2
 path = "input.txt"
 tokenizer = "gpt2"
 val_fraction = 0.25
+{data_extra}
 
 [sampling]
 enabled = true
@@ -84,6 +88,7 @@ def test_load_config(tmp_path):
     assert config.experiment.name == "unit"
     assert config.model.hidden_size == 32
     assert config.train.eval_steps == 1
+    assert config.target.tokens == 2_000_000_000
     assert config.train.checkpoint_every == 2
     assert config.train.keep_last == 2
     assert config.train.lr_schedule.type == "cosine"
@@ -103,7 +108,9 @@ def test_load_config(tmp_path):
     assert config.profiling.output_dir == "profiles"
     assert config.eval.domain_root is None
     assert config.eval.domain_eval_steps is None
+    assert config.eval.prepare_config == "configs/data/eval_domains.toml"
     assert config.data.val_fraction == 0.25
+    assert config.data.prepare_config is None
     assert config.sampling.enabled is True
     assert config.sampling.prompt == "ROMEO:"
     assert config.sampling.max_new_tokens == 8
@@ -233,6 +240,7 @@ def test_explicit_eval_config(tmp_path):
 [eval]
 domain_root = "data/eval_domains/custom"
 domain_eval_steps = 25
+prepare_config = "configs/data/custom_eval_domains.toml"
 """,
     )
 
@@ -240,6 +248,29 @@ domain_eval_steps = 25
 
     assert config.eval.domain_root == "data/eval_domains/custom"
     assert config.eval.domain_eval_steps == 25
+    assert config.eval.prepare_config == "configs/data/custom_eval_domains.toml"
+
+
+def test_explicit_target_and_data_prepare_config(tmp_path):
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        target_section="""
+[target]
+tokens = 12345
+""",
+        data_extra='prepare_config = "configs/data/unit.toml"',
+    )
+
+    config = load_config(config_path)
+
+    assert config.target.tokens == 12345
+    assert config.data.prepare_config == "configs/data/unit.toml"
+
+
+def test_target_tokens_must_be_positive():
+    with pytest.raises(ValueError, match="target.tokens"):
+        TargetConfig(tokens=0)
 
 
 def test_jax_profiling_config_parses(tmp_path):

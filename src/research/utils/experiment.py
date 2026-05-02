@@ -10,6 +10,7 @@ import subprocess
 import sys
 
 from research.config import load_config
+from research.preflight import prepare_missing_artifacts, run_preflight
 from research.utils.run_score import attach_score, select_baseline_summary
 from research.utils.run_summary import (
     DEFAULT_REGISTRY_PATH,
@@ -36,6 +37,10 @@ def main(argv: list[str] | None = None):
     args = parser.parse_args(argv)
 
     config_path = Path(args.config)
+    preflight = run_preflight(config_path)
+    prepare_missing_artifacts(preflight)
+    run_preflight(config_path, require_ready=True)
+
     config = load_config(config_path)
     run_dir = Path(config.experiment.out_dir) / config.experiment.name
 

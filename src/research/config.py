@@ -126,11 +126,21 @@ class TrainConfig:
 
 
 @dataclass
+class TargetConfig:
+    tokens: int = 2_000_000_000
+
+    def __post_init__(self):
+        if not isinstance(self.tokens, int) or self.tokens <= 0:
+            raise ValueError(f"target.tokens must be a positive integer, got {self.tokens!r}")
+
+
+@dataclass
 class DataConfig:
     path: str
     tokenizer: str
     val_fraction: float | None = None
     source: str = "text"
+    prepare_config: str | None = None
 
     def __post_init__(self):
         if self.source not in {"text", "tokens"}:
@@ -146,6 +156,7 @@ class DataConfig:
 class EvalConfig:
     domain_root: str | None = None
     domain_eval_steps: int | None = None
+    prepare_config: str | None = "configs/data/eval_domains.toml"
 
     def __post_init__(self):
         if self.domain_eval_steps is not None and self.domain_eval_steps <= 0:
@@ -188,6 +199,7 @@ class RunConfig:
     train: TrainConfig
     data: DataConfig
     sampling: SamplingConfig
+    target: TargetConfig = field(default_factory=TargetConfig)
     distributed: DistributedConfig = field(default_factory=DistributedConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     profiling: ProfilingConfig = field(default_factory=ProfilingConfig)
@@ -228,6 +240,7 @@ def load_config(path: str | Path) -> RunConfig:
         train=TrainConfig(**train_data),
         data=DataConfig(**data["data"]),
         sampling=SamplingConfig(**data.get("sampling", {})),
+        target=TargetConfig(**data.get("target", {})),
         distributed=DistributedConfig(**data.get("distributed", {})),
         eval=EvalConfig(**data.get("eval", {})),
         profiling=ProfilingConfig(**data.get("profiling", {})),

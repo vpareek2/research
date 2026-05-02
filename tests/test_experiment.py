@@ -8,6 +8,8 @@ from research.utils import experiment
 
 def test_experiment_runs_train_evals_scores_and_registers(monkeypatch, tmp_path):
     commands = []
+    preflight_calls = []
+    prepare_calls = []
     config_path = tmp_path / "config.toml"
     config_path.write_text("", encoding="utf-8")
     run_dir = tmp_path / "runs" / "exp"
@@ -19,6 +21,8 @@ def test_experiment_runs_train_evals_scores_and_registers(monkeypatch, tmp_path)
         "load_config",
         lambda path: SimpleNamespace(experiment=SimpleNamespace(out_dir=str(tmp_path / "runs"), name="exp")),
     )
+    monkeypatch.setattr(experiment, "run_preflight", lambda path, **kwargs: preflight_calls.append((path, kwargs)) or "preflight")
+    monkeypatch.setattr(experiment, "prepare_missing_artifacts", lambda preflight: prepare_calls.append(preflight))
     monkeypatch.setattr(experiment, "_run", lambda command: commands.append(command))
     monkeypatch.setattr(experiment, "summarize_run", lambda path: summary)
     monkeypatch.setattr(experiment, "select_baseline_summary", lambda current, **kwargs: current)
@@ -39,6 +43,11 @@ def test_experiment_runs_train_evals_scores_and_registers(monkeypatch, tmp_path)
 
     experiment.main([str(config_path), "--registry-path", str(registry_path)])
 
+    assert preflight_calls == [
+        (config_path, {}),
+        (config_path, {"require_ready": True}),
+    ]
+    assert prepare_calls == ["preflight"]
     assert [command[2] for command in commands] == ["research.pretrain", "research.utils.eval_checkpoint", "research.utils.core_eval"]
     assert commands[0][-1] == str(config_path)
     assert commands[1][-1] == str(run_dir)
