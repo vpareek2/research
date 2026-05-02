@@ -36,9 +36,9 @@ tokens = 2000000000
 
 [train]
 seed = 0
-batch_size = 64
+batch_size = 32
 seq_len = 2048
-steps = 15259
+steps = 30518
 lr = 0.001
 decay = 0.1
 log_every = 10

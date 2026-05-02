@@ -94,6 +94,7 @@ def run_preflight(
     _check_jax(result)
     _check_tokenizer(result)
     _check_distributed(result)
+    _check_training_memory(result)
     _check_run_dir(result)
     _check_budget(result)
     _check_prepare_configs(result)
@@ -210,6 +211,50 @@ def _check_distributed(result: PreflightResult):
         result.fail("distributed", str(exc))
         return
     result.ok("distributed", f"devices={context.device_count} global_batch={context.global_batch_size}")
+
+
+def _check_training_memory(result: PreflightResult):
+    logits_bytes = result.config.train.batch_size * result.config.train.seq_len * result.config.model.vocab_size * _dtype_bytes(result.config.precision.compute_dtype)
+    loss_logits_bytes = result.config.train.batch_size * (result.config.train.seq_len - 1) * result.config.model.vocab_size * _dtype_bytes(result.config.precision.loss_dtype)
+    detail = f"logits={_format_gib(logits_bytes)} loss_logits={_format_gib(loss_logits_bytes)}"
+
+    memory_limit = _first_gpu_memory_limit()
+    if memory_limit is None:
+        result.warn("training memory", detail)
+        return
+
+    detail = f"{detail} gpu_memory={_format_gib(memory_limit)}"
+    if logits_bytes + loss_logits_bytes > 0.65 * memory_limit:
+        result.warn("training memory", detail)
+    else:
+        result.ok("training memory", detail)
+
+
+def _dtype_bytes(dtype: str) -> int:
+    if dtype == "bf16":
+        return 2
+    if dtype == "fp32":
+        return 4
+    raise ValueError(f"Unknown dtype name: {dtype}")
+
+
+def _format_gib(value: int) -> str:
+    return f"{value / 1024**3:.2f}GiB"
+
+
+def _first_gpu_memory_limit() -> int | None:
+    try:
+        devices = [device for device in jax.local_devices() if getattr(device, "platform", "") == "gpu"]
+        if not devices:
+            return None
+        stats = devices[0].memory_stats() or {}
+    except Exception:
+        return None
+    for key in ("bytes_limit", "bytes_limit_total", "memory_limit"):
+        value = stats.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
 
 
 def _check_run_dir(result: PreflightResult):
