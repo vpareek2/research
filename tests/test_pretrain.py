@@ -16,6 +16,7 @@ from pretrain import (
     maybe_write_completion_summary,
     metric_header,
     print_startup,
+    save_final_checkpoint_if_needed,
     sync_metric_scalars,
     train_step,
     tree_l2_norm,
@@ -308,3 +309,91 @@ def test_maybe_write_completion_summary_only_writes_for_completed_runs(monkeypat
 
     assert calls == [tmp_path / "run"]
     assert result == (tmp_path / "run_summary.json", tmp_path / "scorecard.md")
+
+
+class FakeCheckpointManager:
+    def __init__(self, latest_step):
+        self._latest_step = latest_step
+        self.waits = 0
+
+    def latest_step(self):
+        return self._latest_step
+
+    def wait_until_finished(self):
+        self.waits += 1
+
+
+def test_save_final_checkpoint_if_needed_saves_missing_final_step(monkeypatch):
+    calls = []
+    manager = FakeCheckpointManager(latest_step=2)
+    train_cfg = TrainConfig(
+        seed=0,
+        batch_size=4,
+        seq_len=8,
+        steps=5,
+        lr=1e-3,
+        decay=0.1,
+        log_every=1,
+        eval_every=1,
+        eval_steps=1,
+        checkpoint_every=0,
+        keep_last=2,
+    )
+
+    def fake_save_checkpoint(manager_arg, **kwargs):
+        calls.append((manager_arg, kwargs))
+
+    monkeypatch.setattr("pretrain.save_checkpoint", fake_save_checkpoint)
+
+    saved = save_final_checkpoint_if_needed(
+        manager,
+        train_cfg,
+        model="model",
+        optimizer="optimizer",
+        train_iter="train_iter",
+    )
+
+    assert saved is True
+    assert manager.waits == 1
+    assert calls == [
+        (
+            manager,
+            {
+                "next_step": 5,
+                "model": "model",
+                "optimizer": "optimizer",
+                "train_iter": "train_iter",
+            },
+        )
+    ]
+
+
+def test_save_final_checkpoint_if_needed_skips_existing_final_step(monkeypatch):
+    calls = []
+    manager = FakeCheckpointManager(latest_step=5)
+    train_cfg = TrainConfig(
+        seed=0,
+        batch_size=4,
+        seq_len=8,
+        steps=5,
+        lr=1e-3,
+        decay=0.1,
+        log_every=1,
+        eval_every=1,
+        eval_steps=1,
+        checkpoint_every=5,
+        keep_last=2,
+    )
+    monkeypatch.setattr("pretrain.save_checkpoint", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    saved = save_final_checkpoint_if_needed(
+        manager,
+        train_cfg,
+        model="model",
+        optimizer="optimizer",
+        train_iter="train_iter",
+    )
+
+    assert saved is False
+    assert manager.waits == 0
+    assert calls == []

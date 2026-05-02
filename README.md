@@ -261,6 +261,10 @@ Important files:
 - `samples/`: generated samples and inspected batch text
 - `checkpoints/`: Orbax checkpoints with model, optimizer, metadata, and Grain iterator state
 
+`checkpoint_every` controls periodic checkpoints. Successful training also
+writes a final checkpoint at `train.steps` when the cadence did not already save
+one, so post-training evals target the completed model state.
+
 If the run directory already exists, startup fails by design. Use a new `[experiment].name` or resume.
 
 ## Count Parameters
@@ -436,9 +440,11 @@ uv run experiment configs/your_experiment.toml
 ```
 
 This command runs pretraining, checkpoint validation, full CORE plus inference,
-then writes a baseline-relative score into the registry. The first scored run in
-the registry becomes the baseline by default and scores around `25`; later runs
-are scored relative to it. To force a different baseline:
+then writes a baseline-relative score into the registry. Scoring requires the
+checkpoint validation, CORE, and inference artifacts to match the final completed
+training step; stale eval artifacts fail before registration. The first scored
+run in the registry becomes the baseline by default and scores around `25`;
+later runs are scored relative to it. To force a different baseline:
 
 ```bash
 uv run experiment configs/your_experiment.toml --baseline-run runs/baseline_name

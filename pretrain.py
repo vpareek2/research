@@ -153,6 +153,23 @@ def maybe_write_completion_summary(run_dir, *, completed: bool):
     return write_completion_summary(run_dir)
 
 
+def save_final_checkpoint_if_needed(checkpoint_manager, train_config, *, model, optimizer, train_iter) -> bool:
+    final_step = train_config.steps
+    latest_step = checkpoint_manager.latest_step()
+    if latest_step is not None and latest_step >= final_step:
+        return False
+
+    save_checkpoint(
+        checkpoint_manager,
+        next_step=final_step,
+        model=model,
+        optimizer=optimizer,
+        train_iter=train_iter,
+    )
+    checkpoint_manager.wait_until_finished()
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", help="Path to a run config TOML file.")
@@ -326,6 +343,14 @@ def main():
                 with trace_profiler.annotate("log"):
                     logger.log(metrics)
             trace_profiler.end_current_step(step)
+        if save_final_checkpoint_if_needed(
+            checkpoint_manager,
+            train_config,
+            model=model,
+            optimizer=optimizer,
+            train_iter=train_iter,
+        ):
+            print(f"saved final checkpoint at step {train_config.steps}")
         completed = True
 
     finally:

@@ -44,6 +44,7 @@ def main(argv: list[str] | None = None):
     _run([sys.executable, "-m", "utils.core_eval", str(run_dir)])
 
     summary = summarize_run(run_dir)
+    validate_final_eval_alignment(summary)
     baseline = select_baseline_summary(
         summary,
         registry_path=args.registry_path,
@@ -67,6 +68,38 @@ def main(argv: list[str] | None = None):
 def _run(command: list[str]) -> None:
     print(f"running: {' '.join(command)}")
     subprocess.run(command, check=True)
+
+
+def validate_final_eval_alignment(summary: dict) -> None:
+    expected_step = _nested(summary, ["training", "steps_completed"])
+    artifacts = {
+        "checkpoint eval": _nested(summary, ["checkpoint_evals", "latest", "checkpoint_step"]),
+        "CORE eval": _nested(summary, ["benchmark_core", "latest", "checkpoint_step"]),
+        "inference benchmark": _nested(summary, ["inference_benchmark", "latest", "checkpoint_step"]),
+    }
+    stale = {
+        name: step
+        for name, step in artifacts.items()
+        if step != expected_step
+    }
+    if stale:
+        details = ", ".join(
+            f"{name}={step if step is not None else 'missing'}"
+            for name, step in stale.items()
+        )
+        raise RuntimeError(
+            f"Refusing to score run with stale eval artifacts: expected checkpoint step "
+            f"{expected_step}, got {details}"
+        )
+
+
+def _nested(row: dict, path: list[str]):
+    value = row
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
 
 
 if __name__ == "__main__":
