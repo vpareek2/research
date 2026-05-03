@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sys
 import types
 
@@ -13,6 +14,7 @@ from research.prepare_data import (
     OutputConfig,
     PrepareConfig,
     SourceConfig,
+    TokenizationConfig,
     TokenizerConfig,
     load_texts,
     load_hf_texts,
@@ -29,14 +31,18 @@ def test_prepare_texts_writes_bins_manifest_and_eot(tmp_path):
     config = PrepareConfig(
         source=SourceConfig(type="hf", dataset="fake/dataset", split="train", text_column="text"),
         tokenizer=TokenizerConfig(name="gpt2", append_eot=True),
-        output=OutputConfig(path=str(output_dir), dtype="uint32", val_fraction=0.25),
+        output=OutputConfig(path=str(output_dir), dtype="uint32", val_fraction=0.25, max_tokens=100, shard_tokens=4),
+        tokenization=TokenizationConfig(workers=1, batch_docs=2),
     )
     texts = ["hello", "world", "again"]
     tokenizer = tiktoken.get_encoding("gpt2")
 
     manifest = prepare_texts(texts, config, hf_auth="prompt")
 
-    tokens = np.memmap(output_dir / "tokens.bin", dtype=np.uint32, mode="r")
+    tokens = np.concatenate([
+        np.memmap(output_dir / shard["path"], dtype=np.uint32, mode="r")
+        for shard in manifest["shards"]
+    ])
     all_tokens = []
     for text in texts:
         all_tokens.extend(tokenizer.encode(text))
@@ -45,13 +51,16 @@ def test_prepare_texts_writes_bins_manifest_and_eot(tmp_path):
 
     np.testing.assert_array_equal(np.asarray(tokens), np.asarray(all_tokens, dtype=np.uint32))
     assert manifest["num_tokens"] == len(all_tokens)
+    assert manifest["schema_version"] == 2
+    assert len(manifest["shards"]) > 1
+    for shard in manifest["shards"]:
+        assert hashlib.sha256((output_dir / shard["path"]).read_bytes()).hexdigest() == shard["sha256"]
     assert manifest["train_tokens"] == split_idx
     assert manifest["val_tokens"] == len(all_tokens) - split_idx
     assert manifest["splits"]["train"] == {"start": 0, "end": split_idx, "tokens": split_idx}
     assert manifest["splits"]["val"] == {"start": split_idx, "end": len(all_tokens), "tokens": len(all_tokens) - split_idx}
     assert manifest["tokenizer"]["append_eot"] is True
     assert manifest["hf_auth"] == "prompt"
-    assert manifest["files"]["tokens"]["sha256"]
     assert manifest["files"]["token_bytes"]["path"] == "token_bytes.bin"
     assert manifest["files"]["token_bytes"]["sha256"]
     token_bytes = np.fromfile(output_dir / "token_bytes.bin", dtype=np.uint16)
@@ -72,7 +81,8 @@ def test_prepare_texts_streams_generator(tmp_path):
     config = PrepareConfig(
         source=SourceConfig(type="text", path="input.txt"),
         tokenizer=TokenizerConfig(name="gpt2", append_eot=True),
-        output=OutputConfig(path=str(output_dir), dtype="uint32", val_fraction=0.25),
+        output=OutputConfig(path=str(output_dir), dtype="uint32", val_fraction=0.25, max_tokens=100),
+        tokenization=TokenizationConfig(workers=1),
     )
     consumed = []
 
@@ -85,7 +95,7 @@ def test_prepare_texts_streams_generator(tmp_path):
 
     assert consumed == ["hello", "world", "again"]
     assert manifest["num_tokens"] > 0
-    assert (output_dir / "tokens.bin").exists()
+    assert (output_dir / manifest["shards"][0]["path"]).exists()
     assert (output_dir / "token_bytes.bin").exists()
 
 
@@ -94,13 +104,18 @@ def test_prepare_texts_respects_max_tokens(tmp_path):
     config = PrepareConfig(
         source=SourceConfig(type="text", path="input.txt"),
         tokenizer=TokenizerConfig(name="gpt2", append_eot=True),
-        output=OutputConfig(path=str(output_dir), dtype="uint32", val_fraction=0.2, max_tokens=5),
+        output=OutputConfig(path=str(output_dir), dtype="uint32", val_fraction=0.2, max_tokens=5, shard_tokens=3),
+        tokenization=TokenizationConfig(workers=1),
     )
 
     manifest = prepare_texts(["hello world", "this should be truncated"], config)
 
-    tokens = np.memmap(output_dir / "tokens.bin", dtype=np.uint32, mode="r")
+    tokens = np.concatenate([
+        np.memmap(output_dir / shard["path"], dtype=np.uint32, mode="r")
+        for shard in manifest["shards"]
+    ])
     assert len(tokens) == 5
+    assert [shard["tokens"] for shard in manifest["shards"]] == [3, 2]
     assert manifest["max_tokens"] == 5
     assert manifest["num_tokens"] == 5
     assert manifest["train_tokens"] == 4

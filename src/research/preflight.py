@@ -303,6 +303,12 @@ def _check_dataset_prepare_config(result: PreflightResult, prepare_config: Prepa
         result.fail("data.prepare_config", f"tokenizer {prepare_config.tokenizer.name!r} != data.tokenizer {result.config.data.tokenizer!r}")
     elif prepare_config.source is not None and prepare_config.source.type == "hf" and prepare_config.output.max_tokens is None:
         result.fail("data.prepare_config", "HF dataset preparation requires output.max_tokens to avoid uncapped dataset tokenization")
+    elif prepare_config.output.max_tokens is None:
+        result.fail("data.prepare_config", "training dataset preparation requires output.max_tokens")
+    elif prepare_config.output.shard_tokens <= 0:
+        result.fail("data.prepare_config", f"output.shard_tokens must be positive, got {prepare_config.output.shard_tokens}")
+    elif prepare_config.tokenization.workers != "auto" and prepare_config.tokenization.workers <= 0:
+        result.fail("data.prepare_config", f"tokenization.workers must be 'auto' or positive, got {prepare_config.tokenization.workers}")
     elif prepare_config.output.max_tokens is not None and _prepared_train_token_cap(prepare_config) < result.config.target.tokens:
         result.fail(
             "data.prepare_config",
@@ -310,7 +316,8 @@ def _check_dataset_prepare_config(result: PreflightResult, prepare_config: Prepa
             f"below target.tokens={result.config.target.tokens:,}",
         )
     else:
-        result.ok("data.prepare_config", result.config.data.prepare_config or "")
+        shards = math.ceil(prepare_config.output.max_tokens / prepare_config.output.shard_tokens)
+        result.ok("data.prepare_config", f"{result.config.data.prepare_config or ''} expected_shards={shards:,}")
 
 
 def _prepared_train_token_cap(prepare_config: PrepareConfig) -> int:

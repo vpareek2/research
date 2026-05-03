@@ -139,10 +139,13 @@ def test_inspect_batch_reads_prepared_token_data(tmp_path):
     tokens = np.asarray(tokenizer.encode("prepared hello world"), dtype=np.uint32)
     tokens.tofile(data_dir / "tokens.bin")
     (data_dir / "manifest.json").write_text(json.dumps({
+        "schema_version": 2,
+        "kind": "training_tokens",
         "dtype": "uint32",
         "num_tokens": len(tokens),
         "tokenizer": {"name": "gpt2"},
-        "files": {"tokens": {"path": "tokens.bin"}},
+        "files": {},
+        "shards": [{"path": "tokens.bin", "start": 0, "end": len(tokens), "tokens": len(tokens), "bytes": len(tokens) * 4}],
         "splits": {
             "train": {"start": 0, "end": len(tokens), "tokens": len(tokens)},
             "val": {"start": len(tokens), "end": len(tokens), "tokens": 0},

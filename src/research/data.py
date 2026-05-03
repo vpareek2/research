@@ -4,6 +4,7 @@ Data loading utilities.
 
 from pathlib import Path
 from typing import Iterator
+import bisect
 import json
 import hashlib
 
@@ -87,6 +88,84 @@ class TokenMemmapDataset(TokenDataset):
         if not 0 <= start <= end <= len(tokens):
             raise ValueError(f"Invalid token window start={start}, end={end}, len={len(tokens)}")
         super().__init__(tokens[start:end], seq_len, token_offset=start)
+
+
+class ShardedTokenDataset:
+    """
+    Fixed-length chunks backed by a manifest v2 shard list.
+    """
+
+    def __init__(
+        self,
+        data_dir: str | Path,
+        manifest: dict,
+        seq_len: int,
+        *,
+        start: int,
+        end: int,
+    ):
+        self.data_dir = Path(data_dir)
+        self.manifest = manifest
+        self.seq_len = seq_len
+        self.token_start = start
+        self.token_end = end
+        self.n_examples = (end - start) // seq_len
+        self.shards = [
+            {
+                **shard,
+                "tokens_array": np.memmap(self.data_dir / shard["path"], dtype=np.uint32, mode="r"),
+            }
+            for shard in manifest["shards"]
+        ]
+        self.shard_starts = [int(shard["start"]) for shard in self.shards]
+
+    def __len__(self) -> int:
+        return self.n_examples
+
+    def __getitem__(self, idx: int) -> dict[str, np.ndarray | int]:
+        start = self.token_start + idx * self.seq_len
+        end = start + self.seq_len
+        return {
+            "input_ids": read_token_range_from_shards(self.shards, self.shard_starts, start, end).astype(np.int32),
+            "chunk_idx": idx,
+            "token_start": start,
+            "token_end": end,
+        }
+
+
+def read_token_range(data_dir: str | Path, manifest: dict, start: int, end: int) -> np.ndarray:
+    data_dir = Path(data_dir)
+    shards = [
+        {
+            **shard,
+            "tokens_array": np.memmap(data_dir / shard["path"], dtype=np.uint32, mode="r"),
+        }
+        for shard in manifest["shards"]
+    ]
+    shard_starts = [int(shard["start"]) for shard in shards]
+    return read_token_range_from_shards(shards, shard_starts, start, end)
+
+
+def read_token_range_from_shards(shards: list[dict], shard_starts: list[int], start: int, end: int) -> np.ndarray:
+    if end <= start:
+        return np.asarray([], dtype=np.uint32)
+    pieces = []
+    cursor = start
+    while cursor < end:
+        shard_idx = bisect.bisect_right(shard_starts, cursor) - 1
+        if shard_idx < 0 or shard_idx >= len(shards):
+            raise IndexError(f"Token range starts outside shards: start={start}, end={end}")
+        shard = shards[shard_idx]
+        shard_start = int(shard["start"])
+        shard_end = int(shard["end"])
+        if cursor >= shard_end:
+            raise IndexError(f"Token range crosses a gap before token {cursor}")
+        take_end = min(end, shard_end)
+        local_start = cursor - shard_start
+        local_end = take_end - shard_start
+        pieces.append(np.asarray(shard["tokens_array"][local_start:local_end], dtype=np.uint32))
+        cursor = take_end
+    return pieces[0] if len(pieces) == 1 else np.concatenate(pieces)
 
 
 def load_tokens(config: DataConfig) -> np.ndarray:
@@ -193,6 +272,10 @@ def validate_token_manifest(
     verify_checksum: bool = False,
 ) -> dict:
     data_dir = Path(data_dir)
+    if manifest.get("schema_version") != 2:
+        raise ValueError("Prepared training token manifest must have schema_version=2; regenerate data with prepare-data")
+    if manifest.get("kind") != "training_tokens":
+        raise ValueError(f"Prepared training token manifest kind must be training_tokens, got {manifest.get('kind')!r}")
     if manifest.get("dtype") != "uint32":
         raise ValueError(f"Prepared token manifest dtype must be uint32, got {manifest.get('dtype')}")
 
@@ -203,22 +286,37 @@ def validate_token_manifest(
             f"match config tokenizer {data_config.tokenizer!r}"
         )
 
-    token_file = manifest.get("files", {}).get("tokens", {})
-    token_path_value = token_file.get("path")
-    if not token_path_value:
-        raise ValueError("Prepared token manifest is missing files.tokens.path")
-    token_path = data_dir / token_path_value
-    if not token_path.exists():
-        raise FileNotFoundError(f"Prepared token file does not exist: {token_path}")
-
     itemsize = np.dtype(np.uint32).itemsize
-    token_file_bytes = token_path.stat().st_size
-    if token_file_bytes % itemsize != 0:
-        raise ValueError(f"Prepared token file size is not divisible by uint32 size: {token_path}")
-    file_tokens = token_file_bytes // itemsize
+    shards = manifest.get("shards")
+    if not isinstance(shards, list) or not shards:
+        raise ValueError("Prepared token manifest must contain non-empty shards")
+    expected_start = 0
+    file_tokens = 0
+    for idx, shard in enumerate(shards):
+        path_value = shard.get("path")
+        if not path_value:
+            raise ValueError(f"Prepared token shard {idx} is missing path")
+        shard_path = data_dir / path_value
+        if not shard_path.exists():
+            raise FileNotFoundError(f"Prepared token shard does not exist: {shard_path}")
+        start = shard.get("start")
+        end = shard.get("end")
+        tokens = shard.get("tokens")
+        if not isinstance(start, int) or not isinstance(end, int) or not isinstance(tokens, int):
+            raise ValueError(f"Prepared token shard {idx} must contain integer start, end, and tokens")
+        if start != expected_start or end < start or tokens != end - start:
+            raise ValueError(f"Prepared token shards must be contiguous and correctly bounded; bad shard={shard}")
+        token_file_bytes = shard_path.stat().st_size
+        if token_file_bytes % itemsize != 0:
+            raise ValueError(f"Prepared token shard size is not divisible by uint32 size: {shard_path}")
+        actual_tokens = token_file_bytes // itemsize
+        if actual_tokens != tokens:
+            raise ValueError(f"Prepared token shard {path_value} tokens={tokens} does not match file length={actual_tokens}")
+        file_tokens += tokens
+        expected_start = end
     manifest_tokens = manifest.get("num_tokens")
     if manifest_tokens != file_tokens:
-        raise ValueError(f"Prepared token manifest num_tokens={manifest_tokens} does not match token file length={file_tokens}")
+        raise ValueError(f"Prepared token manifest num_tokens={manifest_tokens} does not match shard token total={file_tokens}")
 
     splits = manifest.get("splits", {})
     train_split = _validate_manifest_split(splits, "train", file_tokens)
@@ -226,11 +324,14 @@ def validate_token_manifest(
     if train_split["start"] < val_split["end"] and val_split["start"] < train_split["end"]:
         raise ValueError(f"Prepared token train/val splits overlap: train={train_split}, val={val_split}")
 
-    expected_sha256 = token_file.get("sha256")
-    if verify_checksum and expected_sha256:
-        actual_sha256 = _sha256(token_path)
-        if actual_sha256 != expected_sha256:
-            raise ValueError(f"Prepared token checksum mismatch for {token_path}")
+    if verify_checksum:
+        for shard in shards:
+            expected_sha256 = shard.get("sha256")
+            if expected_sha256:
+                shard_path = data_dir / shard["path"]
+                actual_sha256 = _sha256(shard_path)
+                if actual_sha256 != expected_sha256:
+                    raise ValueError(f"Prepared token checksum mismatch for {shard_path}")
 
     return manifest
 
@@ -283,12 +384,11 @@ def build_datasets(data_config: DataConfig, train_config: TrainConfig) -> tuple[
     if data_config.source == "tokens":
         data_dir = Path(data_config.path)
         manifest = load_validated_token_manifest(data_config)
-        token_path = data_dir / manifest["files"]["tokens"]["path"]
         train_split = manifest["splits"]["train"]
         val_split = manifest["splits"]["val"]
         return (
-            TokenMemmapDataset(token_path, train_config.seq_len, start=train_split["start"], end=train_split["end"]),
-            TokenMemmapDataset(token_path, train_config.seq_len, start=val_split["start"], end=val_split["end"]),
+            ShardedTokenDataset(data_dir, manifest, train_config.seq_len, start=train_split["start"], end=train_split["end"]),
+            ShardedTokenDataset(data_dir, manifest, train_config.seq_len, start=val_split["start"], end=val_split["end"]),
         )
 
     raise ValueError(f"Unknown data source: {data_config.source}")

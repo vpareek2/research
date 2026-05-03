@@ -83,12 +83,15 @@ def test_build_budget_infers_prepared_token_epoch(tmp_path):
     np.arange(120, dtype=np.uint32).tofile(data_dir / "tokens.bin")
     (data_dir / "manifest.json").write_text(
         json.dumps(
-            {
-                "dtype": "uint32",
-                "num_tokens": 120,
-                "tokenizer": {"name": "gpt2"},
-                "files": {"tokens": {"path": "tokens.bin"}},
-                "splits": {
+                {
+                    "schema_version": 2,
+                    "kind": "training_tokens",
+                    "dtype": "uint32",
+                    "num_tokens": 120,
+                    "tokenizer": {"name": "gpt2"},
+                    "files": {},
+                    "shards": [{"path": "tokens.bin", "start": 0, "end": 120, "tokens": 120, "bytes": 480}],
+                    "splits": {
                     "train": {"start": 0, "end": 100, "tokens": 100},
                     "val": {"start": 100, "end": 120, "tokens": 20},
                 },

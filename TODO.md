@@ -2,6 +2,11 @@
 
 ## 1. Replace slow, monolithic data preparation
 
+Status: implemented. Training data prep now requires an explicit token cap,
+tokenizes through streaming worker batches, writes `uint32` token shards, and
+uses manifest v2. Old single-file training manifests are intentionally rejected.
+Eval-domain packs remain small and unchanged.
+
 Current dataset preparation is not acceptable for real cloud iteration.
 
 Observed failure mode:
@@ -52,3 +57,38 @@ Implemented direction:
 - Excluded eval/sample/checkpoint rows when computing steady-state training estimates.
 - Updated RTX PRO 6000 Blackwell peak FLOP denominator to `1e15`.
 - Added derived fields to scorecard and registry so W&B/log-step timing does not dominate run-level comparisons.
+
+## 3. Add a dedicated memory benchmark
+
+Current profiling and run summaries record memory opportunistically, but there is
+no standalone benchmark that answers "what batch/context/model sizes fit, and
+with what memory headroom?"
+
+Required direction:
+- Add a memory benchmark CLI that sweeps batch size and sequence length for a
+  configured model.
+- Report peak GPU memory, model/optimizer state memory, activation pressure,
+  tokens per step, and pass/fail/OOM status.
+- Make OOM handling explicit and non-fatal so the benchmark can keep sweeping.
+- Write machine-readable JSON and a compact Markdown summary under the run or
+  benchmark output directory.
+- Use the result to choose safe next-run batch/context settings before launching
+  expensive training.
+
+## 4. Add a long-context benchmark
+
+Current eval and inference benchmarks do not directly measure long-context
+behavior. We need a benchmark that catches quality and performance regressions
+when sequence length increases.
+
+Required direction:
+- Add a long-context benchmark over fixed prompt lengths such as 2k, 4k, 8k,
+  and the largest configured context that fits.
+- Measure prefill throughput, decode throughput, TTFT, peak memory, and failure
+  mode for each context length.
+- Include at least one synthetic retrieval/copy task so the benchmark tests
+  whether the model uses far-context tokens, not just whether it runs.
+- Save JSON/Markdown artifacts and include latest long-context metrics in
+  `run_summary`.
+- Keep it runnable independently of CORE so long-context checks can be done
+  before a full evaluation pass.

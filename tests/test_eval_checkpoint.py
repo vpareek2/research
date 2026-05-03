@@ -49,10 +49,13 @@ def train_config(**overrides):
 
 def write_manifest(data_dir):
     (data_dir / "manifest.json").write_text(json.dumps({
+        "schema_version": 2,
+        "kind": "training_tokens",
         "dtype": "uint32",
         "num_tokens": 128,
         "tokenizer": {"name": "gpt2"},
-        "files": {"tokens": {"path": "tokens.bin"}},
+        "files": {},
+        "shards": [{"path": "tokens.bin", "start": 0, "end": 128, "tokens": 128, "bytes": 512}],
         "splits": {
             "train": {"start": 0, "end": 64, "tokens": 64},
             "val": {"start": 64, "end": 128, "tokens": 64},

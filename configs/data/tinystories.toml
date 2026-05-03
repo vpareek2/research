@@ -16,3 +16,10 @@ append_eot = true
 path = "data/tinystories_gpt2"
 dtype = "uint32"
 val_fraction = 0.001
+max_tokens = 100000000
+shard_tokens = 128000000
+
+[tokenization]
+workers = "auto"
+batch_docs = 256
+queue_batches = 8

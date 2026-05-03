@@ -74,7 +74,7 @@ enabled = false
     )
 
 
-def write_data_prepare_config(path: Path, output: Path, *, source_type: str = "text", max_tokens: int | None = None):
+def write_data_prepare_config(path: Path, output: Path, *, source_type: str = "text", max_tokens: int | None = 180):
     source_path = path.parent / "source.txt"
     source_path.write_text("hello\n", encoding="utf-8")
     if source_type == "hf":
@@ -104,7 +104,13 @@ append_eot = true
 path = "{output}"
 dtype = "uint32"
 val_fraction = 0.1
+shard_tokens = 32
 {max_tokens_line}
+
+[tokenization]
+workers = 1
+batch_docs = 2
+queue_batches = 1
 """,
         encoding="utf-8",
     )
@@ -165,7 +171,7 @@ def test_preflight_rejects_uncapped_hf_data_prepare(tmp_path, monkeypatch):
     data_prepare = tmp_path / "data_prep.toml"
     eval_prepare = tmp_path / "eval_prep.toml"
     config_path = tmp_path / "run.toml"
-    write_data_prepare_config(data_prepare, data_dir, source_type="hf")
+    write_data_prepare_config(data_prepare, data_dir, source_type="hf", max_tokens=None)
     write_eval_prepare_config(eval_prepare, eval_root)
     write_run_config(config_path, data_dir, eval_root, data_prepare, eval_prepare)
     monkeypatch.setattr("research.preflight.shutil.which", lambda name: name)
@@ -261,7 +267,7 @@ def test_preflight_fails_invalid_existing_train_data(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("research.preflight.shutil.which", lambda name: name)
 
-    with pytest.raises(PreflightError, match="Prepared token manifest tokenizer"):
+    with pytest.raises(PreflightError, match="schema_version=2"):
         run_preflight(config_path, interactive=False, runner=fake_runner)
 
 

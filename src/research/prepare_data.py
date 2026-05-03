@@ -5,6 +5,7 @@ Offline dataset preparation for mmap-backed token training.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import getpass
@@ -13,7 +14,8 @@ import os
 import json
 from pathlib import Path
 import tomllib
-from typing import Iterable
+import time
+from typing import Iterable, Iterator
 
 import numpy as np
 import tiktoken
@@ -53,6 +55,7 @@ class OutputConfig:
     val_fraction: float = 0.001
     max_tokens: int | None = None
     tokens_per_domain: int | None = None
+    shard_tokens: int = 128_000_000
     seed: int = 0
 
     def __post_init__(self):
@@ -64,6 +67,23 @@ class OutputConfig:
             raise ValueError(f"max_tokens must be positive, got {self.max_tokens}")
         if self.tokens_per_domain is not None and self.tokens_per_domain <= 0:
             raise ValueError(f"tokens_per_domain must be positive, got {self.tokens_per_domain}")
+        if self.shard_tokens <= 0:
+            raise ValueError(f"shard_tokens must be positive, got {self.shard_tokens}")
+
+
+@dataclass
+class TokenizationConfig:
+    workers: int | str = "auto"
+    batch_docs: int = 256
+    queue_batches: int = 8
+
+    def __post_init__(self):
+        if self.workers != "auto" and (not isinstance(self.workers, int) or self.workers <= 0):
+            raise ValueError(f"tokenization.workers must be 'auto' or a positive integer, got {self.workers!r}")
+        if self.batch_docs <= 0:
+            raise ValueError(f"tokenization.batch_docs must be positive, got {self.batch_docs}")
+        if self.queue_batches <= 0:
+            raise ValueError(f"tokenization.queue_batches must be positive, got {self.queue_batches}")
 
 
 @dataclass
@@ -80,6 +100,7 @@ class PrepareConfig:
     kind: str = "dataset"
     domains: list[DomainConfig] = field(default_factory=list)
     hf: HfConfig = field(default_factory=HfConfig)
+    tokenization: TokenizationConfig = field(default_factory=TokenizationConfig)
 
     def __post_init__(self):
         if self.kind not in {"dataset", "eval_domains"}:
@@ -127,6 +148,7 @@ def load_prepare_config(path: str | Path) -> PrepareConfig:
         output=OutputConfig(**data["output"]),
         domains=domains,
         hf=HfConfig(**data.get("hf", {})),
+        tokenization=TokenizationConfig(**data.get("tokenization", {})),
     )
 
 
@@ -212,8 +234,9 @@ def prepare_dataset(config: PrepareConfig):
         print(f"path: {config.source.path}")
     print(f"output: {config.output.path}")
     print(f"tokenizer: {config.tokenizer.name} append_eot={config.tokenizer.append_eot}")
-    if config.output.max_tokens is not None:
-        print(f"max_tokens: {config.output.max_tokens}")
+    print(f"max_tokens: {config.output.max_tokens}")
+    print(f"shard_tokens: {config.output.shard_tokens}")
+    print(f"tokenization: workers={config.tokenization.workers} batch_docs={config.tokenization.batch_docs}")
 
     hf_auth = "not_applicable"
     if config.source.type == "hf":
@@ -230,25 +253,20 @@ def prepare_texts(texts: Iterable[str], config: PrepareConfig, *, hf_auth: str =
     tokenizer = tiktoken.get_encoding(config.tokenizer.name)
     output_dir = Path(config.output.path)
     output_dir.mkdir(parents=True, exist_ok=True)
-    tokens_path = output_dir / "tokens.bin"
     token_bytes_path = output_dir / TOKEN_BYTES_FILENAME
+    if config.output.max_tokens is None:
+        raise ValueError("Training dataset preparation requires output.max_tokens")
 
     print("Writing tokens...")
-    if config.output.max_tokens is None:
-        token_count = _write_tokens_bin(
-            texts,
-            tokenizer=tokenizer,
-            append_eot=config.tokenizer.append_eot,
-            tokens_path=tokens_path,
-        )
-    else:
-        token_count = _write_limited_tokens_bin(
-            texts,
-            tokenizer=tokenizer,
-            append_eot=config.tokenizer.append_eot,
-            tokens_path=tokens_path,
-            max_tokens=config.output.max_tokens,
-        )
+    token_count, shards, docs_count, elapsed = _write_sharded_tokens(
+        texts,
+        tokenizer_name=config.tokenizer.name,
+        append_eot=config.tokenizer.append_eot,
+        output_dir=output_dir,
+        max_tokens=config.output.max_tokens,
+        shard_tokens=config.output.shard_tokens,
+        tokenization=config.tokenization,
+    )
     split_idx = int(token_count * (1.0 - config.output.val_fraction))
     print(f"tokens: {token_count} train={split_idx} val={token_count - split_idx}")
 
@@ -256,16 +274,10 @@ def prepare_texts(texts: Iterable[str], config: PrepareConfig, *, hf_auth: str =
     build_token_bytes(tokenizer).tofile(token_bytes_path)
 
     manifest = {
+        "schema_version": 2,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "source": {
-            "type": config.source.type,
-            "dataset": config.source.dataset,
-            "subset": config.source.subset,
-            "data_dir": config.source.data_dir,
-            "split": config.source.split,
-            "text_column": config.source.text_column,
-            "path": config.source.path,
-        },
+        "kind": "training_tokens",
+        "source": _source_manifest(config.source),
         "tokenizer": {
             "name": config.tokenizer.name,
             "append_eot": config.tokenizer.append_eot,
@@ -275,13 +287,22 @@ def prepare_texts(texts: Iterable[str], config: PrepareConfig, *, hf_auth: str =
         "dtype": config.output.dtype,
         "val_fraction": config.output.val_fraction,
         "max_tokens": config.output.max_tokens,
+        "shard_tokens": config.output.shard_tokens,
         "num_tokens": token_count,
+        "num_docs": docs_count,
+        "elapsed_sec": elapsed,
+        "tokens_per_sec": token_count / elapsed if elapsed > 0.0 else None,
+        "tokenization": {
+            "workers": _resolve_workers(config.tokenization.workers),
+            "batch_docs": config.tokenization.batch_docs,
+            "queue_batches": config.tokenization.queue_batches,
+        },
         "splits": {
             "train": {"start": 0, "end": split_idx, "tokens": split_idx},
             "val": {"start": split_idx, "end": token_count, "tokens": token_count - split_idx},
         },
+        "shards": shards,
         "files": {
-            "tokens": {"path": "tokens.bin", "sha256": _sha256(tokens_path, desc="Hashing tokens.bin")},
             "token_bytes": {"path": TOKEN_BYTES_FILENAME, "sha256": _sha256(token_bytes_path, desc=f"Hashing {TOKEN_BYTES_FILENAME}")},
         },
     }
@@ -408,22 +429,161 @@ def _tokenize(text: str, tokenizer: tiktoken.Encoding, append_eot: bool) -> list
     return tokens
 
 
-def _write_tokens_bin(
+_WORKER_TOKENIZER = None
+_WORKER_APPEND_EOT = True
+
+
+def _init_tokenizer_worker(tokenizer_name: str, append_eot: bool):
+    global _WORKER_TOKENIZER, _WORKER_APPEND_EOT
+    _WORKER_TOKENIZER = tiktoken.get_encoding(tokenizer_name)
+    _WORKER_APPEND_EOT = append_eot
+
+
+def _tokenize_batch_worker(texts: list[str]) -> list[list[int]]:
+    if _WORKER_TOKENIZER is None:
+        raise RuntimeError("Tokenizer worker was not initialized")
+    return [_tokenize(text, _WORKER_TOKENIZER, _WORKER_APPEND_EOT) for text in texts]
+
+
+def _batched(texts: Iterable[str], batch_docs: int) -> Iterator[list[str]]:
+    batch = []
+    for text in texts:
+        batch.append(text)
+        if len(batch) >= batch_docs:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def _resolve_workers(workers: int | str) -> int:
+    if workers == "auto":
+        return max(1, (os.cpu_count() or 2) - 2)
+    return int(workers)
+
+
+def _tokenized_batches(
     texts: Iterable[str],
     *,
-    tokenizer: tiktoken.Encoding,
+    tokenizer_name: str,
     append_eot: bool,
-    tokens_path: Path,
-) -> int:
-    token_count = 0
-    with tokens_path.open("wb") as f:
-        for text in tqdm(texts, total=_safe_len(texts), desc="Tokenizing docs", unit="doc"):
-            tokens = np.asarray(_tokenize(text, tokenizer, append_eot), dtype=np.uint32)
-            if len(tokens) == 0:
-                continue
-            tokens.tofile(f)
-            token_count += len(tokens)
-    return token_count
+    tokenization: TokenizationConfig,
+) -> Iterator[list[list[int]]]:
+    workers = _resolve_workers(tokenization.workers)
+    batches = _batched(texts, tokenization.batch_docs)
+    if workers == 1:
+        tokenizer = tiktoken.get_encoding(tokenizer_name)
+        for batch in batches:
+            yield [_tokenize(text, tokenizer, append_eot) for text in batch]
+        return
+
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        initializer=_init_tokenizer_worker,
+        initargs=(tokenizer_name, append_eot),
+    ) as pool:
+        yield from pool.map(_tokenize_batch_worker, batches, chunksize=tokenization.queue_batches)
+
+
+class ShardWriter:
+    def __init__(self, output_dir: Path, *, shard_tokens: int):
+        self.output_dir = output_dir
+        self.shard_tokens = shard_tokens
+        self.shards = []
+        self.total_tokens = 0
+        self.current_path: Path | None = None
+        self.current_file = None
+        self.current_hash = None
+        self.current_start = 0
+        self.current_tokens = 0
+
+    def write(self, tokens: list[int]):
+        offset = 0
+        while offset < len(tokens):
+            self._ensure_open()
+            remaining = self.shard_tokens - self.current_tokens
+            take = min(remaining, len(tokens) - offset)
+            array = np.asarray(tokens[offset : offset + take], dtype=np.uint32)
+            data = array.tobytes()
+            self.current_file.write(data)
+            self.current_hash.update(data)
+            self.current_tokens += take
+            self.total_tokens += take
+            offset += take
+            if self.current_tokens >= self.shard_tokens:
+                self.close_current()
+
+    def close(self):
+        self.close_current()
+
+    def _ensure_open(self):
+        if self.current_file is not None:
+            return
+        shard_idx = len(self.shards)
+        self.current_path = self.output_dir / f"tokens-{shard_idx:05d}.bin"
+        self.current_file = self.current_path.open("wb")
+        self.current_hash = hashlib.sha256()
+        self.current_start = self.total_tokens
+        self.current_tokens = 0
+
+    def close_current(self):
+        if self.current_file is None:
+            return
+        self.current_file.close()
+        path = self.current_path
+        tokens = self.current_tokens
+        if tokens > 0:
+            self.shards.append(
+                {
+                    "path": path.name,
+                    "start": self.current_start,
+                    "end": self.current_start + tokens,
+                    "tokens": tokens,
+                    "bytes": path.stat().st_size,
+                    "sha256": self.current_hash.hexdigest(),
+                }
+            )
+        elif path.exists():
+            path.unlink()
+        self.current_path = None
+        self.current_file = None
+        self.current_hash = None
+        self.current_tokens = 0
+
+
+def _write_sharded_tokens(
+    texts: Iterable[str],
+    *,
+    tokenizer_name: str,
+    append_eot: bool,
+    output_dir: Path,
+    max_tokens: int,
+    shard_tokens: int,
+    tokenization: TokenizationConfig,
+) -> tuple[int, list[dict], int, float]:
+    start = time.perf_counter()
+    docs_count = 0
+    writer = ShardWriter(output_dir, shard_tokens=shard_tokens)
+    with tqdm(total=max_tokens, desc="Tokenizing tokens", unit="tok") as progress:
+        for tokenized_batch in _tokenized_batches(
+            texts,
+            tokenizer_name=tokenizer_name,
+            append_eot=append_eot,
+            tokenization=tokenization,
+        ):
+            for tokens in tokenized_batch:
+                docs_count += 1
+                remaining = max_tokens - writer.total_tokens
+                if remaining <= 0:
+                    writer.close()
+                    return writer.total_tokens, writer.shards, docs_count, time.perf_counter() - start
+                if not tokens:
+                    continue
+                tokens = tokens[:remaining]
+                writer.write(tokens)
+                progress.update(len(tokens))
+    writer.close()
+    return writer.total_tokens, writer.shards, docs_count, time.perf_counter() - start
 
 
 def _write_limited_tokens_bin(

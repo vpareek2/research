@@ -8,18 +8,21 @@ import tiktoken
 from research.config import DataConfig, EvalConfig, TrainConfig
 from research.data import (
     REQUIRED_EVAL_DOMAINS,
+    ShardedTokenDataset,
     TokenDataset,
     TokenMemmapDataset,
     build_token_bytes,
     default_eval_domain_root,
     eval_domain_root,
     load_eval_domain_token_bytes,
+    load_token_manifest,
     load_token_bytes,
     make_dataloaders,
     make_eval_domain_dataloaders,
     make_val_dataloader,
     split_tokens,
     validate_eval_domain_pack,
+    validate_token_manifest,
 )
 
 
@@ -50,14 +53,17 @@ def data_config(tmp_path, text=None, val_fraction=0.25):
 
 
 def write_manifest(data_dir, *, num_tokens=128, train=(0, 64), val=(64, 128), tokenizer="gpt2", dtype="uint32", token_bytes=False):
-    files = {"tokens": {"path": "tokens.bin"}}
+    files = {}
     if token_bytes:
         files["token_bytes"] = {"path": "token_bytes.bin"}
     (data_dir / "manifest.json").write_text(json.dumps({
+        "schema_version": 2,
+        "kind": "training_tokens",
         "dtype": dtype,
         "num_tokens": num_tokens,
         "tokenizer": {"name": tokenizer},
         "files": files,
+        "shards": [{"path": "tokens.bin", "start": 0, "end": num_tokens, "tokens": num_tokens, "bytes": num_tokens * 4}],
         "splits": {
             "train": {"start": train[0], "end": train[1], "tokens": train[1] - train[0]},
             "val": {"start": val[0], "end": val[1], "tokens": val[1] - val[0]},
@@ -73,7 +79,16 @@ def write_eval_domain_pack(root, *, tokenizer="gpt2", tokens_per_domain=32):
         domain_dir = root / name
         domain_dir.mkdir()
         np.arange(tokens_per_domain, dtype=np.uint32).tofile(domain_dir / "tokens.bin")
-        write_manifest(domain_dir, num_tokens=tokens_per_domain, train=(0, 0), val=(0, tokens_per_domain), tokenizer=tokenizer)
+        (domain_dir / "manifest.json").write_text(json.dumps({
+            "dtype": "uint32",
+            "num_tokens": tokens_per_domain,
+            "tokenizer": {"name": tokenizer},
+            "files": {"tokens": {"path": "tokens.bin"}},
+            "splits": {
+                "train": {"start": 0, "end": 0, "tokens": 0},
+                "val": {"start": 0, "end": tokens_per_domain, "tokens": tokens_per_domain},
+            },
+        }))
         domains[name] = {"path": name, "num_tokens": tokens_per_domain}
     (root / "manifest.json").write_text(json.dumps({
         "kind": "eval_domains",
@@ -204,12 +219,44 @@ def test_prepared_token_dataloaders_shapes_and_val_determinism(tmp_path):
     np.testing.assert_array_equal(np.asarray(val_a["chunk_idx"]), np.asarray(val_b["chunk_idx"]))
 
 
+def test_sharded_token_dataset_reads_across_shard_boundaries(tmp_path):
+    data_dir = tmp_path / "prepared"
+    data_dir.mkdir()
+    np.arange(10, dtype=np.uint32).tofile(data_dir / "tokens-00000.bin")
+    np.arange(10, 20, dtype=np.uint32).tofile(data_dir / "tokens-00001.bin")
+    (data_dir / "manifest.json").write_text(json.dumps({
+        "schema_version": 2,
+        "kind": "training_tokens",
+        "dtype": "uint32",
+        "num_tokens": 20,
+        "tokenizer": {"name": "gpt2"},
+        "files": {},
+        "shards": [
+            {"path": "tokens-00000.bin", "start": 0, "end": 10, "tokens": 10, "bytes": 40},
+            {"path": "tokens-00001.bin", "start": 10, "end": 20, "tokens": 10, "bytes": 40},
+        ],
+        "splits": {
+            "train": {"start": 6, "end": 18, "tokens": 12},
+            "val": {"start": 18, "end": 20, "tokens": 2},
+        },
+    }))
+    dc = DataConfig(source="tokens", path=str(data_dir), tokenizer="gpt2")
+    manifest = validate_token_manifest(data_dir, load_token_manifest(data_dir), dc)
+    dataset = ShardedTokenDataset(data_dir, manifest, seq_len=8, start=6, end=18)
+
+    first = dataset[0]
+
+    np.testing.assert_array_equal(first["input_ids"], np.arange(6, 14, dtype=np.int32))
+    assert first["token_start"] == 6
+    assert first["token_end"] == 14
+
+
 @pytest.mark.parametrize(
     "manifest_kwargs,match",
     [
         ({"dtype": "uint16"}, "dtype"),
         ({"tokenizer": "cl100k_base"}, "tokenizer"),
-        ({"num_tokens": 127}, "num_tokens"),
+        ({"num_tokens": 127}, "file length"),
         ({"train": (0, 80), "val": (64, 128)}, "overlap"),
         ({"train": (0, 129)}, "invalid bounds"),
     ],
@@ -233,7 +280,7 @@ def test_prepared_token_manifest_missing_token_file_raises(tmp_path):
     dc = DataConfig(source="tokens", path=str(data_dir), tokenizer="gpt2")
     tc = train_config(eval_steps=2)
 
-    with pytest.raises(FileNotFoundError, match="token file"):
+    with pytest.raises(FileNotFoundError, match="token shard"):
         make_dataloaders(dc, tc)
 
 

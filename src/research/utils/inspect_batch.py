@@ -6,11 +6,10 @@ import argparse
 import json
 from pathlib import Path
 
-import numpy as np
 import tiktoken
 
 from research.config import load_config
-from research.data import load_validated_token_manifest
+from research.data import load_validated_token_manifest, read_token_range
 
 
 def _load_batch_record(run_dir: Path, step: int) -> dict:
@@ -35,10 +34,11 @@ def _format_batch_text(run_dir: Path, step: int) -> str:
     if config.data.source == "tokens":
         data_dir = Path(config.data.path)
         manifest = load_validated_token_manifest(config.data)
-        tokens = np.memmap(data_dir / manifest["files"]["tokens"]["path"], dtype=np.uint32, mode="r")
+        token_reader = lambda start, end: read_token_range(data_dir, manifest, start, end)
     else:
         text = Path(config.data.path).read_text(encoding="utf-8")
         tokens = tokenizer.encode(text)
+        token_reader = lambda start, end: tokens[start:end]
 
     lines = [
         f"run: {run_dir}",
@@ -49,7 +49,7 @@ def _format_batch_text(run_dir: Path, step: int) -> str:
     for i, (chunk_idx, start, end) in enumerate(
         zip(record["chunk_idx"], record["token_start"], record["token_end"])
     ):
-        decoded = tokenizer.decode(tokens[start:end])
+        decoded = tokenizer.decode(token_reader(start, end))
         lines.extend(
             [
                 "=" * 80,
