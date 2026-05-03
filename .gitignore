@@ -3,5 +3,8 @@ __pycache__/
 .venv/
 research.egg-info/
 /data/
-runs/
 profiles/
+runs/**/checkpoints/
+runs/**/wandb/
+runs/**/batches.jsonl
+runs/**/wandb_id.txt

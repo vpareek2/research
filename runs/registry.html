@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Run Score Progression</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 32px; color: #1f2933; }
+    h1, h2 { margin: 0 0 12px; }
+    section { margin: 28px 0; }
+    svg { max-width: 100%; height: auto; border: 1px solid #d8dee9; background: #fff; }
+    table { border-collapse: collapse; width: 100%; margin-top: 16px; font-size: 14px; }
+    th, td { border-bottom: 1px solid #e5e9f0; padding: 7px 8px; text-align: right; }
+    th:first-child, td:first-child { text-align: left; }
+    .empty { color: #687586; }
+  </style>
+</head>
+<body>
+  <h1>Run Score Progression</h1>
+  <section>
+    <h2>New Best Scores</h2>
+    <svg id="best" viewBox="0 0 920 320" role="img">
+<line x1="60" y1="264.0" x2="896" y2="264.0" stroke="#edf1f5"/>
+<text x="52" y="268.0" text-anchor="end" font-size="12" fill="#52606d">22.50</text>
+<line x1="60" y1="204.0" x2="896" y2="204.0" stroke="#edf1f5"/>
+<text x="52" y="208.0" text-anchor="end" font-size="12" fill="#52606d">23.00</text>
+<line x1="60" y1="144.0" x2="896" y2="144.0" stroke="#edf1f5"/>
+<text x="52" y="148.0" text-anchor="end" font-size="12" fill="#52606d">23.50</text>
+<line x1="60" y1="84.0" x2="896" y2="84.0" stroke="#edf1f5"/>
+<text x="52" y="88.0" text-anchor="end" font-size="12" fill="#52606d">24.00</text>
+<line x1="60" y1="24.0" x2="896" y2="24.0" stroke="#edf1f5"/>
+<text x="52" y="28.0" text-anchor="end" font-size="12" fill="#52606d">24.50</text>
+<line x1="60" y1="264" x2="896" y2="264" stroke="#9aa5b1"/>
+<line x1="60" y1="24" x2="60" y2="264" stroke="#9aa5b1"/>
+<polyline fill="none" stroke="#2563eb" stroke-width="2.5" points="60.0,144.0"/>
+<circle cx="60.0" cy="144.0" r="4.5" fill="#1d4ed8"><title>0_baseline: 23.500</title></circle>
+<text x="60.0" y="302" text-anchor="middle" font-size="11" fill="#52606d">0_baseline</text>
+</svg>
+  </section>
+  <section>
+    <h2>All Scores</h2>
+    <svg id="all" viewBox="0 0 920 320" role="img">
+<line x1="60" y1="264.0" x2="896" y2="264.0" stroke="#edf1f5"/>
+<text x="52" y="268.0" text-anchor="end" font-size="12" fill="#52606d">22.50</text>
+<line x1="60" y1="204.0" x2="896" y2="204.0" stroke="#edf1f5"/>
+<text x="52" y="208.0" text-anchor="end" font-size="12" fill="#52606d">23.00</text>
+<line x1="60" y1="144.0" x2="896" y2="144.0" stroke="#edf1f5"/>
+<text x="52" y="148.0" text-anchor="end" font-size="12" fill="#52606d">23.50</text>
+<line x1="60" y1="84.0" x2="896" y2="84.0" stroke="#edf1f5"/>
+<text x="52" y="88.0" text-anchor="end" font-size="12" fill="#52606d">24.00</text>
+<line x1="60" y1="24.0" x2="896" y2="24.0" stroke="#edf1f5"/>
+<text x="52" y="28.0" text-anchor="end" font-size="12" fill="#52606d">24.50</text>
+<line x1="60" y1="264" x2="896" y2="264" stroke="#9aa5b1"/>
+<line x1="60" y1="24" x2="60" y2="264" stroke="#9aa5b1"/>
+<polyline fill="none" stroke="#2563eb" stroke-width="2.5" points="60.0,144.0"/>
+<circle cx="60.0" cy="144.0" r="4.5" fill="#1d4ed8"><title>0_baseline: 23.500</title></circle>
+<text x="60.0" y="302" text-anchor="middle" font-size="11" fill="#52606d">0_baseline</text>
+</svg>
+  </section>
+  <section>
+    <h2>Runs</h2>
+    <table>
+<thead><tr><th>run</th><th>score</th><th>core</th><th>val BPB</th><th>decode/s</th><th>MFU</th><th>baseline</th></tr></thead>
+<tbody>
+<tr><td>0_baseline</td><td>23.4997</td><td>0.0885</td><td>1.1091</td><td>108.2885</td><td>1.8543</td><td>0_baseline</td></tr>
+</tbody>
+</table>
+  </section>
+</body>
+</html>

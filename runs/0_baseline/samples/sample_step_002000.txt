@@ -1,0 +1,6 @@
+step: 2000
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a timeWe�I|TheTheWe-|TheInFSI�InSYouTheWeI-GIInIAsBADTheGAWetTheTheWThet-MAForSKSInW-WeItS-TheTheF-ITheTheCInTheInDBy|WSInTheDIgTheTheYouUNowTheI|T-TheSThere|UDTheAllI-St-TheThe--TheThetAsKFB-WePower-.OI-DWsNowTheU-InM-OE

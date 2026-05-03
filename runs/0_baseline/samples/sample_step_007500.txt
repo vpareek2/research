@@ -1,0 +1,8 @@
+step: 7500
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a time-time-p-to-by of(I), and"Now, there�-s-the-and-t-with a,the-a-t-a-The�in-Dating the.and,
+In the of-com, and it has, for the and and by this, and for it” The-f-of-by-the-re-t-m-to-t-by.�e--like.
+-in-in-up, that was a good-with a,, it.-like the United States of. I�

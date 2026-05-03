@@ -1,0 +1,6 @@
+step: 1750
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a timeTheAsSTheTheTheTheAsByI-asPThetTheDTheShMSItSBDrInTheTheTheFTheTheand|ITheItThetsandTheTheItI||InWeIIcIthAsThebyTheIasIfasTheThebyCTheYear.ThereThebyCTheItThethPYouThesIKItTheThetAsThestByThebyTheTheinTheon-SThesanPItThenasthTheThepKThebyandTheSThethsDinThemby-The

@@ -1,0 +1,6 @@
+step: 3500
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a time-5P-SIt-124Ln-DatepostedSF-BHM312-DEL|T-mMELZ-H8TATREM5>CKSBL-05-11I.M|TheDate(SMt-12||FromMQi-1|I�Date2"TheM2I.1-In-M-R-19-posted4MAY17-May910-H.D2M12-7||12-a-i-5M.D/20-H--S.

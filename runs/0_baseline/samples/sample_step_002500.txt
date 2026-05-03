@@ -1,0 +1,6 @@
+step: 2500
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a timeIn�ICWIGYouBWeITA1BAItACWWeC:We�asbyIBIHIbyJP1PDFIenMyJDAllHIWAJD1C3FOJSn-12IIweAI-WeDO3:�WInDDYIgJIenL-SIJtas10.MWeI-BIIthFWBI3I-FK1.1PAllMyiW6TheH2.Ii|PCI

@@ -1,0 +1,7 @@
+step: 1250
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a timeAIBLLIP3IthTheM1"WWeCIThereTheTheATheIForIC-ForThecRKThe yearsthTheTheTheCALTheTheTheth--The daysThe:N"TheWeThe kidsThe.WeTheThe||ITheI3CTheAs"|CISIfThe1We kidsThestThe
+AsThe-SA.||I,ThetThe years,The courseThe|The kids-"TheThethThe year-andTheWAThe-The years,�A--|

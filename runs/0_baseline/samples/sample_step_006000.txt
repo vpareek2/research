@@ -1,0 +1,7 @@
+step: 6000
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a time-m-We-The-The AR-I.-to-andMQF-com-re-t-PELCQ-K-J-A-wI-n-the-de-tBunch-t-t-I---|It.A-VIP.5-d.M�-S-the--1.TTAZ-M, the
+-theD-|I--in-R-m-i-a-baconial-I-the-bonding,-or-to-pI-m�
