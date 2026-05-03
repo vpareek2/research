@@ -347,7 +347,7 @@ def test_sparse_logging_near_final_step_counts_as_complete(tmp_path):
 
     summary = run_summary.summarize_run(run_dir)
 
-    assert summary["training"]["steps_completed"] == 91
+    assert summary["training"]["steps_completed"] == 100
     assert summary["training"]["logged_rows"] == 4
     assert summary["status"] == "healthy"
 

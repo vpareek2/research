@@ -87,6 +87,7 @@ def summarize_run(run_dir: str | Path) -> dict[str, Any]:
     inference_benchmark = _inference_benchmark_summary(inference_rows)
     epiplexity = _epiplexity_summary(rows, val_rows, config.train)
     status, decision_hint = _verdict(config, rows, final_row, val_rows, health)
+    steps_completed = _steps_completed(config, final_row)
 
     summary = {
         "schema_version": 1,
@@ -111,7 +112,7 @@ def summarize_run(run_dir: str | Path) -> dict[str, Any]:
         "training": {
             "configured_steps": config.train.steps,
             "configured_tokens": train_tokens_target,
-            "steps_completed": min(int(final_row["step"]) + 1, config.train.steps),
+            "steps_completed": steps_completed,
             "logged_rows": len(rows),
             "final_step": int(final_row["step"]),
             "tokens_seen": _number_or_none(final_row.get("train/tokens_seen")),
@@ -718,7 +719,7 @@ def _verdict(config, rows: list[dict[str, Any]], final_row: dict[str, Any], val_
     final_val_raw = val_rows[-1].get("val/loss") if val_rows else None
     final_val_loss = _number_or_none(final_val_raw)
     final_step = int(final_row["step"])
-    completed = final_step >= config.train.steps - max(config.train.log_every, 1)
+    completed = _near_configured_end(config, final_step)
 
     if health["nan_count"] > 0 or not _is_finite(final_train_loss) or (val_rows and not _is_finite(final_val_raw)):
         return "failed", "discard"
@@ -738,6 +739,17 @@ def _verdict(config, rows: list[dict[str, Any]], final_row: dict[str, Any], val_
     if first_val_loss is not None and final_val_loss is not None and final_val_loss < first_val_loss:
         return "healthy", "scale"
     return "unstable", "retry"
+
+
+def _steps_completed(config, final_row: dict[str, Any]) -> int:
+    final_step = int(final_row["step"])
+    if _near_configured_end(config, final_step):
+        return config.train.steps
+    return min(final_step + 1, config.train.steps)
+
+
+def _near_configured_end(config, final_step: int) -> bool:
+    return final_step >= config.train.steps - max(config.train.log_every, 1)
 
 
 def _load_optional_json(path: Path) -> dict[str, Any]:

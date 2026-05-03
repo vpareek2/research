@@ -34,19 +34,25 @@ def main(argv: list[str] | None = None):
         help="Tracked SVG chart path for the README.",
     )
     parser.add_argument("--baseline-run", default=None, help="Optional baseline run directory for relative scoring.")
+    parser.add_argument(
+        "--finalize-only",
+        action="store_true",
+        help="Skip preflight, training, and eval; score/register existing run artifacts.",
+    )
     args = parser.parse_args(argv)
 
     config_path = Path(args.config)
-    preflight = run_preflight(config_path)
-    prepare_missing_artifacts(preflight)
-    run_preflight(config_path, require_ready=True)
-
     config = load_config(config_path)
     run_dir = Path(config.experiment.out_dir) / config.experiment.name
 
-    _run([sys.executable, "-m", "research.pretrain", str(config_path)])
-    _run([sys.executable, "-m", "research.utils.eval_checkpoint", str(run_dir)])
-    _run([sys.executable, "-m", "research.utils.core_eval", str(run_dir)])
+    if not args.finalize_only:
+        preflight = run_preflight(config_path)
+        prepare_missing_artifacts(preflight)
+        run_preflight(config_path, require_ready=True)
+
+        _run([sys.executable, "-m", "research.pretrain", str(config_path)])
+        _run([sys.executable, "-m", "research.utils.eval_checkpoint", str(run_dir)])
+        _run([sys.executable, "-m", "research.utils.core_eval", str(run_dir)])
 
     summary = summarize_run(run_dir)
     validate_final_eval_alignment(summary)
