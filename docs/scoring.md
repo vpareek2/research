@@ -104,7 +104,9 @@ cross-tokenizer quality score.
 ## Training Efficiency Score
 
 Training efficiency measures whether the run used hardware and estimated model
-compute well. MFU is the key indicator:
+compute well. Run-level scoring uses corrected steady-state training aggregates,
+not sparse per-log-step timing. The raw logged aggregates remain diagnostics.
+MFU is the key indicator:
 
 ```text
 TrainingEfficiency =
@@ -116,7 +118,7 @@ TrainingEfficiency =
 MFU is higher-is-better:
 
 ```text
-mfu_score = run_avg_mfu / baseline_avg_mfu
+mfu_score = run_steady_train_mfu / baseline_steady_train_mfu
 ```
 
 Quality per compute uses estimated model training FLOPs:
@@ -130,11 +132,11 @@ quality_per_compute_score =
   (baseline_quality / baseline_train_compute_flops)
 ```
 
-Tokens per peak FLOP measures actual token throughput normalized by hardware
-size:
+Tokens per peak FLOP measures steady training token throughput normalized by
+hardware size:
 
 ```text
-tokens_per_peak_flop = avg_train_tokens_per_sec / peak_flops_total
+tokens_per_peak_flop = steady_train_tokens_per_sec / peak_flops_total
 
 tokens_per_peak_flop_score =
   run_tokens_per_peak_flop / baseline_tokens_per_peak_flop

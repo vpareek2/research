@@ -14,6 +14,7 @@ from typing import Any
 
 from research.config import load_config
 from research.utils.param_count import count_params
+from research.utils.perf import SECONDS_PER_GPU_HOUR, peak_flops_for_device
 
 
 SUMMARY_DIR_NAME = "summary"
@@ -82,7 +83,8 @@ def summarize_run(run_dir: str | Path) -> dict[str, Any]:
     quality = _quality_summary(rows, val_rows)
     checkpoint_evals = _checkpoint_eval_summary(eval_rows)
     domain_validation = _domain_validation_summary(rows, eval_rows)
-    performance = _performance_summary(rows)
+    timing = _timing_summary(rows)
+    performance = _performance_summary(rows, timing)
     core_benchmark = _core_benchmark_summary(core_rows)
     inference_benchmark = _inference_benchmark_summary(inference_rows)
     epiplexity = _epiplexity_summary(rows, val_rows, config.train)
@@ -123,8 +125,13 @@ def summarize_run(run_dir: str | Path) -> dict[str, Any]:
         "quality": quality,
         "health": health,
         "speed": {
-            "avg_tokens_per_sec": _mean_metric(rows, "time/tokens_per_sec"),
-            "avg_train_tokens_per_sec": _mean_metric(rows, "time/train_tokens_per_sec"),
+            "avg_tokens_per_sec": timing["avg_tokens_per_sec"],
+            "avg_train_tokens_per_sec": timing["avg_train_tokens_per_sec"],
+            "logged_avg_tokens_per_sec": timing["logged_avg_tokens_per_sec"],
+            "logged_avg_train_tokens_per_sec": timing["logged_avg_train_tokens_per_sec"],
+            "wall_tokens_per_sec": timing["wall_tokens_per_sec"],
+            "steady_train_tokens_per_sec": timing["steady_train_tokens_per_sec"],
+            "steady_train_interval_count": timing["steady_train_interval_count"],
             "final_elapsed_sec": _number_or_none(final_row.get("time/elapsed_sec")),
         },
         "performance": performance,
@@ -232,12 +239,17 @@ def format_scorecard(summary: dict[str, Any]) -> str:
         "",
         f"- avg_tokens_per_sec: `{_format_optional(speed['avg_tokens_per_sec'])}`",
         f"- avg_train_tokens_per_sec: `{_format_optional(speed['avg_train_tokens_per_sec'])}`",
+        f"- wall_tokens_per_sec: `{_format_optional(speed.get('wall_tokens_per_sec'))}`",
+        f"- logged_avg_train_tokens_per_sec: `{_format_optional(speed.get('logged_avg_train_tokens_per_sec'))}`",
         f"- final_elapsed_sec: `{_format_optional(speed['final_elapsed_sec'])}`",
         "",
         "## Performance",
         "",
         f"- final_mfu: `{_format_optional(performance.get('final_mfu'))}`",
+        f"- logged_final_mfu: `{_format_optional(performance.get('logged_final_mfu'))}`",
         f"- avg_mfu: `{_format_optional(performance.get('avg_mfu'))}`",
+        f"- wall_mfu: `{_format_optional(performance.get('wall_mfu'))}`",
+        f"- logged_avg_mfu: `{_format_optional(performance.get('logged_avg_mfu'))}`",
         f"- flops_per_token: `{_format_optional(performance.get('flops_per_token'))}`",
         f"- avg_train_tokens_per_gpu_hour: `{_format_optional(performance.get('avg_train_tokens_per_gpu_hour'))}`",
         f"- peak_gpu_memory_bytes: `{_format_optional(performance.get('peak_gpu_memory_bytes'))}`",
@@ -419,6 +431,10 @@ def registry_record(summary: dict[str, Any]) -> dict[str, Any]:
         "best_val_loss": quality["best_val_loss"],
         "best_val_bpb": quality["best_val_bpb"],
         "avg_tokens_per_sec": speed["avg_tokens_per_sec"],
+        "avg_train_tokens_per_sec": speed["avg_train_tokens_per_sec"],
+        "wall_tokens_per_sec": speed.get("wall_tokens_per_sec"),
+        "steady_train_tokens_per_sec": speed.get("steady_train_tokens_per_sec"),
+        "logged_avg_train_tokens_per_sec": speed.get("logged_avg_train_tokens_per_sec"),
         "nan_count": health["nan_count"],
         "status": summary["status"],
         "decision_hint": summary["decision_hint"],
@@ -432,6 +448,9 @@ def registry_record(summary: dict[str, Any]) -> dict[str, Any]:
         "health_score": _nested_metric(score, ["health", "value"]),
         "avg_mfu": performance.get("avg_mfu"),
         "final_mfu": performance.get("final_mfu"),
+        "logged_final_mfu": performance.get("logged_final_mfu"),
+        "wall_mfu": performance.get("wall_mfu"),
+        "logged_avg_mfu": performance.get("logged_avg_mfu"),
         "train_tokens_per_gpu_hour": performance.get("avg_train_tokens_per_gpu_hour"),
         "peak_gpu_memory_bytes": performance.get("peak_gpu_memory_bytes"),
         "checkpoint_eval_count": summary["checkpoint_evals"]["count"],
@@ -502,17 +521,56 @@ def _health_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _performance_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _timing_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    logged_avg_tokens_per_sec = _mean_metric(rows, "time/tokens_per_sec")
+    logged_avg_train_tokens_per_sec = _mean_metric(rows, "time/train_tokens_per_sec")
+    wall_tokens_per_sec = _wall_tokens_per_sec(rows)
+    steady_train_tokens_per_sec, steady_train_interval_count = _steady_train_tokens_per_sec(rows)
+    avg_train_tokens_per_sec = steady_train_tokens_per_sec or logged_avg_train_tokens_per_sec
     return {
-        "device_count": _last_metric(rows, "system/device_count"),
-        "device_kind": _last_value(rows, "system/device_kind"),
-        "flops_per_token": _last_metric(rows, "perf/flops_per_token"),
+        "avg_tokens_per_sec": steady_train_tokens_per_sec or logged_avg_tokens_per_sec,
+        "avg_train_tokens_per_sec": avg_train_tokens_per_sec,
+        "logged_avg_tokens_per_sec": logged_avg_tokens_per_sec,
+        "logged_avg_train_tokens_per_sec": logged_avg_train_tokens_per_sec,
+        "wall_tokens_per_sec": wall_tokens_per_sec,
+        "steady_train_tokens_per_sec": steady_train_tokens_per_sec,
+        "steady_train_interval_count": steady_train_interval_count,
+    }
+
+
+def _performance_summary(rows: list[dict[str, Any]], timing: dict[str, Any]) -> dict[str, Any]:
+    device_count = _last_metric(rows, "system/device_count")
+    device_kind = _last_value(rows, "system/device_kind")
+    flops_per_token = _last_metric(rows, "perf/flops_per_token")
+    peak_flops_per_device = peak_flops_for_device(device_kind) or _last_metric(rows, "perf/peak_flops_per_device")
+    peak_flops_total = (
+        peak_flops_per_device * device_count
+        if peak_flops_per_device is not None and device_count is not None
+        else _last_metric(rows, "perf/peak_flops_total")
+    )
+    final_mfu = _mfu(flops_per_token, _last_metric(rows, "time/train_tokens_per_sec"), peak_flops_total)
+    avg_mfu = _mfu(flops_per_token, timing.get("avg_train_tokens_per_sec"), peak_flops_total)
+    wall_mfu = _mfu(flops_per_token, timing.get("wall_tokens_per_sec"), peak_flops_total)
+    avg_train_tokens_per_gpu_hour = (
+        timing["avg_train_tokens_per_sec"] * SECONDS_PER_GPU_HOUR / device_count
+        if timing.get("avg_train_tokens_per_sec") is not None and device_count
+        else _mean_metric(rows, "time/train_tokens_per_gpu_hour")
+    )
+    return {
+        "device_count": device_count,
+        "device_kind": device_kind,
+        "flops_per_token": flops_per_token,
         "flops_per_step": _last_metric(rows, "perf/flops_per_step"),
-        "peak_flops_per_device": _last_metric(rows, "perf/peak_flops_per_device"),
-        "peak_flops_total": _last_metric(rows, "perf/peak_flops_total"),
-        "final_mfu": _last_metric(rows, "perf/mfu"),
-        "avg_mfu": _mean_metric(rows, "perf/mfu"),
-        "avg_train_tokens_per_gpu_hour": _mean_metric(rows, "time/train_tokens_per_gpu_hour"),
+        "peak_flops_per_device": peak_flops_per_device,
+        "peak_flops_total": peak_flops_total,
+        "final_mfu": final_mfu or _last_metric(rows, "perf/mfu"),
+        "logged_final_mfu": _last_metric(rows, "perf/mfu"),
+        "avg_mfu": avg_mfu or _mean_metric(rows, "perf/mfu"),
+        "wall_mfu": wall_mfu,
+        "steady_train_mfu": avg_mfu,
+        "logged_avg_mfu": _mean_metric(rows, "perf/mfu"),
+        "avg_train_tokens_per_gpu_hour": avg_train_tokens_per_gpu_hour,
+        "logged_avg_train_tokens_per_gpu_hour": _mean_metric(rows, "time/train_tokens_per_gpu_hour"),
         "final_train_tokens_per_gpu_hour": _last_metric(rows, "time/train_tokens_per_gpu_hour"),
         "peak_gpu_memory_bytes": _max_metric(rows, "system/gpu_memory_peak_bytes")
         or _max_metric(rows, "system/gpu_memory_used_bytes"),
@@ -712,6 +770,51 @@ def _domain_validation_summary(rows: list[dict[str, Any]], eval_rows: list[dict[
         "training": training,
         "checkpoint_evals": checkpoint_evals,
     }
+
+
+def _wall_tokens_per_sec(rows: list[dict[str, Any]]) -> float | None:
+    final_tokens = _last_metric(rows, "train/tokens_seen")
+    final_elapsed = _last_metric(rows, "time/elapsed_sec")
+    if final_tokens is None or final_elapsed is None or final_elapsed <= 0:
+        return None
+    return float(final_tokens) / float(final_elapsed)
+
+
+def _steady_train_tokens_per_sec(rows: list[dict[str, Any]]) -> tuple[float | None, int]:
+    intervals = []
+    previous = None
+    for row in rows:
+        tokens_seen = _number_or_none(row.get("train/tokens_seen"))
+        elapsed_sec = _number_or_none(row.get("time/elapsed_sec"))
+        if tokens_seen is None or elapsed_sec is None:
+            continue
+        current = (float(tokens_seen), float(elapsed_sec), _steady_train_row(row))
+        if previous is not None and current[2] and previous[2]:
+            delta_tokens = current[0] - previous[0]
+            delta_elapsed = current[1] - previous[1]
+            if delta_tokens > 0 and delta_elapsed > 0:
+                intervals.append(delta_tokens / delta_elapsed)
+        previous = current
+    if not intervals:
+        return None, 0
+    return mean(intervals), len(intervals)
+
+
+def _steady_train_row(row: dict[str, Any]) -> bool:
+    excluded_keys = {
+        "val/loss",
+        "sample/path",
+        "time/eval_sec",
+        "time/sample_sec",
+        "time/checkpoint_sec",
+    }
+    return not any(key in row for key in excluded_keys)
+
+
+def _mfu(flops_per_token: float | int | None, tokens_per_sec: float | int | None, peak_flops_total: float | int | None) -> float | None:
+    if flops_per_token is None or tokens_per_sec is None or peak_flops_total is None or peak_flops_total <= 0:
+        return None
+    return 100.0 * float(flops_per_token) * float(tokens_per_sec) / float(peak_flops_total)
 
 
 def _verdict(config, rows: list[dict[str, Any]], final_row: dict[str, Any], val_rows: list[dict[str, Any]], health: dict[str, Any]) -> tuple[str, str]:

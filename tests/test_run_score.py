@@ -1,4 +1,6 @@
-from research.utils.run_score import BASE_SCORE, attach_score, score_summary
+import json
+
+from research.utils.run_score import BASE_SCORE, attach_score, score_summary, select_baseline_summary
 
 
 def _summary(**overrides):
@@ -66,6 +68,38 @@ def test_attach_score_preserves_summary_fields():
 
     assert scored["run"]["name"] == "baseline"
     assert scored["score"]["eligible"] is True
+
+
+def test_training_efficiency_prefers_corrected_steady_metrics():
+    baseline = _summary(
+        speed={"avg_train_tokens_per_sec": 1000.0, "steady_train_tokens_per_sec": 2000.0},
+        performance={"avg_mfu": 10.0, "steady_train_mfu": 20.0, "flops_per_token": 100.0, "peak_flops_total": 10000.0},
+    )
+    run = _summary(
+        run={"name": "faster", "run_dir": "runs/faster"},
+        speed={"avg_train_tokens_per_sec": 1000.0, "steady_train_tokens_per_sec": 4000.0},
+        performance={"avg_mfu": 10.0, "steady_train_mfu": 40.0, "flops_per_token": 100.0, "peak_flops_total": 10000.0},
+    )
+
+    score = score_summary(run, baseline)
+
+    assert score["training_efficiency"]["components"]["mfu"] == 1.5
+    assert score["training_efficiency"]["components"]["tokens_per_peak_flop"] == 1.5
+    assert score["final_score"] > BASE_SCORE
+
+
+def test_explicit_self_baseline_uses_current_summary_not_stale_file(tmp_path):
+    run_dir = tmp_path / "runs" / "baseline"
+    summary_dir = run_dir / "summary"
+    summary_dir.mkdir(parents=True)
+    current = _summary(run={"name": "baseline", "run_dir": str(run_dir)}, performance={"avg_mfu": 99.0})
+    stale = _summary(run={"name": "stale", "run_dir": str(run_dir)}, performance={"avg_mfu": 1.0})
+    (summary_dir / "run_summary.json").write_text(json.dumps(stale), encoding="utf-8")
+
+    selected = select_baseline_summary(current, baseline_run=run_dir)
+
+    assert selected["run"]["name"] == "baseline"
+    assert selected["performance"]["avg_mfu"] == 99.0
 
 
 def _deep_update(target, updates):

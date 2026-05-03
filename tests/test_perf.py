@@ -30,7 +30,18 @@ def test_estimate_flops_per_token_counts_transformer_and_lm_head_matmuls():
 
 def test_peak_flops_for_known_and_unknown_devices():
     assert peak_flops_for_device("NVIDIA H100 80GB HBM3") == 989e12
+    assert peak_flops_for_device("NVIDIA H100 PCIe") == 756e12
+    assert peak_flops_for_device("NVIDIA H100 NVL") == 835e12
+    assert peak_flops_for_device("NVIDIA H200 PCIe") == 836e12
     assert peak_flops_for_device("NVIDIA A100-SXM4-80GB") == 312e12
+    assert peak_flops_for_device("NVIDIA L40S") == 362e12
+    assert peak_flops_for_device("NVIDIA L4") == 121e12
+    assert peak_flops_for_device("NVIDIA GeForce RTX 4090") == 165.2e12
+    assert peak_flops_for_device("NVIDIA GeForce RTX 5090") == 209.5e12
+    assert peak_flops_for_device("NVIDIA RTX PRO 6000 Blackwell Server Edition") == 1.0e15
+    assert peak_flops_for_device("AMD Instinct MI300X") == 1.3074e15
+    assert peak_flops_for_device("AMD Instinct MI250") == 362.1e12
+    assert peak_flops_for_device("AMD Instinct MI250X") == 383e12
     assert peak_flops_for_device("NVIDIA GB10") == 125e12
     assert peak_flops_for_device("mystery accelerator") is None
     assert peak_flops_for_device(None) is None

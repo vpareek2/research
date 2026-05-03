@@ -263,8 +263,10 @@ def test_summarize_run_computes_quality_health_speed_and_checkpoint_evals(tmp_pa
     assert summary["health"]["final_train_val_gap"] == 0.8
     assert summary["speed"]["avg_tokens_per_sec"] == pytest.approx(30.0)
     assert summary["speed"]["avg_train_tokens_per_sec"] == pytest.approx(40.0)
-    assert summary["performance"]["final_mfu"] == 40.0
-    assert summary["performance"]["avg_mfu"] == pytest.approx(25.0)
+    assert summary["performance"]["final_mfu"] == 60.0
+    assert summary["performance"]["logged_final_mfu"] == 40.0
+    assert summary["performance"]["avg_mfu"] == pytest.approx(40.0)
+    assert summary["performance"]["logged_avg_mfu"] == pytest.approx(25.0)
     assert summary["performance"]["flops_per_token"] == 1000
     assert summary["performance"]["avg_train_tokens_per_gpu_hour"] == pytest.approx(144000.0)
     assert summary["performance"]["peak_gpu_memory_bytes"] == 400
@@ -283,8 +285,10 @@ def test_summarize_run_computes_quality_health_speed_and_checkpoint_evals(tmp_pa
     assert summary["inference_benchmark"]["count"] == 1
     assert summary["inference_benchmark"]["latest"]["decode_tokens_per_sec"] == 60.0
     assert summary["registry_record"]["checkpoint_eval_count"] == 2
-    assert summary["registry_record"]["avg_mfu"] == pytest.approx(25.0)
-    assert summary["registry_record"]["final_mfu"] == 40.0
+    assert summary["registry_record"]["avg_mfu"] == pytest.approx(40.0)
+    assert summary["registry_record"]["logged_avg_mfu"] == pytest.approx(25.0)
+    assert summary["registry_record"]["final_mfu"] == 60.0
+    assert summary["registry_record"]["logged_final_mfu"] == 40.0
     assert summary["registry_record"]["train_tokens_per_gpu_hour"] == pytest.approx(144000.0)
     assert summary["registry_record"]["peak_gpu_memory_bytes"] == 400
     assert summary["registry_record"]["latest_checkpoint_step"] == 3
@@ -350,6 +354,109 @@ def test_sparse_logging_near_final_step_counts_as_complete(tmp_path):
     assert summary["training"]["steps_completed"] == 100
     assert summary["training"]["logged_rows"] == 4
     assert summary["status"] == "healthy"
+
+
+def test_sparse_logging_uses_interval_throughput_for_training_efficiency(tmp_path):
+    rows = [
+        {
+            "step": 0,
+            "train/loss": 4.0,
+            "train/ppl": 54.6,
+            "train/bpb": 2.0,
+            "val/loss": 4.5,
+            "train/tokens_seen": 16,
+            "time/elapsed_sec": 1.0,
+            "time/train_tokens_per_sec": 16.0,
+            "time/tokens_per_sec": 16.0,
+            "perf/mfu": 16.0,
+            "perf/flops_per_token": 1000,
+            "perf/peak_flops_per_device": 100000.0,
+            "perf/peak_flops_total": 100000.0,
+            "system/device_count": 1,
+            "system/device_kind": "unit gpu",
+            "health/nan_count": 0,
+            "health/loss_spike_count": 0,
+            "health/grad_norm_spike_count": 0,
+        },
+        {
+            "step": 10,
+            "train/loss": 3.8,
+            "train/ppl": 44.7,
+            "train/bpb": 1.9,
+            "train/tokens_seen": 176,
+            "time/elapsed_sec": 3.0,
+            "time/train_tokens_per_sec": 16.0,
+            "time/tokens_per_sec": 16.0,
+            "perf/mfu": 16.0,
+            "health/nan_count": 0,
+            "health/loss_spike_count": 0,
+            "health/grad_norm_spike_count": 0,
+        },
+        {
+            "step": 20,
+            "train/loss": 3.6,
+            "train/ppl": 36.6,
+            "train/bpb": 1.8,
+            "train/tokens_seen": 336,
+            "time/elapsed_sec": 5.0,
+            "time/train_tokens_per_sec": 16.0,
+            "time/tokens_per_sec": 16.0,
+            "perf/mfu": 16.0,
+            "health/nan_count": 0,
+            "health/loss_spike_count": 0,
+            "health/grad_norm_spike_count": 0,
+        },
+        {
+            "step": 30,
+            "train/loss": 3.4,
+            "train/ppl": 30.0,
+            "train/bpb": 1.7,
+            "train/tokens_seen": 496,
+            "time/elapsed_sec": 25.0,
+            "time/sample_sec": 18.0,
+            "time/train_tokens_per_sec": 16.0,
+            "time/tokens_per_sec": 16.0,
+            "perf/mfu": 16.0,
+            "sample/path": "sample.txt",
+            "health/nan_count": 0,
+            "health/loss_spike_count": 0,
+            "health/grad_norm_spike_count": 0,
+        },
+        {
+            "step": 40,
+            "train/loss": 3.2,
+            "train/ppl": 24.5,
+            "train/bpb": 1.6,
+            "train/tokens_seen": 656,
+            "time/elapsed_sec": 27.0,
+            "time/train_tokens_per_sec": 16.0,
+            "time/tokens_per_sec": 16.0,
+            "perf/mfu": 16.0,
+            "perf/flops_per_token": 1000,
+            "perf/peak_flops_per_device": 100000.0,
+            "perf/peak_flops_total": 100000.0,
+            "system/device_count": 1,
+            "system/device_kind": "unit gpu",
+            "health/nan_count": 0,
+            "health/loss_spike_count": 0,
+            "health/grad_norm_spike_count": 0,
+        },
+    ]
+    run_dir = make_run(tmp_path, rows, steps=50)
+    text = (run_dir / "config.toml").read_text(encoding="utf-8")
+    (run_dir / "config.toml").write_text(text.replace("log_every = 1", "log_every = 10"), encoding="utf-8")
+
+    summary = run_summary.summarize_run(run_dir)
+
+    assert summary["speed"]["logged_avg_train_tokens_per_sec"] == pytest.approx(16.0)
+    assert summary["speed"]["steady_train_tokens_per_sec"] == pytest.approx(80.0)
+    assert summary["speed"]["avg_train_tokens_per_sec"] == pytest.approx(80.0)
+    assert summary["speed"]["wall_tokens_per_sec"] == pytest.approx(656 / 27)
+    assert summary["performance"]["logged_avg_mfu"] == pytest.approx(16.0)
+    assert summary["performance"]["avg_mfu"] == pytest.approx(80.0)
+    assert summary["performance"]["wall_mfu"] == pytest.approx(100.0 * 1000 * (656 / 27) / 100000.0)
+    assert summary["registry_record"]["avg_train_tokens_per_sec"] == pytest.approx(80.0)
+    assert summary["registry_record"]["logged_avg_train_tokens_per_sec"] == pytest.approx(16.0)
 
 
 def test_write_summary_artifacts_and_cli_register(tmp_path, monkeypatch):

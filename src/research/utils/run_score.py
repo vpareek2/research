@@ -76,6 +76,9 @@ def select_baseline_summary(
     baseline_run: str | Path | None = None,
 ) -> dict[str, Any]:
     if baseline_run is not None:
+        current_run_dir = _run_dir(current_summary)
+        if current_run_dir is not None and _same_path(Path(baseline_run), Path(str(current_run_dir))):
+            return current_summary
         return load_summary_or_summarize(baseline_run)
 
     for record in _load_registry(Path(registry_path)):
@@ -92,11 +95,17 @@ def _score_inputs(summary: dict[str, Any]) -> dict[str, Any]:
     native_val_bpb = _native_val_bpb(summary)
     domain_bpbs = _domain_bpbs(summary)
     epiplexity = _number(_nested(summary, ["epiplexity", "train_bpb_auc_per_byte"]))
-    avg_mfu = _number(_nested(summary, ["performance", "avg_mfu"]))
+    avg_mfu = _first_number(
+        _nested(summary, ["performance", "steady_train_mfu"]),
+        _nested(summary, ["performance", "avg_mfu"]),
+    )
     flops_per_token = _number(_nested(summary, ["performance", "flops_per_token"]))
     peak_flops_total = _number(_nested(summary, ["performance", "peak_flops_total"]))
     tokens_seen = _number(_nested(summary, ["training", "tokens_seen"]))
-    train_tps = _number(_nested(summary, ["speed", "avg_train_tokens_per_sec"]))
+    train_tps = _first_number(
+        _nested(summary, ["speed", "steady_train_tokens_per_sec"]),
+        _nested(summary, ["speed", "avg_train_tokens_per_sec"]),
+    )
     decode_tps = _number(_nested(summary, ["inference_benchmark", "latest", "decode_tokens_per_sec"]))
     prefill_tps = _number(_nested(summary, ["inference_benchmark", "latest", "prefill_tokens_per_sec"]))
     ttft = _number(_nested(summary, ["inference_benchmark", "latest", "ttft_sec"]))
@@ -282,6 +291,21 @@ def _number(value: Any) -> float | None:
         return None
     value = float(value)
     return value if math.isfinite(value) else None
+
+
+def _first_number(*values: Any) -> float | None:
+    for value in values:
+        number = _number(value)
+        if number is not None:
+            return number
+    return None
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return left == right
 
 
 def _is_number(value: Any) -> bool:

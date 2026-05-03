@@ -33,7 +33,10 @@ That flow must never silently tokenize far more data than the experiment target 
 
 ## 2. Fix MFU and throughput accounting
 
-The current scorecard reported `avg_mfu = 1.85%` for `0_baseline`, but the run-level wall-clock estimate is much higher:
+Status: implemented. `metrics.jsonl` remains raw; `run_summary`, scorecard, and
+registry now derive corrected steady-state and wall-clock throughput/MFU fields.
+
+The old scorecard reported `avg_mfu = 1.85%` for `0_baseline`, but the run-level wall-clock estimate is much higher:
 
 - configured tokens: `2,000,027,648`
 - final elapsed: `26,970.5s`
@@ -43,9 +46,9 @@ The current scorecard reported `avg_mfu = 1.85%` for `0_baseline`, but the run-l
 
 The logged per-step MFU is likely undercounted because JAX async execution and `log_every=10` charge work to logged sync points unevenly.
 
-Required direction:
-- Add post-processed wall-clock throughput and MFU to `run_summary`.
-- Separate loop throughput, train-only throughput, and wall-clock throughput.
-- Exclude eval/sample/checkpoint rows when computing steady-state training estimates.
-- Revisit RTX PRO 6000 Blackwell peak FLOP denominator.
-- Add derived fields to scorecard and registry so W&B/log-step timing does not dominate run-level comparisons.
+Implemented direction:
+- Added post-processed wall-clock throughput and MFU to `run_summary`.
+- Separated corrected steady training throughput, wall-clock throughput, and raw logged throughput.
+- Excluded eval/sample/checkpoint rows when computing steady-state training estimates.
+- Updated RTX PRO 6000 Blackwell peak FLOP denominator to `1e15`.
+- Added derived fields to scorecard and registry so W&B/log-step timing does not dominate run-level comparisons.

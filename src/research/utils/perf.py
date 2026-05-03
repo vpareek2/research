@@ -13,26 +13,49 @@ from research.config import ModelConfig
 SECONDS_PER_GPU_HOUR = 3600.0
 
 
-BF16_PEAK_FLOPS = {
-    "h100": 989e12,
-    "h200": 989e12,
-    "a100": 312e12,
-    "a800": 312e12,
-    "l40s": 362e12,
-    "l40": 181e12,
-    "l4": 121e12,
-    "a10g": 125e12,
-    "a10": 125e12,
-    "rtx 4090": 330e12,
-    "rtx 6000 ada": 364e12,
-    "rtx 5090": 419e12,
-    "rtx pro 6000 blackwell": 419e12,
-    "b200": 2250e12,
+# Hardcoded BF16 peak FLOPs. Table order matters: more specific patterns first.
+BF16_PEAK_FLOPS_TABLE = (
+    # NVIDIA Blackwell
+    (("rtx pro 6000", "blackwell"), 1.0e15),
+    (("gb200",), 2.5e15),
+    (("grace blackwell",), 2.5e15),
+    (("b200",), 2.25e15),
+    (("b100",), 1.8e15),
+    # NVIDIA Hopper
+    (("h200", "nvl"), 836e12),
+    (("h200", "pcie"), 836e12),
+    (("h200",), 989e12),
+    (("h100", "nvl"), 835e12),
+    (("h100", "pcie"), 756e12),
+    (("h100",), 989e12),
+    (("h800", "nvl"), 989e12),
+    (("h800",), 756e12),
+    # NVIDIA Ampere data center
+    (("a100",), 312e12),
+    (("a800",), 312e12),
+    (("a40",), 149.7e12),
+    (("a30",), 165e12),
+    # NVIDIA Ada data center
+    (("l40s",), 362e12),
+    (("l40-s",), 362e12),
+    (("l40 s",), 362e12),
+    (("l4",), 121e12),
+    # AMD CDNA accelerators
+    (("mi355",), 2.5e15),
+    (("mi325",), 1.3074e15),
+    (("mi300x",), 1.3074e15),
+    (("mi300a",), 980.6e12),
+    (("mi250x",), 383e12),
+    (("mi250",), 362.1e12),
+    # Consumer RTX
+    (("5090",), 209.5e12),
+    (("4090",), 165.2e12),
+    (("3090",), 71e12),
     # GB10 does not have a clean official dense BF16 peak spec published in
     # the usual NVIDIA tables. Use the common estimate from the 1 PFLOP sparse
     # FP4 headline so MFU remains useful for DGX Spark / GB10 run comparisons.
-    "gb10": 125e12,
-}
+    (("gb10",), 125e12),
+)
 
 
 def estimate_flops_per_token(config: ModelConfig) -> int:
@@ -55,8 +78,8 @@ def peak_flops_for_device(device_name: str | None) -> float | None:
     if not device_name:
         return None
     normalized = device_name.lower().replace("nvidia", "").strip()
-    for name, flops in BF16_PEAK_FLOPS.items():
-        if name in normalized:
+    for patterns, flops in BF16_PEAK_FLOPS_TABLE:
+        if all(pattern in normalized for pattern in patterns):
             return flops
     return None
 

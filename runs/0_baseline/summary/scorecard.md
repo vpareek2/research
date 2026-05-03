@@ -54,16 +54,21 @@
 
 ## Speed
 
-- avg_tokens_per_sec: `9054.53`
-- avg_train_tokens_per_sec: `11095.5`
+- avg_tokens_per_sec: `83382.9`
+- avg_train_tokens_per_sec: `83382.9`
+- wall_tokens_per_sec: `74139.2`
+- logged_avg_train_tokens_per_sec: `11095.5`
 - final_elapsed_sec: `26970.5`
 
 ## Performance
 
-- final_mfu: `1.55329`
-- avg_mfu: `1.85428`
+- final_mfu: `0.65083`
+- logged_final_mfu: `1.55329`
+- avg_mfu: `5.83877`
+- wall_mfu: `5.19149`
+- logged_avg_mfu: `1.85428`
 - flops_per_token: `700235520`
-- avg_train_tokens_per_gpu_hour: `3.99437e+07`
+- avg_train_tokens_per_gpu_hour: `3.00178e+08`
 - peak_gpu_memory_bytes: `78417297408`
 - avg_gpu_utilization_pct: `96.7536`
 - avg_gpu_power_w: `408.197`
