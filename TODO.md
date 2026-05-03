@@ -30,3 +30,22 @@ uv run experiment configs/0_baseline.toml
 ```
 
 That flow must never silently tokenize far more data than the experiment target requires.
+
+## 2. Fix MFU and throughput accounting
+
+The current scorecard reported `avg_mfu = 1.85%` for `0_baseline`, but the run-level wall-clock estimate is much higher:
+
+- configured tokens: `2,000,027,648`
+- final elapsed: `26,970.5s`
+- wall throughput: about `74.2k tokens/sec`
+- wall MFU using current code peak (`419 TFLOP/s`): about `12.4%`
+- wall MFU using NVIDIA BF16 peak (`1 PFLOP/s`): about `5.2%`
+
+The logged per-step MFU is likely undercounted because JAX async execution and `log_every=10` charge work to logged sync points unevenly.
+
+Required direction:
+- Add post-processed wall-clock throughput and MFU to `run_summary`.
+- Separate loop throughput, train-only throughput, and wall-clock throughput.
+- Exclude eval/sample/checkpoint rows when computing steady-state training estimates.
+- Revisit RTX PRO 6000 Blackwell peak FLOP denominator.
+- Add derived fields to scorecard and registry so W&B/log-step timing does not dominate run-level comparisons.
