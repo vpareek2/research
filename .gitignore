@@ -8,3 +8,4 @@ runs/**/checkpoints/
 runs/**/wandb/
 runs/**/batches.jsonl
 runs/**/wandb_id.txt
+ref/

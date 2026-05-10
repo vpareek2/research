@@ -27,6 +27,22 @@ nesterov = true
 ns_steps = 5
 ns_coeffs = [3.4445, -4.775, 2.0315]
 eps = 1e-8
+
+[optimizer.aurora]
+beta = 0.95
+nesterov = true
+pp_iterations = 2
+pp_beta = 0.5
+eps = 1e-7
+
+[optimizer.riemannian_aurora]
+beta = 0.95
+nesterov = true
+outer_steps = 3
+cg_steps = 20
+riemannian_eta = 0.1
+retraction_steps = 2
+eps = 1e-7
 ```
 
 `train.lr` and `train.decay` are removed. The LR schedule shape remains under `[train.lr_schedule]`, but its peak value is `optimizer.lr`.
@@ -48,8 +64,12 @@ Path-derived tags such as `attention`, `mlp`, `norm`, `embedding`, and `output` 
 - AdamW is implemented in-repo and used for non-matrix leaves.
 - Muon is implemented in-repo and used for `matrix` leaves when `[optimizer].name = "muon"`.
 - Muon v1 uses first-moment momentum, optional Nesterov direction, Newton-Schulz orthogonalization, width scaling, decoupled weight decay, and scheduled LR.
+- Aurora is implemented in-repo and used for `matrix` leaves when `[optimizer].name = "aurora"`.
+  It keeps the Muon-style momentum, polar step, width scaling, and decoupled weight decay, but applies diagonal row-balancing before the polar step for rectangular matrices.
+- Riemannian Aurora is selectable with `[optimizer].name = "riemannian_aurora"`.
+  It is the heavier balanced-Stiefel variant and is included for completeness; `aurora` is the practical optimizer ablation target.
 
-Aurora, SOAP, NorMuon, and PolarExpress are follow-up modules behind the same factory and routing interface.
+SOAP, NorMuon, and PolarExpress are follow-up modules behind the same factory and routing interface.
 
 ## Implementation Steps
 

@@ -163,16 +163,71 @@ class MuonOptimizerConfig:
 
 
 @dataclass
+class AuroraOptimizerConfig:
+    beta: float = 0.95
+    nesterov: bool = True
+    pp_iterations: int = 2
+    pp_beta: float = 0.5
+    eps: float = 1e-7
+
+    def __post_init__(self):
+        if not 0.0 <= self.beta < 1.0:
+            raise ValueError(f"optimizer.aurora.beta must be in [0, 1), got {self.beta}")
+        if not isinstance(self.nesterov, bool):
+            raise ValueError(f"optimizer.aurora.nesterov must be a bool, got {self.nesterov!r}")
+        if not isinstance(self.pp_iterations, int) or self.pp_iterations <= 0:
+            raise ValueError(f"optimizer.aurora.pp_iterations must be positive, got {self.pp_iterations!r}")
+        if self.pp_beta <= 0.0:
+            raise ValueError(f"optimizer.aurora.pp_beta must be positive, got {self.pp_beta}")
+        if self.eps <= 0.0:
+            raise ValueError(f"optimizer.aurora.eps must be positive, got {self.eps}")
+
+
+@dataclass
+class RiemannianAuroraOptimizerConfig:
+    beta: float = 0.95
+    nesterov: bool = True
+    outer_steps: int = 3
+    cg_steps: int = 20
+    riemannian_eta: float = 0.1
+    retraction_steps: int = 2
+    eps: float = 1e-7
+
+    def __post_init__(self):
+        if not 0.0 <= self.beta < 1.0:
+            raise ValueError(f"optimizer.riemannian_aurora.beta must be in [0, 1), got {self.beta}")
+        if not isinstance(self.nesterov, bool):
+            raise ValueError(f"optimizer.riemannian_aurora.nesterov must be a bool, got {self.nesterov!r}")
+        if not isinstance(self.outer_steps, int) or self.outer_steps <= 0:
+            raise ValueError(f"optimizer.riemannian_aurora.outer_steps must be positive, got {self.outer_steps!r}")
+        if not isinstance(self.cg_steps, int) or self.cg_steps <= 0:
+            raise ValueError(f"optimizer.riemannian_aurora.cg_steps must be positive, got {self.cg_steps!r}")
+        if self.riemannian_eta <= 0.0:
+            raise ValueError(f"optimizer.riemannian_aurora.riemannian_eta must be positive, got {self.riemannian_eta}")
+        if not isinstance(self.retraction_steps, int) or self.retraction_steps <= 0:
+            raise ValueError(
+                f"optimizer.riemannian_aurora.retraction_steps must be positive, got {self.retraction_steps!r}"
+            )
+        if self.eps <= 0.0:
+            raise ValueError(f"optimizer.riemannian_aurora.eps must be positive, got {self.eps}")
+
+
+@dataclass
 class OptimizerConfig:
     name: str
     lr: float
     weight_decay: float
     adamw: AdamWOptimizerConfig = field(default_factory=AdamWOptimizerConfig)
     muon: MuonOptimizerConfig = field(default_factory=MuonOptimizerConfig)
+    aurora: AuroraOptimizerConfig = field(default_factory=AuroraOptimizerConfig)
+    riemannian_aurora: RiemannianAuroraOptimizerConfig = field(default_factory=RiemannianAuroraOptimizerConfig)
 
     def __post_init__(self):
-        if self.name not in {"adamw", "muon"}:
-            raise ValueError(f"optimizer.name must be 'adamw' or 'muon', got {self.name!r}")
+        if self.name not in {"adamw", "muon", "aurora", "riemannian_aurora"}:
+            raise ValueError(
+                "optimizer.name must be 'adamw', 'muon', 'aurora', or 'riemannian_aurora', "
+                f"got {self.name!r}"
+            )
         if self.lr <= 0.0:
             raise ValueError(f"optimizer.lr must be positive, got {self.lr}")
         if self.weight_decay < 0.0:
@@ -301,6 +356,10 @@ def load_config(path: str | Path) -> RunConfig:
     if "ns_coeffs" in muon_data:
         muon_data = {**muon_data, "ns_coeffs": tuple(muon_data["ns_coeffs"])}
     optimizer_data["muon"] = MuonOptimizerConfig(**muon_data)
+    optimizer_data["aurora"] = AuroraOptimizerConfig(**optimizer_data.get("aurora", {}))
+    optimizer_data["riemannian_aurora"] = RiemannianAuroraOptimizerConfig(
+        **optimizer_data.get("riemannian_aurora", {})
+    )
 
     return RunConfig(
         experiment=ExperimentConfig(**data["experiment"]),
