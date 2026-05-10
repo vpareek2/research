@@ -1,0 +1,185 @@
+{
+  "checkpoint_step": 30518,
+  "core": 0.09763917307808706,
+  "elapsed_sec": 2614.4020571149995,
+  "max_per_task": -1,
+  "run_dir": "runs/1_mha",
+  "tasks": {
+    "agi_eval_lsat_ar": {
+      "accuracy": 0.25217391304347825,
+      "centered": 0.0652173913043478,
+      "elapsed_sec": 8.835738888999913,
+      "examples": 230,
+      "random_baseline": 20.0,
+      "skipped_examples": 0
+    },
+    "arc_challenge": {
+      "accuracy": 0.21160409556313994,
+      "centered": -0.05119453924914674,
+      "elapsed_sec": 46.278707035999105,
+      "examples": 1172,
+      "random_baseline": 25.0,
+      "skipped_examples": 0
+    },
+    "arc_easy": {
+      "accuracy": 0.3602693602693603,
+      "centered": 0.14702581369248038,
+      "elapsed_sec": 106.78114975899734,
+      "examples": 2376,
+      "random_baseline": 25.0,
+      "skipped_examples": 0
+    },
+    "bigbench_cs_algorithms": {
+      "accuracy": 0.38257575757575757,
+      "centered": 0.38257575757575757,
+      "elapsed_sec": 27.681827426000382,
+      "examples": 1320,
+      "random_baseline": 0.0,
+      "skipped_examples": 0
+    },
+    "bigbench_dyck_languages": {
+      "accuracy": 0.026,
+      "centered": 0.026,
+      "elapsed_sec": 29.372130944000673,
+      "examples": 1000,
+      "random_baseline": 0.0,
+      "skipped_examples": 0
+    },
+    "bigbench_language_identification": {
+      "accuracy": 0.2524,
+      "centered": 0.17755775577557756,
+      "elapsed_sec": 455.37306726500174,
+      "examples": 10000,
+      "random_baseline": 9.1,
+      "skipped_examples": 0
+    },
+    "bigbench_operators": {
+      "accuracy": 0.0761904761904762,
+      "centered": 0.0761904761904762,
+      "elapsed_sec": 3.99883013300132,
+      "examples": 210,
+      "random_baseline": 0.0,
+      "skipped_examples": 0
+    },
+    "bigbench_qa_wikidata": {
+      "accuracy": 0.2460016731460066,
+      "centered": 0.2460016731460066,
+      "elapsed_sec": 316.01348755100116,
+      "examples": 20321,
+      "random_baseline": 0.0,
+      "skipped_examples": 0
+    },
+    "bigbench_repeat_copy_logic": {
+      "accuracy": 0.0,
+      "centered": 0.0,
+      "elapsed_sec": 0.4053229300006933,
+      "examples": 32,
+      "random_baseline": 0.0,
+      "skipped_examples": 0
+    },
+    "boolq": {
+      "accuracy": 0.5804281345565749,
+      "centered": -0.1041364880090133,
+      "elapsed_sec": 135.58801298699836,
+      "examples": 3270,
+      "random_baseline": 62.0,
+      "skipped_examples": 0
+    },
+    "commonsense_qa": {
+      "accuracy": 0.28665028665028663,
+      "centered": 0.10831285831285828,
+      "elapsed_sec": 46.235964913001226,
+      "examples": 1221,
+      "random_baseline": 20.0,
+      "skipped_examples": 0
+    },
+    "copa": {
+      "accuracy": 0.61,
+      "centered": 0.21999999999999997,
+      "elapsed_sec": 7.20857542199883,
+      "examples": 100,
+      "random_baseline": 50.0,
+      "skipped_examples": 0
+    },
+    "coqa": {
+      "accuracy": 0.06563948390329451,
+      "centered": 0.06563948390329451,
+      "elapsed_sec": 154.20648539600006,
+      "examples": 7983,
+      "random_baseline": 0.0,
+      "skipped_examples": 0
+    },
+    "hellaswag": {
+      "accuracy": 0.29067914758016333,
+      "centered": 0.05423886344021778,
+      "elapsed_sec": 429.36703804699937,
+      "examples": 10042,
+      "random_baseline": 25.0,
+      "skipped_examples": 0
+    },
+    "hellaswag_zeroshot": {
+      "accuracy": 0.2921728739294961,
+      "centered": 0.05623049857266146,
+      "elapsed_sec": 370.0518084009964,
+      "examples": 10042,
+      "random_baseline": 25.0,
+      "skipped_examples": 0
+    },
+    "jeopardy": {
+      "accuracy": 0.0004723665564478035,
+      "centered": 0.0004723665564478035,
+      "elapsed_sec": 43.627759909002634,
+      "examples": 2117,
+      "random_baseline": 0.0,
+      "skipped_examples": 0
+    },
+    "lambada_openai": {
+      "accuracy": 0.28274791383660003,
+      "centered": 0.28274791383660003,
+      "elapsed_sec": 81.67381775399917,
+      "examples": 5153,
+      "random_baseline": 0.0,
+      "skipped_examples": 0
+    },
+    "openbook_qa": {
+      "accuracy": 0.278,
+      "centered": 0.037333333333333364,
+      "elapsed_sec": 18.732243160997314,
+      "examples": 500,
+      "random_baseline": 25.0,
+      "skipped_examples": 0
+    },
+    "piqa": {
+      "accuracy": 0.6303162486368593,
+      "centered": 0.2606324972737186,
+      "elapsed_sec": 63.725337747000594,
+      "examples": 1834,
+      "random_baseline": 50.0,
+      "skipped_examples": 4
+    },
+    "squad": {
+      "accuracy": 0.004730368968779565,
+      "centered": 0.004730368968779565,
+      "elapsed_sec": 232.1255212219985,
+      "examples": 10570,
+      "random_baseline": 0.0,
+      "skipped_examples": 0
+    },
+    "winograd": {
+      "accuracy": 0.5347985347985348,
+      "centered": 0.06959706959706957,
+      "elapsed_sec": 7.173696032001317,
+      "examples": 273,
+      "random_baseline": 50.0,
+      "skipped_examples": 0
+    },
+    "winogrande": {
+      "accuracy": 0.5114443567482242,
+      "centered": 0.022888713496448387,
+      "elapsed_sec": 29.943643049999082,
+      "examples": 1267,
+      "random_baseline": 50.0,
+      "skipped_examples": 0
+    }
+  }
+}

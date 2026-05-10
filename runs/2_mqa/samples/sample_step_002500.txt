@@ -1,0 +1,14 @@
+step: 2500
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a time��I-IIJ1NWeIT�1
+AItA5,,
+The S’byI�IHIbyJI"
+I,I
+-JD,�I
+�JD1C�F.J.I�-II�A�-The,��:�,�D�
+I,
+Iby��I,�-’.MJI-B.IThe RIBIII-FK1.
+PGG-10.The New|The the�by�The�

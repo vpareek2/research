@@ -1,0 +1,6 @@
+step: 2000
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a timeWe-You|TheTheYou-NTheThisFAThe�In-AThe2The-AfterIInITheBATheTheTheAWeTheTheThe-TheAmerican-MA-TheTheAInA-WeTheH-TheTheF-AYTheCInThe-DByTheAmericanProInTheTheProWhenTheN-UToTheAnInT-TheInTheMToThe In-A-A-TheThe-TheTheThe AAs-TheB-The A-The�The-The-ATheThe-LInM-TheFamily

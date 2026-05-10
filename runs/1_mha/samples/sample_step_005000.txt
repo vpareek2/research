@@ -1,0 +1,13 @@
+step: 5000
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a time, this time, but
+The �Vby-by.
+InKB-The A.MunMSA� theSORU-D2-1.-The
+Our isWe-3MCHS.
+The (WhatWe’Wea-In-T-B.2-1-D-the-The
+|S2M.
+I-Mn'I’Do you...
+-MB’I’M!"T(S-T-T-B-the-The American-Mighty-H.D,MMAH

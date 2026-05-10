@@ -1,0 +1,6 @@
+step: 1500
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a timeATheFTheC-TheIn�-DAF�InInWhat"ItI-T-PWhatOnRAA-�TheItItCTheTheRCThisA|-The�TheIADTheB-CItIDVTheThisWhenThe"DChTheCIn-ItTheItThe-DATheTheDAPIt�FACDDDA-FDHA--ThePAMyPTheIttInTheVDIThe"IDDAAATheTheDI-The�-A-A
