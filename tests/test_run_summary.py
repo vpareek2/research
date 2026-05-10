@@ -459,6 +459,64 @@ def test_sparse_logging_uses_interval_throughput_for_training_efficiency(tmp_pat
     assert summary["registry_record"]["logged_avg_train_tokens_per_sec"] == pytest.approx(16.0)
 
 
+def test_summary_uses_raw_live_fields_for_logged_metrics_when_available(tmp_path):
+    rows = [
+        {
+            "step": 0,
+            "train/loss": 4.0,
+            "train/ppl": 54.6,
+            "train/bpb": 2.0,
+            "train/tokens_seen": 16,
+            "time/elapsed_sec": 1.0,
+            "time/train_tokens_per_sec": 16.0,
+            "time/raw_train_tokens_per_sec": 16.0,
+            "time/train_tokens_per_gpu_hour": 57600.0,
+            "time/raw_train_tokens_per_gpu_hour": 57600.0,
+            "perf/mfu": 16.0,
+            "perf/raw_mfu": 16.0,
+            "perf/flops_per_token": 1000,
+            "perf/peak_flops_per_device": 100000.0,
+            "perf/peak_flops_total": 100000.0,
+            "system/device_count": 1,
+            "system/device_kind": "unit gpu",
+            "health/nan_count": 0,
+            "health/loss_spike_count": 0,
+            "health/grad_norm_spike_count": 0,
+        },
+        {
+            "step": 10,
+            "train/loss": 3.8,
+            "train/ppl": 44.7,
+            "train/bpb": 1.9,
+            "train/tokens_seen": 176,
+            "time/elapsed_sec": 3.0,
+            "time/train_tokens_per_sec": 80.0,
+            "time/raw_train_tokens_per_sec": 16.0,
+            "time/train_tokens_per_gpu_hour": 288000.0,
+            "time/raw_train_tokens_per_gpu_hour": 57600.0,
+            "perf/mfu": 80.0,
+            "perf/raw_mfu": 16.0,
+            "perf/flops_per_token": 1000,
+            "perf/peak_flops_per_device": 100000.0,
+            "perf/peak_flops_total": 100000.0,
+            "system/device_count": 1,
+            "system/device_kind": "unit gpu",
+            "health/nan_count": 0,
+            "health/loss_spike_count": 0,
+            "health/grad_norm_spike_count": 0,
+        },
+    ]
+
+    summary = run_summary.summarize_run(make_run(tmp_path, rows, steps=20))
+
+    assert summary["speed"]["logged_avg_train_tokens_per_sec"] == pytest.approx(16.0)
+    assert summary["speed"]["steady_train_tokens_per_sec"] == pytest.approx(80.0)
+    assert summary["performance"]["logged_avg_mfu"] == pytest.approx(16.0)
+    assert summary["performance"]["logged_final_mfu"] == pytest.approx(16.0)
+    assert summary["performance"]["avg_mfu"] == pytest.approx(80.0)
+    assert summary["performance"]["logged_avg_train_tokens_per_gpu_hour"] == pytest.approx(57600.0)
+
+
 def test_write_summary_artifacts_and_cli_register(tmp_path, monkeypatch):
     run_dir = make_run(tmp_path, healthy_rows())
     registry_path = tmp_path / "runs" / "registry.jsonl"

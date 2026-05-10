@@ -523,7 +523,7 @@ def _health_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _timing_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     logged_avg_tokens_per_sec = _mean_metric(rows, "time/tokens_per_sec")
-    logged_avg_train_tokens_per_sec = _mean_metric(rows, "time/train_tokens_per_sec")
+    logged_avg_train_tokens_per_sec = _mean_metric_with_fallback(rows, "time/raw_train_tokens_per_sec", "time/train_tokens_per_sec")
     wall_tokens_per_sec = _wall_tokens_per_sec(rows)
     steady_train_tokens_per_sec, steady_train_interval_count = _steady_train_tokens_per_sec(rows)
     avg_train_tokens_per_sec = steady_train_tokens_per_sec or logged_avg_train_tokens_per_sec
@@ -564,13 +564,17 @@ def _performance_summary(rows: list[dict[str, Any]], timing: dict[str, Any]) -> 
         "peak_flops_per_device": peak_flops_per_device,
         "peak_flops_total": peak_flops_total,
         "final_mfu": final_mfu or _last_metric(rows, "perf/mfu"),
-        "logged_final_mfu": _last_metric(rows, "perf/mfu"),
+        "logged_final_mfu": _last_metric_with_fallback(rows, "perf/raw_mfu", "perf/mfu"),
         "avg_mfu": avg_mfu or _mean_metric(rows, "perf/mfu"),
         "wall_mfu": wall_mfu,
         "steady_train_mfu": avg_mfu,
-        "logged_avg_mfu": _mean_metric(rows, "perf/mfu"),
+        "logged_avg_mfu": _mean_metric_with_fallback(rows, "perf/raw_mfu", "perf/mfu"),
         "avg_train_tokens_per_gpu_hour": avg_train_tokens_per_gpu_hour,
-        "logged_avg_train_tokens_per_gpu_hour": _mean_metric(rows, "time/train_tokens_per_gpu_hour"),
+        "logged_avg_train_tokens_per_gpu_hour": _mean_metric_with_fallback(
+            rows,
+            "time/raw_train_tokens_per_gpu_hour",
+            "time/train_tokens_per_gpu_hour",
+        ),
         "final_train_tokens_per_gpu_hour": _last_metric(rows, "time/train_tokens_per_gpu_hour"),
         "peak_gpu_memory_bytes": _max_metric(rows, "system/gpu_memory_peak_bytes")
         or _max_metric(rows, "system/gpu_memory_used_bytes"),
@@ -891,6 +895,17 @@ def _last_metric(rows: list[dict[str, Any]], key: str) -> float | None:
     return None
 
 
+def _last_metric_with_fallback(rows: list[dict[str, Any]], primary_key: str, fallback_key: str) -> float | None:
+    for row in reversed(rows):
+        value = _number_or_none(row.get(primary_key))
+        if value is not None:
+            return value
+        value = _number_or_none(row.get(fallback_key))
+        if value is not None:
+            return value
+    return None
+
+
 def _last_value(rows: list[dict[str, Any]], key: str) -> Any | None:
     for row in reversed(rows):
         if key in row and row[key] is not None:
@@ -913,6 +928,17 @@ def _max_metric(rows: list[dict[str, Any]], key: str) -> float | None:
 def _mean_metric(rows: list[dict[str, Any]], key: str) -> float | None:
     values = [_number_or_none(row.get(key)) for row in rows]
     values = [value for value in values if value is not None]
+    return mean(values) if values else None
+
+
+def _mean_metric_with_fallback(rows: list[dict[str, Any]], primary_key: str, fallback_key: str) -> float | None:
+    values = []
+    for row in rows:
+        value = _number_or_none(row.get(primary_key))
+        if value is None:
+            value = _number_or_none(row.get(fallback_key))
+        if value is not None:
+            values.append(value)
     return mean(values) if values else None
 
 

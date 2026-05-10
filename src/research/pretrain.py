@@ -140,6 +140,55 @@ def add_timing_metrics(metrics: dict, timer: StepTimer, train_config) -> dict:
     return metrics
 
 
+def is_plain_training_metrics_row(metrics: dict) -> bool:
+    excluded_keys = {
+        "val/loss",
+        "sample/path",
+        "time/eval_sec",
+        "time/sample_sec",
+        "time/checkpoint_sec",
+    }
+    return not any(key in metrics for key in excluded_keys)
+
+
+class LiveThroughputTracker:
+    def __init__(self):
+        self.previous_train_row: tuple[float, float] | None = None
+        self.latest_steady_tokens_per_sec: float | None = None
+
+    def update(self, metrics: dict) -> dict:
+        raw_tokens_per_sec = metrics.get("time/tokens_per_sec")
+        raw_train_tokens_per_sec = metrics.get("time/train_tokens_per_sec")
+        if raw_tokens_per_sec is not None:
+            metrics["time/raw_tokens_per_sec"] = raw_tokens_per_sec
+        if raw_train_tokens_per_sec is not None:
+            metrics["time/raw_train_tokens_per_sec"] = raw_train_tokens_per_sec
+
+        plain_train_row = is_plain_training_metrics_row(metrics)
+        tokens_seen = _float_metric(metrics, "train/tokens_seen")
+        elapsed_sec = _float_metric(metrics, "time/elapsed_sec")
+        if plain_train_row and tokens_seen is not None and elapsed_sec is not None:
+            if self.previous_train_row is not None:
+                previous_tokens, previous_elapsed = self.previous_train_row
+                delta_tokens = tokens_seen - previous_tokens
+                delta_elapsed = elapsed_sec - previous_elapsed
+                if delta_tokens > 0.0 and delta_elapsed > 0.0:
+                    self.latest_steady_tokens_per_sec = delta_tokens / delta_elapsed
+            self.previous_train_row = (tokens_seen, elapsed_sec)
+
+        if self.latest_steady_tokens_per_sec is not None:
+            metrics["time/tokens_per_sec"] = self.latest_steady_tokens_per_sec
+            metrics["time/train_tokens_per_sec"] = self.latest_steady_tokens_per_sec
+        return metrics
+
+
+def _float_metric(metrics: dict, key: str) -> float | None:
+    value = metrics.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
 def write_completion_summary(run_dir) -> tuple:
     _, json_path, md_path, _ = summarize_and_write(run_dir)
     print(f"wrote {json_path}")
@@ -188,6 +237,7 @@ def main():
     print("Compiling first step, then training...\n")
     printed_metric_header = False
     debug_nans = debug_nans_enabled()
+    live_throughput = LiveThroughputTracker()
 
     model = Model(model_config, precision=config.precision, rngs=nnx.Rngs(train_config.seed))
     tx = optax.contrib.muon(
@@ -335,13 +385,15 @@ def main():
 
             if metrics is not None:
                 add_timing_metrics(metrics, timer, train_config)
+                logger.enrich_metrics(metrics)
+                live_throughput.update(metrics)
                 perf_monitor.enrich(metrics)
                 if not printed_metric_header:
                     print(metric_header())
                     printed_metric_header = True
                 print(format_metrics_row(metrics))
                 with trace_profiler.annotate("log"):
-                    logger.log(metrics)
+                    logger.log(metrics, enriched=True)
             trace_profiler.end_current_step(step)
         if save_final_checkpoint_if_needed(
             checkpoint_manager,

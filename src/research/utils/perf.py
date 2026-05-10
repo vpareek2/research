@@ -114,7 +114,9 @@ class PerfMonitor:
             flops_per_step = flops_per_token * train_tokens_per_sec * step_sec
 
         loop_tokens_per_sec = _number(metrics.get("time/tokens_per_sec"))
+        raw_train_tokens_per_sec = _number(metrics.get("time/raw_train_tokens_per_sec"))
         flops_per_sec = flops_per_token * train_tokens_per_sec if train_tokens_per_sec is not None else None
+        raw_flops_per_sec = flops_per_token * raw_train_tokens_per_sec if raw_train_tokens_per_sec is not None else None
         peak_total = self.peak_flops_per_device * self.device_count if self.peak_flops_per_device is not None else None
 
         metrics["system/device_count"] = self.device_count
@@ -125,11 +127,17 @@ class PerfMonitor:
         metrics["perf/peak_flops_per_device"] = self.peak_flops_per_device
         metrics["perf/peak_flops_total"] = peak_total
         metrics["perf/mfu"] = 100.0 * flops_per_sec / peak_total if flops_per_sec is not None and peak_total else None
+        if raw_flops_per_sec is not None:
+            metrics["perf/raw_flops_per_sec"] = raw_flops_per_sec
+            metrics["perf/raw_mfu"] = 100.0 * raw_flops_per_sec / peak_total if peak_total else None
         metrics["time/tokens_per_gpu_hour"] = (
             loop_tokens_per_sec * SECONDS_PER_GPU_HOUR / self.device_count if loop_tokens_per_sec is not None else None
         )
         metrics["time/train_tokens_per_gpu_hour"] = (
             train_tokens_per_sec * SECONDS_PER_GPU_HOUR / self.device_count if train_tokens_per_sec is not None else None
+        )
+        metrics["time/raw_train_tokens_per_gpu_hour"] = (
+            raw_train_tokens_per_sec * SECONDS_PER_GPU_HOUR / self.device_count if raw_train_tokens_per_sec is not None else None
         )
 
         if self.nvml is not None:
