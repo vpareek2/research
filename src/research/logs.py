@@ -124,11 +124,16 @@ class RunLogger:
         if self._wandb is not None:
             self._sample_table = self._wandb.Table(columns=["step", "path", "text"], log_mode="MUTABLE")
 
-    def log(self, metrics: dict):
+    def enrich_metrics(self, metrics: dict) -> dict:
+        self._health.enrich(metrics)
+        return metrics
+
+    def log(self, metrics: dict, *, enriched: bool = False):
         log_start = time.perf_counter()
         metrics = dict(metrics)
         metrics["time/log_sec"] = 0.0
-        self._health.enrich(metrics)
+        if not enriched:
+            self.enrich_metrics(metrics)
         metrics["time/log_sec"] = time.perf_counter() - log_start
 
         with self.metrics_path.open("a", encoding="utf-8") as f:

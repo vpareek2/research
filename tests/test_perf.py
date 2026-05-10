@@ -110,6 +110,7 @@ def test_perf_monitor_enriches_metrics_and_handles_unknown_peak():
         "time/train_step_sec": 0.5,
         "time/train_tokens_per_sec": 1000.0,
         "time/tokens_per_sec": 500.0,
+        "time/raw_train_tokens_per_sec": 100.0,
     }
 
     monitor.enrich(metrics)
@@ -119,8 +120,11 @@ def test_perf_monitor_enriches_metrics_and_handles_unknown_peak():
     assert metrics["perf/flops_per_step"] == flops_per_token * 500
     assert metrics["perf/flops_per_sec"] == flops_per_token * 1000.0
     assert metrics["perf/mfu"] == pytest.approx(100.0 * flops_per_token * 1000.0 / (989e12 * 2))
+    assert metrics["perf/raw_flops_per_sec"] == flops_per_token * 100.0
+    assert metrics["perf/raw_mfu"] == pytest.approx(100.0 * flops_per_token * 100.0 / (989e12 * 2))
     assert metrics["time/tokens_per_gpu_hour"] == 900000.0
     assert metrics["time/train_tokens_per_gpu_hour"] == 1800000.0
+    assert metrics["time/raw_train_tokens_per_gpu_hour"] == 180000.0
     assert metrics["system/gpu_memory_peak_bytes"] == 300
 
     unknown = PerfMonitor(cfg, device_count=1, device_kind="unknown", peak_flops_per_device=None, nvml=None)

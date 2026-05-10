@@ -12,6 +12,7 @@ from research.model import Model
 from research.pretrain import (
     add_timing_metrics,
     format_metrics_row,
+    LiveThroughputTracker,
     make_muon_dimension_numbers,
     maybe_write_completion_summary,
     metric_header,
@@ -291,6 +292,121 @@ def test_add_timing_metrics_uses_train_sync_for_train_throughput():
     assert metrics["time/train_step_sec"] == 0.02
     assert metrics["time/train_sync_sec"] == 0.08
     assert metrics["time/train_tokens_per_sec"] == 320.0
+
+
+def test_live_throughput_tracker_preserves_first_row_raw_metrics():
+    tracker = LiveThroughputTracker()
+    metrics = {
+        "step": 10,
+        "train/tokens_seen": 1000,
+        "time/elapsed_sec": 5.0,
+        "time/tokens_per_sec": 100.0,
+        "time/train_tokens_per_sec": 200.0,
+    }
+
+    tracker.update(metrics)
+
+    assert metrics["time/raw_tokens_per_sec"] == 100.0
+    assert metrics["time/raw_train_tokens_per_sec"] == 200.0
+    assert metrics["time/tokens_per_sec"] == 100.0
+    assert metrics["time/train_tokens_per_sec"] == 200.0
+
+
+def test_live_throughput_tracker_replaces_second_plain_row_with_delta_rate():
+    tracker = LiveThroughputTracker()
+    tracker.update(
+        {
+            "step": 10,
+            "train/tokens_seen": 1000,
+            "time/elapsed_sec": 5.0,
+            "time/tokens_per_sec": 100.0,
+            "time/train_tokens_per_sec": 200.0,
+        }
+    )
+    metrics = {
+        "step": 20,
+        "train/tokens_seen": 3000,
+        "time/elapsed_sec": 9.0,
+        "time/tokens_per_sec": 120.0,
+        "time/train_tokens_per_sec": 240.0,
+    }
+
+    tracker.update(metrics)
+
+    assert metrics["time/raw_tokens_per_sec"] == 120.0
+    assert metrics["time/raw_train_tokens_per_sec"] == 240.0
+    assert metrics["time/tokens_per_sec"] == 500.0
+    assert metrics["time/train_tokens_per_sec"] == 500.0
+
+
+def test_live_throughput_tracker_eval_rows_reuse_latest_steady_rate_without_updating_anchor():
+    tracker = LiveThroughputTracker()
+    tracker.update(
+        {
+            "step": 10,
+            "train/tokens_seen": 1000,
+            "time/elapsed_sec": 5.0,
+            "time/tokens_per_sec": 100.0,
+            "time/train_tokens_per_sec": 200.0,
+        }
+    )
+    tracker.update(
+        {
+            "step": 20,
+            "train/tokens_seen": 3000,
+            "time/elapsed_sec": 9.0,
+            "time/tokens_per_sec": 120.0,
+            "time/train_tokens_per_sec": 240.0,
+        }
+    )
+    eval_metrics = {
+        "step": 30,
+        "train/tokens_seen": 5000,
+        "time/elapsed_sec": 100.0,
+        "time/tokens_per_sec": 10.0,
+        "time/train_tokens_per_sec": 20.0,
+        "val/loss": 3.0,
+    }
+    next_train_metrics = {
+        "step": 40,
+        "train/tokens_seen": 5000,
+        "time/elapsed_sec": 13.0,
+        "time/tokens_per_sec": 130.0,
+        "time/train_tokens_per_sec": 260.0,
+    }
+
+    tracker.update(eval_metrics)
+    tracker.update(next_train_metrics)
+
+    assert eval_metrics["time/tokens_per_sec"] == 500.0
+    assert eval_metrics["time/train_tokens_per_sec"] == 500.0
+    assert next_train_metrics["time/tokens_per_sec"] == 500.0
+    assert next_train_metrics["time/train_tokens_per_sec"] == 500.0
+
+
+def test_live_throughput_tracker_ignores_non_positive_deltas():
+    tracker = LiveThroughputTracker()
+    tracker.update(
+        {
+            "step": 10,
+            "train/tokens_seen": 1000,
+            "time/elapsed_sec": 5.0,
+            "time/tokens_per_sec": 100.0,
+            "time/train_tokens_per_sec": 200.0,
+        }
+    )
+    metrics = {
+        "step": 20,
+        "train/tokens_seen": 900,
+        "time/elapsed_sec": 9.0,
+        "time/tokens_per_sec": 120.0,
+        "time/train_tokens_per_sec": 240.0,
+    }
+
+    tracker.update(metrics)
+
+    assert metrics["time/tokens_per_sec"] == 120.0
+    assert metrics["time/train_tokens_per_sec"] == 240.0
 
 
 def test_maybe_write_completion_summary_only_writes_for_completed_runs(monkeypatch, tmp_path):
