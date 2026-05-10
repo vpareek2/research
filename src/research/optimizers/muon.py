@@ -91,12 +91,19 @@ def _leaf_update(grad, param, mu, adam_m, adam_v, label, count, lr, config: Opti
         if config.weight_decay:
             update = update + config.weight_decay * param
         return -lr * update
-    return _adamw_update(param, adam_m, adam_v, count, lr, config)
+    return _adamw_update(grad, param, adam_m, adam_v, count, lr, config)
 
 
-def _adamw_update(param, m, v, count, lr, config: OptimizerConfig):
+def _adamw_update(grad, param, m, v, count, lr, config: OptimizerConfig):
     adam = config.adamw
-    m_hat = m / (1.0 - adam.b1**count)
+    if config.name == "muon":
+        nesterov = config.muon.nesterov
+    else:
+        nesterov = adam.nesterov
+    if nesterov:
+        m_hat = adam.b1 * m / (1.0 - adam.b1 ** (count + 1)) + (1.0 - adam.b1) * grad / (1.0 - adam.b1**count)
+    else:
+        m_hat = m / (1.0 - adam.b1**count)
     v_hat = v / (1.0 - adam.b2**count)
     update = m_hat / (jnp.sqrt(v_hat) + adam.eps)
     if config.weight_decay:

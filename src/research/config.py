@@ -126,8 +126,9 @@ class TrainConfig:
 @dataclass
 class AdamWOptimizerConfig:
     b1: float = 0.9
-    b2: float = 0.95
+    b2: float = 0.999
     eps: float = 1e-8
+    nesterov: bool = False
 
     def __post_init__(self):
         if not 0.0 <= self.b1 < 1.0:
@@ -136,6 +137,8 @@ class AdamWOptimizerConfig:
             raise ValueError(f"optimizer.adamw.b2 must be in [0, 1), got {self.b2}")
         if self.eps <= 0.0:
             raise ValueError(f"optimizer.adamw.eps must be positive, got {self.eps}")
+        if not isinstance(self.nesterov, bool):
+            raise ValueError(f"optimizer.adamw.nesterov must be a bool, got {self.nesterov!r}")
 
 
 @dataclass

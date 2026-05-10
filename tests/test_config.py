@@ -102,7 +102,7 @@ def test_load_config(tmp_path):
     assert config.optimizer.lr == 0.001
     assert config.optimizer.weight_decay == 0.1
     assert config.optimizer.adamw.b1 == 0.9
-    assert config.optimizer.adamw.b2 == 0.95
+    assert config.optimizer.adamw.b2 == 0.999
     assert config.optimizer.muon.ns_steps == 5
     assert config.precision.compute_dtype == "fp32"
     assert config.precision.param_dtype == "fp32"

@@ -1,12 +1,14 @@
 import jax
 import jax.numpy as jnp
+import optax
 from flax import nnx
 
 from research.config import ModelConfig, OptimizerConfig, TrainConfig
 from research.lr_schedule import build_lr_schedule
 from research.model import Model
 from research.optimizers import OptimClass, build_optimizer, iter_param_infos
-from research.optimizers.muon import orthogonalize_newton_schulz
+from research.optimizers.muon import mixed_muon_adamw, orthogonalize_newton_schulz
+from research.optimizers.routing import classify_param_tree
 from research.pretrain import train_step
 
 
@@ -110,3 +112,40 @@ def test_custom_adamw_optimizer_runs_train_step():
     assert value.shape == ()
     assert bool(jnp.isfinite(value))
     assert bool(jnp.isfinite(metrics["train/grad_norm"]))
+
+
+def test_custom_muon_matches_old_optax_muon_one_step_updates():
+    cfg = tiny_model_config()
+    model = Model(cfg, rngs=nnx.Rngs(0))
+    params = nnx.state(model, nnx.Param)
+    grads = jax.tree.map(
+        lambda param: (jnp.arange(param.size, dtype=jnp.float32).reshape(param.shape) + 1.0) / 1000.0,
+        params,
+    )
+    learning_rate = lambda count: jnp.asarray(1e-3, dtype=jnp.float32)
+
+    def old_muon_dimension_numbers(params):
+        return jax.tree.map(
+            lambda param: optax.contrib.MuonDimensionNumbers()
+            if param.ndim == 2 and cfg.vocab_size not in param.shape
+            else None,
+            params,
+        )
+
+    old_tx = optax.contrib.muon(
+        learning_rate=learning_rate,
+        weight_decay=0.1,
+        adam_weight_decay=0.1,
+        muon_weight_dimension_numbers=old_muon_dimension_numbers,
+    )
+    new_tx = mixed_muon_adamw(
+        classify_param_tree(params, cfg),
+        optimizer_config(),
+        learning_rate,
+    )
+
+    old_updates, _ = old_tx.update(grads, old_tx.init(params), params)
+    new_updates, _ = new_tx.update(grads, new_tx.init(params), params)
+
+    for old_leaf, new_leaf in zip(jax.tree.leaves(old_updates), jax.tree.leaves(new_updates), strict=True):
+        assert jnp.allclose(old_leaf, new_leaf, rtol=1e-5, atol=1e-7)

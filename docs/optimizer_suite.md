@@ -18,7 +18,7 @@ weight_decay = 0.1
 
 [optimizer.adamw]
 b1 = 0.9
-b2 = 0.95
+b2 = 0.999
 eps = 1e-8
 
 [optimizer.muon]
