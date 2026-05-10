@@ -213,6 +213,38 @@ class RiemannianAuroraOptimizerConfig:
 
 
 @dataclass
+class SOAPOptimizerConfig:
+    b1: float = 0.95
+    b2: float = 0.95
+    shampoo_beta: float = -1.0
+    eps: float = 1e-8
+    precondition_frequency: int = 10
+    max_precond_dim: int = 10000
+    precondition_1d: bool = False
+    normalize_grads: bool = False
+    correct_bias: bool = True
+
+    def __post_init__(self):
+        if not 0.0 <= self.b1 < 1.0:
+            raise ValueError(f"optimizer.soap.b1 must be in [0, 1), got {self.b1}")
+        if not 0.0 <= self.b2 < 1.0:
+            raise ValueError(f"optimizer.soap.b2 must be in [0, 1), got {self.b2}")
+        if self.shampoo_beta != -1.0 and not 0.0 <= self.shampoo_beta < 1.0:
+            raise ValueError(f"optimizer.soap.shampoo_beta must be -1 or in [0, 1), got {self.shampoo_beta}")
+        if self.eps <= 0.0:
+            raise ValueError(f"optimizer.soap.eps must be positive, got {self.eps}")
+        if not isinstance(self.precondition_frequency, int) or self.precondition_frequency <= 0:
+            raise ValueError(
+                f"optimizer.soap.precondition_frequency must be positive, got {self.precondition_frequency!r}"
+            )
+        if not isinstance(self.max_precond_dim, int) or self.max_precond_dim <= 0:
+            raise ValueError(f"optimizer.soap.max_precond_dim must be positive, got {self.max_precond_dim!r}")
+        for name in ("precondition_1d", "normalize_grads", "correct_bias"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"optimizer.soap.{name} must be a bool, got {getattr(self, name)!r}")
+
+
+@dataclass
 class OptimizerConfig:
     name: str
     lr: float
@@ -221,11 +253,12 @@ class OptimizerConfig:
     muon: MuonOptimizerConfig = field(default_factory=MuonOptimizerConfig)
     aurora: AuroraOptimizerConfig = field(default_factory=AuroraOptimizerConfig)
     riemannian_aurora: RiemannianAuroraOptimizerConfig = field(default_factory=RiemannianAuroraOptimizerConfig)
+    soap: SOAPOptimizerConfig = field(default_factory=SOAPOptimizerConfig)
 
     def __post_init__(self):
-        if self.name not in {"adamw", "muon", "aurora", "riemannian_aurora"}:
+        if self.name not in {"adamw", "muon", "aurora", "riemannian_aurora", "soap"}:
             raise ValueError(
-                "optimizer.name must be 'adamw', 'muon', 'aurora', or 'riemannian_aurora', "
+                "optimizer.name must be 'adamw', 'muon', 'aurora', 'riemannian_aurora', or 'soap', "
                 f"got {self.name!r}"
             )
         if self.lr <= 0.0:
@@ -360,6 +393,7 @@ def load_config(path: str | Path) -> RunConfig:
     optimizer_data["riemannian_aurora"] = RiemannianAuroraOptimizerConfig(
         **optimizer_data.get("riemannian_aurora", {})
     )
+    optimizer_data["soap"] = SOAPOptimizerConfig(**optimizer_data.get("soap", {}))
 
     return RunConfig(
         experiment=ExperimentConfig(**data["experiment"]),

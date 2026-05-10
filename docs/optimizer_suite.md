@@ -43,6 +43,17 @@ cg_steps = 20
 riemannian_eta = 0.1
 retraction_steps = 2
 eps = 1e-7
+
+[optimizer.soap]
+b1 = 0.95
+b2 = 0.95
+shampoo_beta = -1.0
+eps = 1e-8
+precondition_frequency = 10
+max_precond_dim = 10000
+precondition_1d = false
+normalize_grads = false
+correct_bias = true
 ```
 
 `train.lr` and `train.decay` are removed. The LR schedule shape remains under `[train.lr_schedule]`, but its peak value is `optimizer.lr`.
@@ -68,8 +79,11 @@ Path-derived tags such as `attention`, `mlp`, `norm`, `embedding`, and `output` 
   It keeps the Muon-style momentum, polar step, width scaling, and decoupled weight decay, but applies diagonal row-balancing before the polar step for rectangular matrices.
 - Riemannian Aurora is selectable with `[optimizer].name = "riemannian_aurora"`.
   It is the heavier balanced-Stiefel variant and is included for completeness; `aurora` is the practical optimizer ablation target.
+- SOAP is implemented as its own full optimizer path for `[optimizer].name = "soap"`.
+  It runs on every trainable leaf, keeps Adam moments in Shampoo preconditioner eigenbases, conditionally skips oversized axes, and uses reference-style first-step preconditioner initialization with no parameter update.
+  This is the fair SOAP comparison path; the non-SOAP matrix optimizers still keep AdamW fallback leaves.
 
-SOAP, NorMuon, and PolarExpress are follow-up modules behind the same factory and routing interface.
+NorMuon and PolarExpress are follow-up modules behind the same factory and routing interface.
 
 ## Implementation Steps
 

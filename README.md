@@ -75,6 +75,8 @@ lr = 0.001
 weight_decay = 0.1
 ```
 
+Supported optimizer names are `adamw`, `muon`, `aurora`, `riemannian_aurora`, and `soap`.
+
 Cosine schedule:
 
 ```toml

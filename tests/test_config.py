@@ -12,6 +12,7 @@ from research.config import (
     PrecisionConfig,
     ProfilingConfig,
     RiemannianAuroraOptimizerConfig,
+    SOAPOptimizerConfig,
     TargetConfig,
     dtype_from_name,
     load_config,
@@ -120,6 +121,9 @@ def test_load_config(tmp_path):
     assert config.optimizer.aurora.pp_beta == 0.5
     assert config.optimizer.riemannian_aurora.outer_steps == 3
     assert config.optimizer.riemannian_aurora.cg_steps == 20
+    assert config.optimizer.soap.b1 == 0.95
+    assert config.optimizer.soap.b2 == 0.95
+    assert config.optimizer.soap.precondition_frequency == 10
     assert config.precision.compute_dtype == "fp32"
     assert config.precision.param_dtype == "fp32"
     assert config.precision.loss_dtype == "fp32"
@@ -328,7 +332,7 @@ def test_old_train_lr_and_decay_raise(tmp_path):
         load_config(config_path)
 
 
-@pytest.mark.parametrize("name", ["aurora", "riemannian_aurora"])
+@pytest.mark.parametrize("name", ["aurora", "riemannian_aurora", "soap"])
 def test_loads_matrix_optimizer_variants(tmp_path, name):
     config_path = tmp_path / "config.toml"
     write_config(config_path)
@@ -343,7 +347,7 @@ def test_loads_matrix_optimizer_variants(tmp_path, name):
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"name": "soap"},
+        {"name": "not_real"},
         {"lr": 0.0},
         {"weight_decay": -0.1},
     ],
@@ -387,6 +391,28 @@ def test_invalid_aurora_config_raises(kwargs):
 def test_invalid_riemannian_aurora_config_raises(kwargs):
     with pytest.raises(ValueError):
         RiemannianAuroraOptimizerConfig(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"b1": -0.1},
+        {"b1": 1.0},
+        {"b2": -0.1},
+        {"b2": 1.0},
+        {"shampoo_beta": -0.5},
+        {"shampoo_beta": 1.0},
+        {"eps": 0.0},
+        {"precondition_frequency": 0},
+        {"max_precond_dim": 0},
+        {"precondition_1d": "yes"},
+        {"normalize_grads": "yes"},
+        {"correct_bias": "yes"},
+    ],
+)
+def test_invalid_soap_config_raises(kwargs):
+    with pytest.raises(ValueError):
+        SOAPOptimizerConfig(**kwargs)
 
 
 def test_jax_profiling_config_parses(tmp_path):
