@@ -7,7 +7,6 @@ import argparse
 import jax
 import jax.numpy as jnp
 from flax import nnx
-import optax
 import tiktoken
 
 from research.checkpoint import create_checkpoint_manager, restore_latest_checkpoint, save_checkpoint
@@ -26,6 +25,7 @@ from research.evals import evaluate_domain_losses, evaluate_loss, loss_with_bpb
 from research.lr_schedule import build_lr_schedule, describe_lr_schedule
 from research.model import Model
 from research.logs import setup_run
+from research.optimizers import build_optimizer, describe_optimizer
 from research.profiling import StepTimer, TraceProfiler
 from research.sample import generate, write_sample
 from research.train_debug import debug_nans_enabled, raise_for_nonfinite_training_state
@@ -37,22 +37,6 @@ def tree_l2_norm(tree) -> jax.Array:
     leaves = jax.tree.leaves(tree)
     square_norms = [jnp.sum(jnp.square(leaf.astype(jnp.float32))) for leaf in leaves]
     return jnp.sqrt(jnp.sum(jnp.asarray(square_norms)))
-
-
-def make_muon_dimension_numbers(model_config):
-    # Optax Muon defaults to every 2D parameter, but for LMs we only want
-    # hidden projection matrices. Vocab matrices like embed/lm_head stay on
-    # AdamW. Later we should replace this shape rule with cleaner name-based
-    # routing, or our own optimizer wrapper.
-    def dim_numbers(params):
-        def leaf(x):
-            if x.ndim == 2 and model_config.vocab_size not in x.shape:
-                return optax.contrib.MuonDimensionNumbers()
-            return None
-
-        return jax.tree.map(leaf, params)
-
-    return dim_numbers
 
 
 @nnx.jit
@@ -95,7 +79,7 @@ def print_startup(config: RunConfig, *, resume: bool, distributed: DistributedCo
             f"per_device_batch={distributed.per_device_batch_size} "
             f"axis={distributed.axis_name}"
         )
-    print(f"optimizer:  muon peak_lr={config.train.lr} weight_decay={config.train.decay}")
+    print(f"optimizer:  {describe_optimizer(config.optimizer)}")
     print(f"schedule:   {describe_lr_schedule(config.train)}")
     print(f"precision:  compute={config.precision.compute_dtype} params={config.precision.param_dtype} loss={config.precision.loss_dtype}")
     print(f"profiling:  enabled={config.profiling.enabled} profiler={config.profiling.profiler}")
@@ -228,7 +212,7 @@ def main():
     config = load_config(args.config)
     train_config = config.train
     model_config = config.model
-    lr_schedule = build_lr_schedule(train_config)
+    lr_schedule = build_lr_schedule(train_config, peak_lr=config.optimizer.lr)
     distributed = create_distributed_context(config.distributed, train_config)
     perf_monitor = PerfMonitor.from_distributed(config.model, distributed)
     print_startup(config, resume=args.resume, distributed=distributed)
@@ -240,13 +224,7 @@ def main():
     live_throughput = LiveThroughputTracker()
 
     model = Model(model_config, precision=config.precision, rngs=nnx.Rngs(train_config.seed))
-    tx = optax.contrib.muon(
-        learning_rate=lr_schedule,
-        weight_decay=train_config.decay,
-        adam_weight_decay=train_config.decay,
-        muon_weight_dimension_numbers=make_muon_dimension_numbers(model_config),
-    )
-    optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+    optimizer = build_optimizer(model, model_config, config.optimizer, lr_schedule)
     place_replicated_state(model, optimizer, distributed)
     token_bytes = jax.device_put(load_token_bytes(config.data), distributed.replicated_sharding)
     domain_token_bytes = jax.device_put(load_eval_domain_token_bytes(config.eval, config.data), distributed.replicated_sharding)

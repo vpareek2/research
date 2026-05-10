@@ -48,13 +48,16 @@ seed = 0
 batch_size = 2
 seq_len = 8
 steps = 2
-lr = 0.001
-decay = 0.1
 log_every = 1
 eval_every = 1
 eval_steps = {eval_steps}
 checkpoint_every = 2
 keep_last = 2
+
+[optimizer]
+name = "muon"
+lr = 0.001
+weight_decay = 0.1
 
 [data]
 source = "tokens"

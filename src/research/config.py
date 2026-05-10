@@ -115,14 +115,65 @@ class TrainConfig:
     batch_size: int
     seq_len: int
     steps: int
-    lr: float
-    decay: float
     log_every: int
     eval_every: int
     eval_steps: int
     checkpoint_every: int
     keep_last: int
     lr_schedule: LRScheduleConfig = field(default_factory=LRScheduleConfig)
+
+
+@dataclass
+class AdamWOptimizerConfig:
+    b1: float = 0.9
+    b2: float = 0.95
+    eps: float = 1e-8
+
+    def __post_init__(self):
+        if not 0.0 <= self.b1 < 1.0:
+            raise ValueError(f"optimizer.adamw.b1 must be in [0, 1), got {self.b1}")
+        if not 0.0 <= self.b2 < 1.0:
+            raise ValueError(f"optimizer.adamw.b2 must be in [0, 1), got {self.b2}")
+        if self.eps <= 0.0:
+            raise ValueError(f"optimizer.adamw.eps must be positive, got {self.eps}")
+
+
+@dataclass
+class MuonOptimizerConfig:
+    beta: float = 0.95
+    nesterov: bool = True
+    ns_steps: int = 5
+    ns_coeffs: tuple[float, float, float] = (3.4445, -4.775, 2.0315)
+    eps: float = 1e-8
+
+    def __post_init__(self):
+        if not 0.0 <= self.beta < 1.0:
+            raise ValueError(f"optimizer.muon.beta must be in [0, 1), got {self.beta}")
+        if not isinstance(self.nesterov, bool):
+            raise ValueError(f"optimizer.muon.nesterov must be a bool, got {self.nesterov!r}")
+        if not isinstance(self.ns_steps, int) or self.ns_steps <= 0:
+            raise ValueError(f"optimizer.muon.ns_steps must be positive, got {self.ns_steps!r}")
+        if len(self.ns_coeffs) != 3:
+            raise ValueError("optimizer.muon.ns_coeffs must contain exactly three coefficients")
+        if self.eps <= 0.0:
+            raise ValueError(f"optimizer.muon.eps must be positive, got {self.eps}")
+
+
+@dataclass
+class OptimizerConfig:
+    name: str
+    lr: float
+    weight_decay: float
+    adamw: AdamWOptimizerConfig = field(default_factory=AdamWOptimizerConfig)
+    muon: MuonOptimizerConfig = field(default_factory=MuonOptimizerConfig)
+
+    def __post_init__(self):
+        if self.name not in {"adamw", "muon"}:
+            raise ValueError(f"optimizer.name must be 'adamw' or 'muon', got {self.name!r}")
+        if self.lr <= 0.0:
+            raise ValueError(f"optimizer.lr must be positive, got {self.lr}")
+        if self.weight_decay < 0.0:
+            raise ValueError(f"optimizer.weight_decay must be non-negative, got {self.weight_decay}")
 
 
 @dataclass
@@ -197,6 +248,7 @@ class RunConfig:
     experiment: ExperimentConfig
     model: ModelConfig
     train: TrainConfig
+    optimizer: OptimizerConfig
     data: DataConfig
     sampling: SamplingConfig
     target: TargetConfig = field(default_factory=TargetConfig)
@@ -232,12 +284,26 @@ def load_config(path: str | Path) -> RunConfig:
         data = tomllib.load(f)
 
     train_data = data["train"].copy()
+    old_train_keys = sorted(set(train_data) & {"lr", "decay"})
+    if old_train_keys:
+        joined = ", ".join(f"train.{key}" for key in old_train_keys)
+        raise ValueError(f"{joined} moved to the required [optimizer] section")
     train_data["lr_schedule"] = LRScheduleConfig(**train_data.get("lr_schedule", {}))
+    optimizer_data = data.get("optimizer")
+    if optimizer_data is None:
+        raise ValueError("Missing required [optimizer] section")
+    optimizer_data = optimizer_data.copy()
+    optimizer_data["adamw"] = AdamWOptimizerConfig(**optimizer_data.get("adamw", {}))
+    muon_data = optimizer_data.get("muon", {})
+    if "ns_coeffs" in muon_data:
+        muon_data = {**muon_data, "ns_coeffs": tuple(muon_data["ns_coeffs"])}
+    optimizer_data["muon"] = MuonOptimizerConfig(**muon_data)
 
     return RunConfig(
         experiment=ExperimentConfig(**data["experiment"]),
         model=ModelConfig(**data["model"]),
         train=TrainConfig(**train_data),
+        optimizer=OptimizerConfig(**optimizer_data),
         data=DataConfig(**data["data"]),
         sampling=SamplingConfig(**data.get("sampling", {})),
         target=TargetConfig(**data.get("target", {})),

@@ -7,15 +7,16 @@ if "--xla_force_host_platform_device_count" not in _xla_flags:
 
 import jax
 import jax.numpy as jnp
-import optax
 import pytest
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
-from research.config import DistributedConfig, ModelConfig, TrainConfig
+from research.config import DistributedConfig, ModelConfig, OptimizerConfig, TrainConfig
 from research.distributed import create_distributed_context, place_replicated_state, shard_batch
 from research.evals import eval_step
+from research.lr_schedule import build_lr_schedule
 from research.model import Model
+from research.optimizers import build_optimizer
 from research.pretrain import train_step
 
 
@@ -62,14 +63,16 @@ def train_config(batch_size: int = 8):
         batch_size=batch_size,
         seq_len=8,
         steps=2,
-        lr=0.001,
-        decay=0.1,
         log_every=1,
         eval_every=1,
         eval_steps=1,
         checkpoint_every=2,
         keep_last=2,
     )
+
+
+def optimizer_config():
+    return OptimizerConfig(name="muon", lr=0.001, weight_decay=0.1)
 
 
 def test_fake_cpu_device_availability():
@@ -196,9 +199,11 @@ def test_shard_batch_rejects_wrong_leading_dim():
 
 def test_replicated_state_placement_and_sharded_train_eval_steps():
     context = create_distributed_context(DistributedConfig(device_count=4), train_config(batch_size=8))
+    tc = train_config(batch_size=8)
+    oc = optimizer_config()
     cfg = tiny_model_config()
     model = Model(cfg, rngs=nnx.Rngs(0))
-    optimizer = nnx.Optimizer(model, optax.adamw(1e-3), wrt=nnx.Param)
+    optimizer = build_optimizer(model, cfg, oc, build_lr_schedule(tc, peak_lr=oc.lr))
     place_replicated_state(model, optimizer, context)
 
     param_leaf = jax.tree.leaves(nnx.state(model, nnx.Param))[0]

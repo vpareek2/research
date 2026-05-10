@@ -126,13 +126,16 @@ seed = 0
 batch_size = 4
 seq_len = 16
 steps = 4
-lr = 0.001
-decay = 0.1
 log_every = 1
 eval_every = 10
 eval_steps = 1
 checkpoint_every = 10
 keep_last = 1
+
+[optimizer]
+name = "muon"
+lr = 0.001
+weight_decay = 0.1
 
 [data]
 source = "tokens"

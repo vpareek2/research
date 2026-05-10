@@ -1,13 +1,14 @@
 import numpy as np
-import optax
 import jax.numpy as jnp
 from flax import nnx
 
 from research.checkpoint import create_checkpoint_manager, restore_latest_checkpoint, restore_model_checkpoint, save_checkpoint
-from research.config import DataConfig, ModelConfig, TrainConfig
+from research.config import DataConfig, ModelConfig, OptimizerConfig, TrainConfig
 from research.data import make_dataloaders
 from research.evals import loss
+from research.lr_schedule import build_lr_schedule
 from research.model import Model
+from research.optimizers import build_optimizer
 
 
 def tiny_model_config():
@@ -31,8 +32,6 @@ def train_config(**overrides):
         batch_size=2,
         seq_len=8,
         steps=2,
-        lr=0.001,
-        decay=0.1,
         log_every=1,
         eval_every=1,
         eval_steps=1,
@@ -41,6 +40,10 @@ def train_config(**overrides):
     )
     values.update(overrides)
     return TrainConfig(**values)
+
+
+def optimizer_config():
+    return OptimizerConfig(name="muon", lr=0.001, weight_decay=0.1)
 
 
 def data_config(tmp_path):
@@ -53,9 +56,10 @@ def test_checkpoint_restores_next_step_and_train_iterator(tmp_path):
     model_config = tiny_model_config()
     tc = train_config()
     dc = data_config(tmp_path)
+    oc = optimizer_config()
 
     model = Model(model_config, rngs=nnx.Rngs(0))
-    optimizer = nnx.Optimizer(model, optax.adamw(tc.lr), wrt=nnx.Param)
+    optimizer = build_optimizer(model, model_config, oc, build_lr_schedule(tc, peak_lr=oc.lr))
     train_iter, _ = make_dataloaders(dc, tc)
 
     _ = next(train_iter)
@@ -72,7 +76,7 @@ def test_checkpoint_restores_next_step_and_train_iterator(tmp_path):
     expected_next_batch = next(train_iter)
 
     restored_model = Model(model_config, rngs=nnx.Rngs(1))
-    restored_optimizer = nnx.Optimizer(restored_model, optax.adamw(tc.lr), wrt=nnx.Param)
+    restored_optimizer = build_optimizer(restored_model, model_config, oc, build_lr_schedule(tc, peak_lr=oc.lr))
     restored_train_iter, _ = make_dataloaders(dc, tc)
     restored_next_step = restore_latest_checkpoint(
         manager,
@@ -97,9 +101,10 @@ def test_restore_model_checkpoint_restores_model_without_optimizer_or_iterator(t
     model_config = tiny_model_config()
     tc = train_config()
     dc = data_config(tmp_path)
+    oc = optimizer_config()
 
     model = Model(model_config, rngs=nnx.Rngs(0))
-    optimizer = nnx.Optimizer(model, optax.adamw(tc.lr), wrt=nnx.Param)
+    optimizer = build_optimizer(model, model_config, oc, build_lr_schedule(tc, peak_lr=oc.lr))
     train_iter, _ = make_dataloaders(dc, tc)
     batch = next(train_iter)
 

@@ -3,7 +3,7 @@ import json
 import numpy as np
 import tiktoken
 
-from research.config import DataConfig, ExperimentConfig, ModelConfig, RunConfig, SamplingConfig, TrainConfig
+from research.config import DataConfig, ExperimentConfig, ModelConfig, OptimizerConfig, RunConfig, SamplingConfig, TrainConfig
 from research.utils.inspect_batch import inspect_batch
 
 
@@ -27,14 +27,13 @@ def _write_run_config(run_dir, data_path):
             batch_size=1,
             seq_len=8,
             steps=1,
-            lr=0.001,
-            decay=0.1,
             log_every=1,
             eval_every=1,
             eval_steps=1,
             checkpoint_every=1,
             keep_last=1,
         ),
+        optimizer=OptimizerConfig(name="muon", lr=0.001, weight_decay=0.1),
         data=DataConfig(path=str(data_path), tokenizer="gpt2", val_fraction=0.25),
         sampling=SamplingConfig(),
     )
@@ -61,13 +60,16 @@ seed = {config.train.seed}
 batch_size = {config.train.batch_size}
 seq_len = {config.train.seq_len}
 steps = {config.train.steps}
-lr = {config.train.lr}
-decay = {config.train.decay}
 log_every = {config.train.log_every}
 eval_every = {config.train.eval_every}
 eval_steps = {config.train.eval_steps}
 checkpoint_every = {config.train.checkpoint_every}
 keep_last = {config.train.keep_last}
+
+[optimizer]
+name = "{config.optimizer.name}"
+lr = {config.optimizer.lr}
+weight_decay = {config.optimizer.weight_decay}
 
 [data]
 path = "{config.data.path}"
@@ -177,13 +179,16 @@ seed = 0
 batch_size = 1
 seq_len = 8
 steps = 1
-lr = 0.001
-decay = 0.1
 log_every = 1
 eval_every = 1
 eval_steps = 1
 checkpoint_every = 1
 keep_last = 1
+
+[optimizer]
+name = "muon"
+lr = 0.001
+weight_decay = 0.1
 
 [data]
 source = "tokens"

@@ -305,9 +305,13 @@ def load_run_config_summary(run_dir: Path, warnings: list[str]) -> dict[str, Any
             "batch_size": config.train.batch_size,
             "seq_len": config.train.seq_len,
             "tokens_per_step": config.train.batch_size * config.train.seq_len,
-            "lr": config.train.lr,
             "log_every": config.train.log_every,
             "eval_every": config.train.eval_every,
+        },
+        "optimizer": {
+            "name": config.optimizer.name,
+            "lr": config.optimizer.lr,
+            "weight_decay": config.optimizer.weight_decay,
         },
         "precision": {
             "compute_dtype": config.precision.compute_dtype,

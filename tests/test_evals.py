@@ -31,8 +31,6 @@ def train_config(**overrides):
         batch_size=2,
         seq_len=8,
         steps=2,
-        lr=0.001,
-        decay=0.1,
         log_every=1,
         eval_every=1,
         eval_steps=1,
