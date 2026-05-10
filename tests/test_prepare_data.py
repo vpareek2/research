@@ -23,6 +23,7 @@ from research.prepare_data import (
     prepare_eval_domains,
     prepare_texts,
     resolve_hf_token,
+    _tokenized_batches,
 )
 
 
@@ -97,6 +98,55 @@ def test_prepare_texts_streams_generator(tmp_path):
     assert manifest["num_tokens"] > 0
     assert (output_dir / manifest["shards"][0]["path"]).exists()
     assert (output_dir / "token_bytes.bin").exists()
+
+
+def test_parallel_tokenized_batches_are_bounded(monkeypatch):
+    consumed = []
+    submitted = []
+    released = []
+
+    class FakeFuture:
+        def __init__(self, batch):
+            self.batch = batch
+
+        def result(self):
+            released.append(self.batch)
+            return [[len(text)] for text in self.batch]
+
+    class FakePool:
+        def __init__(self, max_workers, initializer, initargs):
+            self.max_workers = max_workers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn, batch):
+            submitted.append(batch)
+            return FakeFuture(batch)
+
+    def texts():
+        for idx in range(20):
+            consumed.append(idx)
+            yield f"text-{idx}"
+
+    monkeypatch.setattr("research.prepare_data.ProcessPoolExecutor", FakePool)
+    batches = _tokenized_batches(
+        texts(),
+        tokenizer_name="gpt2",
+        append_eot=True,
+        tokenization=TokenizationConfig(workers=2, batch_docs=1, queue_batches=3),
+    )
+
+    assert len(consumed) == 0
+    first = next(batches)
+
+    assert first == [[6]]
+    assert len(submitted) == 6
+    assert len(consumed) == 6
+    assert len(released) == 1
 
 
 def test_prepare_texts_respects_max_tokens(tmp_path):

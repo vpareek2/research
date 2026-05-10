@@ -5,6 +5,7 @@ Offline dataset preparation for mmap-backed token training.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -482,7 +483,25 @@ def _tokenized_batches(
         initializer=_init_tokenizer_worker,
         initargs=(tokenizer_name, append_eot),
     ) as pool:
-        yield from pool.map(_tokenize_batch_worker, batches, chunksize=tokenization.queue_batches)
+        pending = deque()
+        max_pending = max(1, workers * tokenization.queue_batches)
+
+        def submit_next() -> bool:
+            try:
+                batch = next(batches)
+            except StopIteration:
+                return False
+            pending.append(pool.submit(_tokenize_batch_worker, batch))
+            return True
+
+        for _ in range(max_pending):
+            if not submit_next():
+                break
+
+        while pending:
+            future = pending.popleft()
+            yield future.result()
+            submit_next()
 
 
 class ShardWriter:
