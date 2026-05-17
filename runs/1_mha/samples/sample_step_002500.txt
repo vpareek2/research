@@ -1,0 +1,6 @@
+step: 2500
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a timeB�ICBI|"BWeIBAItBAItAThe|ACTheC�WhenTheIB-HI-For""PD"IThe-JDBByIBAJDBCThisTheTheJ-B-B"I-AThe-TheAO"AThisAInDDYYBJIABAIIJ-TheB2MWeI-BFITheBABIFI-The|1"B-OnG-AnDateTheH|TheBI|ACI

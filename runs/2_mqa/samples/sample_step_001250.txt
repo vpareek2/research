@@ -1,0 +1,27 @@
+step: 1250
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a time
+IBLLN||3SL.M1||WRC.2The
+-100
+20
+C--
+LRKW4HThe4TheC-LTheTheThe
+--The
+The:,
+TheIfIf2
+TheTheTheThe,IThe and3
+The
+The,.
+IS8
+1,
+The)
+The 10,-SW.||3,The the-
+ItHIThe|
+The- The
+The the:
+WeThisRWAThe-The
+WAA
+-22

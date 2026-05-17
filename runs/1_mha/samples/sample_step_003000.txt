@@ -1,0 +1,7 @@
+step: 3000
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a time-IfThe-TThisTheThe-TheTheThethe-IfIDTheAItIBF-10G-IWeon-MKDDItAMN-2ItTheFTheF-TheOne-T-The-BWetheTA-GFThe(TheTheAnCO-T1-The-1TheI-ThePTheThe-This-ThetA-and-A-How1-A•The3-The(TheThe-TheB-HAB1-The
+The-This weekCPon-The1As

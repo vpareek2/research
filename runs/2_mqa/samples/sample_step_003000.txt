@@ -1,0 +1,9 @@
+step: 3000
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a time the year�-Ta:5-The a5the-m2DiA,I"FW10G-IWeH-M1DIItAJN-610-10b50-19.8T3.RF.1TA-GF-19
+-F-20-191-1I15I-10W5)
+-on-5.T0-3-D1IA-W3-The3-the-K-the-A) and-
+5,-1I),�0-1a

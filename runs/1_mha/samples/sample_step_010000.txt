@@ -1,0 +1,12 @@
+step: 10000
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a time.
+(This is the subject of the most important feature of the best-austic experience from any and the first time of the business.
+The first time to go into the office.
+If you don’s own time we can’t miss a good time.
+When you are not a perfect man, it is a good sign. I am not sure. I didn’t get in the past, but I could not be sure, I have been a good friend.
+I’m still in the kitchen
+The first day of the year. I remember the name of my husband�
