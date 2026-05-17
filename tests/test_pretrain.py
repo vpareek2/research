@@ -1,19 +1,18 @@
 import jax
 import jax.numpy as jnp
-import optax
 import pytest
 from flax import nnx
 
-from research.config import DataConfig, DistributedConfig, ExperimentConfig, ModelConfig, PrecisionConfig, ProfilingConfig, RunConfig, SamplingConfig, TrainConfig, WandbConfig
+from research.config import DataConfig, DistributedConfig, ExperimentConfig, ModelConfig, OptimizerConfig, PrecisionConfig, ProfilingConfig, RunConfig, SamplingConfig, TrainConfig, WandbConfig
 from research.distributed import create_distributed_context
 from research.evals import loss
 from research.lr_schedule import build_lr_schedule
 from research.model import Model
+from research.optimizers import build_optimizer
 from research.pretrain import (
     add_timing_metrics,
     format_metrics_row,
     LiveThroughputTracker,
-    make_muon_dimension_numbers,
     maybe_write_completion_summary,
     metric_header,
     print_startup,
@@ -40,6 +39,28 @@ def tiny_model_config():
     )
 
 
+def tiny_train_config(**overrides):
+    values = dict(
+        seed=0,
+        batch_size=2,
+        seq_len=8,
+        steps=4,
+        log_every=1,
+        eval_every=1,
+        eval_steps=1,
+        checkpoint_every=2,
+        keep_last=2,
+    )
+    values.update(overrides)
+    return TrainConfig(**values)
+
+
+def tiny_optimizer_config(**overrides):
+    values = dict(name="muon", lr=1e-3, weight_decay=0.1)
+    values.update(overrides)
+    return OptimizerConfig(**values)
+
+
 def test_loss_is_scalar_and_finite():
     cfg = tiny_model_config()
     model = Model(cfg, rngs=nnx.Rngs(0))
@@ -64,24 +85,6 @@ def test_loss_is_scalar_and_finite_with_bf16_compute():
     assert bool(jnp.isfinite(value))
 
 
-def test_muon_selector_excludes_vocab_and_non_2d_params():
-    cfg = tiny_model_config()
-    selector = make_muon_dimension_numbers(cfg)
-    params = {
-        "internal": jnp.zeros((cfg.hidden_size, cfg.hidden_size)),
-        "lm_head": jnp.zeros((cfg.hidden_size, cfg.vocab_size)),
-        "embed": jnp.zeros((cfg.vocab_size, cfg.hidden_size)),
-        "norm": jnp.zeros((cfg.hidden_size,)),
-    }
-
-    labels = selector(params)
-
-    assert isinstance(labels["internal"], optax.contrib.MuonDimensionNumbers)
-    assert labels["lm_head"] is None
-    assert labels["embed"] is None
-    assert labels["norm"] is None
-
-
 def test_tree_l2_norm():
     value = tree_l2_norm({"a": jnp.array([3.0, 4.0]), "b": jnp.array([12.0])})
 
@@ -91,8 +94,10 @@ def test_tree_l2_norm():
 
 def test_train_step_returns_classic_train_metrics():
     cfg = tiny_model_config()
+    train_cfg = tiny_train_config()
+    optimizer_cfg = tiny_optimizer_config()
     model = Model(cfg, rngs=nnx.Rngs(0))
-    optimizer = nnx.Optimizer(model, optax.adamw(1e-3), wrt=nnx.Param)
+    optimizer = build_optimizer(model, cfg, optimizer_cfg, build_lr_schedule(train_cfg, peak_lr=optimizer_cfg.lr))
     input_ids = jax.random.randint(jax.random.key(1), (2, 8), 0, cfg.vocab_size)
     token_bytes = jnp.ones((cfg.vocab_size,), dtype=jnp.uint16)
 
@@ -139,27 +144,10 @@ def test_sync_metric_scalars_returns_python_floats():
 
 def test_muon_optimizer_accepts_lr_schedule():
     cfg = tiny_model_config()
-    train_cfg = TrainConfig(
-        seed=0,
-        batch_size=2,
-        seq_len=8,
-        steps=4,
-        lr=1e-3,
-        decay=0.1,
-        log_every=1,
-        eval_every=1,
-        eval_steps=1,
-        checkpoint_every=2,
-        keep_last=2,
-    )
+    train_cfg = tiny_train_config()
+    optimizer_cfg = tiny_optimizer_config()
     model = Model(cfg, rngs=nnx.Rngs(0))
-    tx = optax.contrib.muon(
-        learning_rate=build_lr_schedule(train_cfg),
-        weight_decay=train_cfg.decay,
-        adam_weight_decay=train_cfg.decay,
-        muon_weight_dimension_numbers=make_muon_dimension_numbers(cfg),
-    )
-    optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+    optimizer = build_optimizer(model, cfg, optimizer_cfg, build_lr_schedule(train_cfg, peak_lr=optimizer_cfg.lr))
     input_ids = jax.random.randint(jax.random.key(1), (2, 8), 0, cfg.vocab_size)
     token_bytes = jnp.ones((cfg.vocab_size,), dtype=jnp.uint16)
 
@@ -174,19 +162,8 @@ def test_print_startup_outputs_run_summary(capsys):
     config = RunConfig(
         experiment=ExperimentConfig(name="unit", out_dir="runs"),
         model=tiny_model_config(),
-        train=TrainConfig(
-            seed=0,
-            batch_size=2,
-            seq_len=8,
-            steps=3,
-            lr=1e-3,
-            decay=0.1,
-            log_every=1,
-            eval_every=1,
-            eval_steps=1,
-            checkpoint_every=2,
-            keep_last=2,
-        ),
+        train=tiny_train_config(steps=3),
+        optimizer=tiny_optimizer_config(),
         data=DataConfig(path="input.txt", tokenizer="gpt2", val_fraction=0.25),
         sampling=SamplingConfig(enabled=True),
         distributed=DistributedConfig(enabled=False),
@@ -203,6 +180,7 @@ def test_print_startup_outputs_run_summary(capsys):
     assert "run:        unit (resume)" in output
     assert "model:" in output
     assert "distributed: devices=1 global_batch=2 per_device_batch=2 axis=data" in output
+    assert "optimizer:  muon peak_lr=0.001 weight_decay=0.1" in output
     assert "schedule:   cosine" in output
     assert "precision:  compute=bf16 params=fp32 loss=fp32" in output
     assert "profiling:  enabled=False profiler=none" in output
@@ -239,19 +217,7 @@ def test_metric_row_without_val_loss():
 
 
 def test_add_timing_metrics_reports_loop_and_train_throughput():
-    train_cfg = TrainConfig(
-        seed=0,
-        batch_size=4,
-        seq_len=8,
-        steps=2,
-        lr=1e-3,
-        decay=0.1,
-        log_every=1,
-        eval_every=1,
-        eval_steps=1,
-        checkpoint_every=2,
-        keep_last=2,
-    )
+    train_cfg = tiny_train_config(batch_size=4, steps=2)
     timer = StepTimer()
     timer.add("step", 0.2)
     timer.add("train_step", 0.1)
@@ -268,19 +234,7 @@ def test_add_timing_metrics_reports_loop_and_train_throughput():
 
 
 def test_add_timing_metrics_uses_train_sync_for_train_throughput():
-    train_cfg = TrainConfig(
-        seed=0,
-        batch_size=4,
-        seq_len=8,
-        steps=2,
-        lr=1e-3,
-        decay=0.1,
-        log_every=1,
-        eval_every=1,
-        eval_steps=1,
-        checkpoint_every=2,
-        keep_last=2,
-    )
+    train_cfg = tiny_train_config(batch_size=4, steps=2)
     timer = StepTimer()
     timer.add("step", 0.2)
     timer.add("train_step", 0.02)
@@ -442,19 +396,7 @@ class FakeCheckpointManager:
 def test_save_final_checkpoint_if_needed_saves_missing_final_step(monkeypatch):
     calls = []
     manager = FakeCheckpointManager(latest_step=2)
-    train_cfg = TrainConfig(
-        seed=0,
-        batch_size=4,
-        seq_len=8,
-        steps=5,
-        lr=1e-3,
-        decay=0.1,
-        log_every=1,
-        eval_every=1,
-        eval_steps=1,
-        checkpoint_every=0,
-        keep_last=2,
-    )
+    train_cfg = tiny_train_config(batch_size=4, steps=5, checkpoint_every=0)
 
     def fake_save_checkpoint(manager_arg, **kwargs):
         calls.append((manager_arg, kwargs))
@@ -487,19 +429,7 @@ def test_save_final_checkpoint_if_needed_saves_missing_final_step(monkeypatch):
 def test_save_final_checkpoint_if_needed_skips_existing_final_step(monkeypatch):
     calls = []
     manager = FakeCheckpointManager(latest_step=5)
-    train_cfg = TrainConfig(
-        seed=0,
-        batch_size=4,
-        seq_len=8,
-        steps=5,
-        lr=1e-3,
-        decay=0.1,
-        log_every=1,
-        eval_every=1,
-        eval_steps=1,
-        checkpoint_every=5,
-        keep_last=2,
-    )
+    train_cfg = tiny_train_config(batch_size=4, steps=5, checkpoint_every=5)
     monkeypatch.setattr("research.pretrain.save_checkpoint", lambda *args, **kwargs: calls.append((args, kwargs)))
 
     saved = save_final_checkpoint_if_needed(

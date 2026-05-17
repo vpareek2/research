@@ -10,8 +10,6 @@ def train_config(**overrides):
         batch_size=2,
         seq_len=8,
         steps=10,
-        lr=1.0,
-        decay=0.1,
         log_every=1,
         eval_every=1,
         eval_steps=1,
@@ -24,7 +22,7 @@ def train_config(**overrides):
 
 
 def test_cosine_schedule_warms_up_and_decays_to_floor():
-    schedule = build_lr_schedule(train_config())
+    schedule = build_lr_schedule(train_config(), peak_lr=1.0)
 
     assert float(schedule(0)) == pytest.approx(0.5)
     assert float(schedule(1)) == pytest.approx(1.0)
@@ -42,7 +40,8 @@ def test_wsd_schedule_warms_up_holds_peak_then_decays():
                 stable_ratio=0.5,
                 min_lr_ratio=0.1,
             )
-        )
+        ),
+        peak_lr=1.0,
     )
 
     assert float(schedule(0)) == pytest.approx(0.5)
@@ -56,9 +55,9 @@ def test_default_cosine_schedule_is_valid_for_small_step_counts():
     schedule = build_lr_schedule(
         train_config(
             steps=2,
-            lr=0.001,
             lr_schedule=LRScheduleConfig(),
-        )
+        ),
+        peak_lr=0.001,
     )
 
     assert float(schedule(0)) == pytest.approx(0.001)
@@ -74,7 +73,8 @@ def test_wsd_schedule_requires_decay_step():
                     warmup_ratio=0.6,
                     stable_ratio=0.4,
                 )
-            )
+            ),
+            peak_lr=1.0,
         )
 
 

@@ -3,7 +3,20 @@ from pathlib import Path
 import jax.numpy as jnp
 import pytest
 
-from research.config import DataConfig, DistributedConfig, LRScheduleConfig, PrecisionConfig, ProfilingConfig, TargetConfig, dtype_from_name, load_config
+from research.config import (
+    AuroraOptimizerConfig,
+    DataConfig,
+    DistributedConfig,
+    LRScheduleConfig,
+    OptimizerConfig,
+    PrecisionConfig,
+    ProfilingConfig,
+    RiemannianAuroraOptimizerConfig,
+    SOAPOptimizerConfig,
+    TargetConfig,
+    dtype_from_name,
+    load_config,
+)
 
 
 def write_config(
@@ -53,14 +66,17 @@ seed = 0
 batch_size = 2
 seq_len = 8
 steps = 2
-lr = 0.001
-decay = 0.1
 log_every = 1
 eval_every = 1
 eval_steps = 1
 checkpoint_every = 2
 keep_last = 2
 {lr_schedule_section}
+
+[optimizer]
+name = "muon"
+lr = 0.001
+weight_decay = 0.1
 
 [data]
 path = "input.txt"
@@ -95,6 +111,19 @@ def test_load_config(tmp_path):
     assert config.train.lr_schedule.warmup_ratio == 0.01
     assert config.train.lr_schedule.min_lr_ratio == 0.1
     assert config.train.lr_schedule.stable_ratio == 0.80
+    assert config.optimizer.name == "muon"
+    assert config.optimizer.lr == 0.001
+    assert config.optimizer.weight_decay == 0.1
+    assert config.optimizer.adamw.b1 == 0.9
+    assert config.optimizer.adamw.b2 == 0.999
+    assert config.optimizer.muon.ns_steps == 5
+    assert config.optimizer.aurora.pp_iterations == 2
+    assert config.optimizer.aurora.pp_beta == 0.5
+    assert config.optimizer.riemannian_aurora.outer_steps == 3
+    assert config.optimizer.riemannian_aurora.cg_steps == 20
+    assert config.optimizer.soap.b1 == 0.95
+    assert config.optimizer.soap.b2 == 0.95
+    assert config.optimizer.soap.precondition_frequency == 10
     assert config.precision.compute_dtype == "fp32"
     assert config.precision.param_dtype == "fp32"
     assert config.precision.loss_dtype == "fp32"
@@ -271,6 +300,119 @@ tokens = 12345
 def test_target_tokens_must_be_positive():
     with pytest.raises(ValueError, match="target.tokens"):
         TargetConfig(tokens=0)
+
+
+def test_missing_optimizer_section_raises(tmp_path):
+    config_path = tmp_path / "config.toml"
+    write_config(config_path)
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace(
+        """
+[optimizer]
+name = "muon"
+lr = 0.001
+weight_decay = 0.1
+""",
+        "",
+    )
+    config_path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"\[optimizer\]"):
+        load_config(config_path)
+
+
+def test_old_train_lr_and_decay_raise(tmp_path):
+    config_path = tmp_path / "config.toml"
+    write_config(config_path)
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace("steps = 2", "steps = 2\nlr = 0.001\ndecay = 0.1", 1)
+    config_path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="train.decay, train.lr"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize("name", ["aurora", "riemannian_aurora", "soap"])
+def test_loads_matrix_optimizer_variants(tmp_path, name):
+    config_path = tmp_path / "config.toml"
+    write_config(config_path)
+    text = config_path.read_text(encoding="utf-8").replace('name = "muon"', f'name = "{name}"', 1)
+    config_path.write_text(text, encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.optimizer.name == name
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"name": "not_real"},
+        {"lr": 0.0},
+        {"weight_decay": -0.1},
+    ],
+)
+def test_invalid_optimizer_config_raises(kwargs):
+    values = {"name": "muon", "lr": 0.001, "weight_decay": 0.1}
+    values.update(kwargs)
+    with pytest.raises(ValueError):
+        OptimizerConfig(**values)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"beta": -0.1},
+        {"beta": 1.0},
+        {"nesterov": "yes"},
+        {"pp_iterations": 0},
+        {"pp_beta": 0.0},
+        {"eps": 0.0},
+    ],
+)
+def test_invalid_aurora_config_raises(kwargs):
+    with pytest.raises(ValueError):
+        AuroraOptimizerConfig(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"beta": -0.1},
+        {"beta": 1.0},
+        {"nesterov": "yes"},
+        {"outer_steps": 0},
+        {"cg_steps": 0},
+        {"riemannian_eta": 0.0},
+        {"retraction_steps": 0},
+        {"eps": 0.0},
+    ],
+)
+def test_invalid_riemannian_aurora_config_raises(kwargs):
+    with pytest.raises(ValueError):
+        RiemannianAuroraOptimizerConfig(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"b1": -0.1},
+        {"b1": 1.0},
+        {"b2": -0.1},
+        {"b2": 1.0},
+        {"shampoo_beta": -0.5},
+        {"shampoo_beta": 1.0},
+        {"eps": 0.0},
+        {"precondition_frequency": 0},
+        {"max_precond_dim": 0},
+        {"precondition_1d": "yes"},
+        {"normalize_grads": "yes"},
+        {"correct_bias": "yes"},
+    ],
+)
+def test_invalid_soap_config_raises(kwargs):
+    with pytest.raises(ValueError):
+        SOAPOptimizerConfig(**kwargs)
 
 
 def test_jax_profiling_config_parses(tmp_path):

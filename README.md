@@ -53,17 +53,29 @@ Main sections:
 - `[precision]`: compute, parameter, and loss dtypes
 - `[distributed]`: replicated data-parallel device mesh settings
 - `[profiling]`: lightweight timing and future profiler capture settings
-- `[train]`: batch size, steps, peak learning rate, eval/checkpoint cadence
+- `[train]`: batch size, steps, eval/checkpoint cadence
 - `[train.lr_schedule]`: optional LR schedule; defaults to linear warmup + cosine decay
+- `[optimizer]`: optimizer family, peak learning rate, and weight decay
 - `[target]`: intended token budget; defaults to 2B tokens
 - `[data]`: either raw text data or prepared token data, plus optional prep config
 - `[eval]`: domain validation settings and optional eval-domain prep config
 - `[sampling]`: optional deterministic prompt sampling during eval
 - `[wandb]`: optional online logging
 
-Learning-rate schedules are step-based. `train.lr` is the peak LR. If
+Learning-rate schedules are step-based. `optimizer.lr` is the peak LR. If
 `[train.lr_schedule]` is omitted, training uses cosine decay with
 `warmup_ratio = 0.01` and `min_lr_ratio = 0.1`.
+
+Optimizer config:
+
+```toml
+[optimizer]
+name = "muon"
+lr = 0.001
+weight_decay = 0.1
+```
+
+Supported optimizer names are `adamw`, `muon`, `aurora`, `riemannian_aurora`, and `soap`.
 
 Cosine schedule:
 

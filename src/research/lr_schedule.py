@@ -18,17 +18,19 @@ def ratio_to_steps(total_steps: int, ratio: float) -> int:
     return max(1, int(round(total_steps * ratio)))
 
 
-def build_lr_schedule(train_config: TrainConfig) -> Callable[[int], jnp.ndarray]:
+def build_lr_schedule(train_config: TrainConfig, *, peak_lr: float) -> Callable[[int], jnp.ndarray]:
     if train_config.steps <= 0:
         raise ValueError(f"train.steps must be positive, got {train_config.steps}")
+    if peak_lr <= 0.0:
+        raise ValueError(f"peak_lr must be positive, got {peak_lr}")
 
     schedule = train_config.lr_schedule
     warmup_steps = ratio_to_steps(train_config.steps, schedule.warmup_ratio)
-    min_lr = train_config.lr * schedule.min_lr_ratio
+    min_lr = peak_lr * schedule.min_lr_ratio
 
     if schedule.type == "cosine":
         return _cosine_schedule(
-            peak_lr=train_config.lr,
+            peak_lr=peak_lr,
             min_lr=min_lr,
             total_steps=train_config.steps,
             warmup_steps=warmup_steps,
@@ -43,7 +45,7 @@ def build_lr_schedule(train_config: TrainConfig) -> Callable[[int], jnp.ndarray]
                 f"stable_steps={stable_steps}, train.steps={train_config.steps}"
             )
         return _wsd_schedule(
-            peak_lr=train_config.lr,
+            peak_lr=peak_lr,
             min_lr=min_lr,
             total_steps=train_config.steps,
             warmup_steps=warmup_steps,
