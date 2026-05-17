@@ -1,0 +1,6 @@
+step: 4000
+prompt:
+Once upon a time
+================================================================================
+sample:
+Once upon a time-|ThisWe-FQS-L�WeThe-2-F-ST-TheTheT-SK-SB-H-In-1-In-A-We-TheIf-Do-It-What-S-LK-REN-2-A-WeIt-S-L•-2-C-A-WhatThe-TheWhen(1-1MG'TheOne-A-C-The-The-TheG2M-The-21-2-TheLL�-A-The-G-1-The|
