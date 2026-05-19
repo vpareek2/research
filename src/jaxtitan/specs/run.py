@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from jaxtitan.errors import ContractError
 from jaxtitan.specs.data import DataSpec
@@ -127,6 +127,7 @@ class RunManifest:
     package: dict[str, str]
     directories: dict[str, str]
     run_dir: Path
+    data: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_config_path", Path(self.source_config_path))

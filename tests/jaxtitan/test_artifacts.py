@@ -10,50 +10,13 @@ from jaxtitan.config import load_config, resolved_config_sha256, run_spec_to_jso
 from jaxtitan.errors import ContractError
 from jaxtitan.services import initialize_run
 
-MINIMAL_CONFIG = """
-[run]
-id = "smoke"
-seed = 11
-output_dir = "runs"
 
-[model]
-name = "decoder"
-variant = "tiny"
-vocab_size = 32000
-hidden_size = 128
-num_layers = 2
-num_heads = 4
-max_seq_len = 64
-
-[optimizer]
-name = "adamw"
-weight_decay = 0.1
-
-[optimizer.schedule]
-name = "constant"
-peak_lr = 0.001
-
-[data]
-train_manifest = "data/train/manifest.json"
-tokenizer_id = "toy-tokenizer"
-
-[training]
-seq_len = 64
-global_batch_size = 2
-target_tokens = 128
-log_every_steps = 1
-checkpoint_every_steps = 10
-
-[mesh]
-axis_names = ["data"]
-axis_sizes = [1]
-"""
-
-
-def test_initialize_run_creates_canonical_artifact_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_initialize_run_creates_canonical_artifact_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minimal_config: str
+) -> None:
     monkeypatch.chdir(tmp_path)
     config_path = tmp_path / "jaxtitan.toml"
-    config_path.write_text(MINIMAL_CONFIG)
+    config_path.write_text(minimal_config)
 
     manifest = initialize_run(config_path)
     run_dir = tmp_path / "runs" / "smoke"
@@ -70,16 +33,18 @@ def test_initialize_run_creates_canonical_artifact_layout(tmp_path: Path, monkey
     ):
         assert (run_dir / relative).is_dir()
 
-    assert (run_dir / "config" / "source.toml").read_text() == MINIMAL_CONFIG
+    assert (run_dir / "config" / "source.toml").read_text() == minimal_config
     resolved = json.loads((run_dir / "config" / "resolved.json").read_text())
     assert resolved["run_id"] == "smoke"
     assert resolved["model"]["hidden_size"] == 128
 
 
-def test_initialize_run_writes_manifest_and_initial_event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_initialize_run_writes_manifest_and_initial_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minimal_config: str, prepared_dataset: Path
+) -> None:
     monkeypatch.chdir(tmp_path)
     config_path = tmp_path / "jaxtitan.toml"
-    config_path.write_text(MINIMAL_CONFIG)
+    config_path.write_text(minimal_config)
     spec = load_config(config_path)
 
     initialize_run(config_path)
@@ -92,10 +57,17 @@ def test_initialize_run_writes_manifest_and_initial_event(tmp_path: Path, monkey
     assert manifest["run_id"] == "smoke"
     assert "run_dir" not in manifest
     assert manifest["source_config_path"] == config_path.as_posix()
-    assert manifest["source_config_sha256"] == sha256(MINIMAL_CONFIG.encode("utf-8")).hexdigest()
+    assert manifest["source_config_sha256"] == sha256(minimal_config.encode("utf-8")).hexdigest()
     assert manifest["resolved_config_sha256"] == resolved_config_sha256(spec)
     assert manifest["package"] == {"name": "jaxtitan", "version": "0.1.0"}
     assert manifest["directories"]["checkpoints"] == "checkpoints"
+    assert manifest["data"]["manifest_path"] == prepared_dataset.as_posix()
+    assert manifest["data"]["tokenizer_id"] == "toy-tokenizer"
+    assert manifest["data"]["total_tokens"] == 8
+    assert manifest["data"]["train_tokens"] == 6
+    assert manifest["data"]["val_tokens"] == 2
+    assert manifest["data"]["shard_count"] == 2
+    assert manifest["data"]["token_bytes_path"] == "token_bytes.bin"
 
     assert len(events) == 1
     assert events[0]["type"] == "run_initialized"
@@ -104,10 +76,12 @@ def test_initialize_run_writes_manifest_and_initial_event(tmp_path: Path, monkey
     assert events[0]["resolved_config_sha256"] == manifest["resolved_config_sha256"]
 
 
-def test_initialize_run_refuses_to_overwrite_existing_run_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_initialize_run_refuses_to_overwrite_existing_run_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minimal_config: str
+) -> None:
     monkeypatch.chdir(tmp_path)
     config_path = tmp_path / "jaxtitan.toml"
-    config_path.write_text(MINIMAL_CONFIG)
+    config_path.write_text(minimal_config)
     (tmp_path / "runs" / "smoke").mkdir(parents=True)
 
     with pytest.raises(ContractError, match="already exists"):
@@ -117,11 +91,11 @@ def test_initialize_run_refuses_to_overwrite_existing_run_dir(tmp_path: Path, mo
 
 
 def test_initialize_run_does_not_leave_final_dir_for_invalid_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minimal_config: str
 ) -> None:
     monkeypatch.chdir(tmp_path)
     config_path = tmp_path / "bad.toml"
-    config_path.write_text(MINIMAL_CONFIG.replace("max_seq_len = 64", "max_seq_len = 32"))
+    config_path.write_text(minimal_config.replace("max_seq_len = 64", "max_seq_len = 32"))
 
     with pytest.raises(Exception):
         initialize_run(config_path)
@@ -130,10 +104,27 @@ def test_initialize_run_does_not_leave_final_dir_for_invalid_config(
     assert not (tmp_path / "runs").exists()
 
 
-def test_resolved_config_artifact_matches_canonical_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_initialize_run_does_not_leave_final_dir_for_invalid_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minimal_config_builder
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    missing_manifest = tmp_path / "data" / "train" / "manifest.json"
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(minimal_config_builder(missing_manifest))
+
+    with pytest.raises(ContractError, match="manifest does not exist"):
+        initialize_run(config_path)
+
+    assert not (tmp_path / "runs" / "smoke").exists()
+    assert not (tmp_path / "runs").exists()
+
+
+def test_resolved_config_artifact_matches_canonical_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minimal_config: str
+) -> None:
     monkeypatch.chdir(tmp_path)
     config_path = tmp_path / "jaxtitan.toml"
-    config_path.write_text(MINIMAL_CONFIG)
+    config_path.write_text(minimal_config)
     spec = load_config(config_path)
 
     initialize_run(config_path)

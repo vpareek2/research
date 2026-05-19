@@ -12,7 +12,8 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from jaxtitan import __version__
-from jaxtitan.config import load_config, resolved_config_sha256, run_spec_to_dict, run_spec_to_json, source_config_sha256
+from jaxtitan.config import load_config, resolved_config_sha256, run_spec_to_json, source_config_sha256
+from jaxtitan.data import dataset_manifest_summary, validate_dataset_manifest
 from jaxtitan.errors import ContractError
 from jaxtitan.specs.run import RunManifest, RunSpec
 
@@ -37,6 +38,7 @@ def initialize_run(config_path: str | Path) -> RunManifest:
     source_path = Path(config_path)
     spec = load_config(source_path)
     source_toml = source_path.read_text()
+    dataset_manifest = validate_dataset_manifest(spec.data.train_manifest, tokenizer_id=spec.data.tokenizer_id)
     created_at = _utc_now()
     source_hash = source_config_sha256(source_path)
     resolved_hash = resolved_config_sha256(spec)
@@ -59,6 +61,7 @@ def initialize_run(config_path: str | Path) -> RunManifest:
             "summaries": "summaries",
         },
         run_dir=spec.dirs.run_dir,
+        data=dataset_manifest_summary(dataset_manifest),
     )
     LocalArtifactWriter.initialize(source_toml=source_toml, resolved=spec, manifest=manifest)
     return manifest

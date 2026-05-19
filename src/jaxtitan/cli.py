@@ -8,6 +8,7 @@ import sys
 
 from jaxtitan import __version__
 from jaxtitan.config import load_config, run_spec_to_json
+from jaxtitan.data import prepared_dataset_manifest_to_json, validate_dataset_manifest
 from jaxtitan.errors import JaxtitanError
 from jaxtitan.services import initialize_run
 
@@ -23,6 +24,15 @@ def build_parser() -> argparse.ArgumentParser:
     check_parser = config_commands.add_parser("check", help="Validate a TOML config against Jaxtitan contracts.")
     check_parser.add_argument("path", help="Path to a Jaxtitan TOML config.")
     check_parser.add_argument("--json", action="store_true", help="Print resolved RunSpec JSON.")
+
+    data_parser = commands.add_parser("data", help="Inspect and validate prepared data artifacts.")
+    data_commands = data_parser.add_subparsers(dest="data_command", required=True)
+
+    data_check_parser = data_commands.add_parser("check", help="Validate a prepared-token manifest.")
+    data_check_parser.add_argument("path", help="Path to a prepared-token manifest JSON file.")
+    data_check_parser.add_argument("--tokenizer", required=True, help="Expected tokenizer id.")
+    data_check_parser.add_argument("--verify-checksums", action="store_true", help="Verify shard and token-byte checksums.")
+    data_check_parser.add_argument("--json", action="store_true", help="Print validated manifest JSON.")
 
     run_parser = commands.add_parser("run", help="Create and inspect local run artifacts.")
     run_commands = run_parser.add_subparsers(dest="run_command", required=True)
@@ -44,6 +54,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(run_spec_to_json(spec))
             else:
                 print(f"valid: {spec.run_id}")
+            return 0
+
+        if args.command == "data" and args.data_command == "check":
+            manifest = validate_dataset_manifest(
+                args.path,
+                tokenizer_id=args.tokenizer,
+                verify_checksums=args.verify_checksums,
+            )
+            if args.json:
+                print(prepared_dataset_manifest_to_json(manifest))
+            else:
+                print(f"valid: {manifest.manifest_path} tokens={manifest.num_tokens}")
             return 0
 
         if args.command == "run" and args.run_command == "init":

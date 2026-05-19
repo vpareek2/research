@@ -87,9 +87,9 @@ def test_cli_config_check_json(tmp_path: Path) -> None:
     assert json.loads(result.stdout)["run_id"] == "smoke"
 
 
-def test_cli_run_init(tmp_path: Path) -> None:
+def test_cli_run_init(tmp_path: Path, minimal_config: str) -> None:
     config_path = tmp_path / "jaxtitan.toml"
-    config_path.write_text(MINIMAL_CONFIG)
+    config_path.write_text(minimal_config)
 
     result = subprocess.run(
         [sys.executable, "-m", "jaxtitan.cli", "run", "init", str(config_path)],
@@ -106,9 +106,9 @@ def test_cli_run_init(tmp_path: Path) -> None:
     assert (run_dir / "manifest.json").is_file()
 
 
-def test_cli_run_init_existing_dir_fails_cleanly(tmp_path: Path) -> None:
+def test_cli_run_init_existing_dir_fails_cleanly(tmp_path: Path, minimal_config: str) -> None:
     config_path = tmp_path / "jaxtitan.toml"
-    config_path.write_text(MINIMAL_CONFIG)
+    config_path.write_text(minimal_config)
     (tmp_path / "runs" / "smoke").mkdir(parents=True)
 
     result = subprocess.run(
@@ -133,4 +133,52 @@ def test_cli_missing_config_fails_cleanly(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "failed to read config" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_cli_data_check_json(tmp_path: Path, prepared_dataset: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "jaxtitan.cli",
+            "data",
+            "check",
+            str(prepared_dataset),
+            "--tokenizer",
+            "toy-tokenizer",
+            "--json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert payload["tokenizer_id"] == "toy-tokenizer"
+    assert payload["num_tokens"] == 8
+
+
+def test_cli_data_check_tokenizer_mismatch_fails_cleanly(tmp_path: Path, prepared_dataset: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "jaxtitan.cli",
+            "data",
+            "check",
+            str(prepared_dataset),
+            "--tokenizer",
+            "wrong-tokenizer",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 2
+    assert "does not match config tokenizer" in result.stderr
     assert "Traceback" not in result.stderr
