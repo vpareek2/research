@@ -16,6 +16,7 @@ from jaxtitan.errors import ContractError
 from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch, place_replicated
 from jaxtitan.models import build_model
 from jaxtitan.optim import build_optimizer
+from jaxtitan.runtime.resume import checkpoint_metadata, validate_resume_compat, validate_resume_metadata
 from jaxtitan.services import LocalArtifactWriter, LocalOrbaxCheckpointService, initialize_run
 from jaxtitan.specs.run import RunSpec
 from jaxtitan.state import DatasetState, HostState, TrainState
@@ -99,7 +100,9 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
     try:
         if resume:
             try:
+                validate_resume_metadata(checkpoint_service.restore_latest_metadata(), runtime_spec)
                 restored = checkpoint_service.restore_latest(train_state)
+                validate_resume_compat(restored, runtime_spec)
             except Exception as exc:
                 writer.append_event(
                     {
@@ -117,6 +120,8 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
                     **_event("training_resumed", runtime_spec),
                     "checkpoint_step": restored.step,
                     "checkpoint_path": restored.path,
+                    "compat_checked": True,
+                    "runtime_fingerprint": restored.metadata["runtime_fingerprint"],
                     "step": _scalar_int(train_state.step),
                     "tokens_seen": _scalar_int(train_state.tokens_seen),
                     "dataset_token_offset": dataset_state.token_offset,
@@ -239,13 +244,7 @@ def _save_checkpoint(
         train_state,
         dataset_state,
         next_host_state,
-        {
-            "run_id": spec.run_id,
-            "step": step,
-            "tokens_seen": row["tokens_seen"],
-            "target_tokens": spec.training.target_tokens,
-            "reason": reason,
-        },
+        checkpoint_metadata(spec, row, reason=reason),
     )
     writer.append_event(
         {

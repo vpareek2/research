@@ -35,6 +35,8 @@ class CheckpointService(Protocol):
 
     def restore_latest(self, template_train_state: TrainState) -> CheckpointRestore: ...
 
+    def restore_latest_metadata(self) -> dict[str, Any]: ...
+
     def latest_step(self) -> int | None: ...
 
     def latest_path(self) -> Path | None: ...
@@ -114,6 +116,18 @@ class LocalOrbaxCheckpointService:
             step=step,
             path=self.latest_path() or self.checkpoints_dir / f"{step:06d}",
         )
+
+    def restore_latest_metadata(self) -> dict[str, Any]:
+        """Restore only metadata from the newest checkpoint."""
+
+        step = self.latest_step()
+        if step is None:
+            raise ContractError(f"no checkpoints found in {self.checkpoints_dir}")
+        restored = self._manager.restore(
+            step,
+            args=self._ocp.args.Composite(metadata=self._ocp.args.JsonRestore()),
+        )
+        return dict(_require_mapping(restored["metadata"], "metadata"))
 
     def latest_step(self) -> int | None:
         """Return the latest checkpoint step if one exists."""

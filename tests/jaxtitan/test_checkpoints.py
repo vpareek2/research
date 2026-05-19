@@ -29,6 +29,7 @@ def test_orbax_checkpoint_restores_train_dataset_host_and_metadata(tmp_path) -> 
         {"run_id": "smoke", "note": "checkpoint"},
     )
     restored = service.restore_latest(initialize_train_state(built.state, optimizer.transform, seed=9))
+    metadata = service.restore_latest_metadata()
 
     assert service.latest_step() == 1
     assert service.latest_path() == tmp_path / "run" / "checkpoints" / "000001"
@@ -37,6 +38,7 @@ def test_orbax_checkpoint_restores_train_dataset_host_and_metadata(tmp_path) -> 
     assert restored.dataset_state == dataset_state
     assert restored.host_state == host_state
     assert restored.metadata == {"run_id": "smoke", "note": "checkpoint"}
+    assert metadata == {"run_id": "smoke", "note": "checkpoint"}
     assert _trees_equal(restored.train_state.model, train_state.model)
     assert _trees_equal(restored.train_state.opt_state, train_state.opt_state)
     assert jnp.array_equal(restored.train_state.step, train_state.step)

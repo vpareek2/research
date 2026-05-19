@@ -177,7 +177,7 @@ def test_run_training_resume_continues_from_latest_checkpoint(
     )
     first = run_training(config_path)
     config_path.write_text(
-        _training_config(manifest, target_tokens=16, log_every_steps=1, checkpoint_every_steps=1)
+        _training_config(manifest, target_tokens=16, log_every_steps=5, checkpoint_every_steps=2)
     )
 
     resumed = run_training(config_path, resume=True)
@@ -194,8 +194,189 @@ def test_run_training_resume_continues_from_latest_checkpoint(
     assert "training_resumed" in [event["type"] for event in events]
     resumed_event = next(event for event in events if event["type"] == "training_resumed")
     assert resumed_event["checkpoint_step"] == 1
+    assert resumed_event["compat_checked"] is True
+    assert resumed_event["runtime_fingerprint"]
     assert resumed_event["dataset_token_offset"] == 8
     assert (run_dir / "checkpoints" / "000002").is_dir()
+
+
+@pytest.mark.parametrize(
+    ("change", "match"),
+    [
+        ({"hidden_size": 16}, r"compatibility\.model\.hidden_size"),
+        ({"weight_decay": 0.2}, r"compatibility\.optimizer\.weight_decay"),
+        ({"seq_len": 2}, r"compatibility\.training\.seq_len"),
+        ({"global_batch_size": 1}, r"compatibility\.training\.global_batch_size"),
+        ({"axis_sizes": (2,)}, r"compatibility\.mesh\.axis_sizes"),
+        ({"seed": 9}, r"compatibility\.seed"),
+    ],
+)
+def test_run_training_resume_rejects_unsafe_config_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+    change: dict,
+    match: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "unsafe-resume",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(manifest, target_tokens=8, log_every_steps=1, checkpoint_every_steps=1)
+    )
+    run_training(config_path)
+    config_path.write_text(
+        _training_config(manifest, target_tokens=16, log_every_steps=1, checkpoint_every_steps=1, **change)
+    )
+
+    with pytest.raises(ContractError, match=match):
+        run_training(config_path, resume=True)
+
+    events = _jsonl(tmp_path / "runs" / "loop" / "events.jsonl")
+    assert events[-2]["type"] == "checkpoint_restore_failed"
+    assert events[-1]["type"] == "training_failed"
+
+
+def test_run_training_resume_rejects_data_manifest_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    first_manifest = prepared_dataset_factory(
+        "data-resume-first",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    second_manifest = prepared_dataset_factory(
+        "data-resume-second",
+        shard_token_groups=(tuple(range(10, 40)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(first_manifest, target_tokens=8, log_every_steps=1, checkpoint_every_steps=1)
+    )
+    run_training(config_path)
+    config_path.write_text(
+        _training_config(second_manifest, target_tokens=16, log_every_steps=1, checkpoint_every_steps=1)
+    )
+
+    with pytest.raises(ContractError, match=r"compatibility\.data\.train_manifest"):
+        run_training(config_path, resume=True)
+
+
+def test_run_training_resume_rejects_tokenizer_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "tokenizer-first",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(manifest, target_tokens=8, log_every_steps=1, checkpoint_every_steps=1)
+    )
+    run_training(config_path)
+    manifest_json = json.loads(manifest.read_text())
+    manifest_json["tokenizer"]["name"] = "other-tokenizer"
+    manifest.write_text(json.dumps(manifest_json, sort_keys=True))
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            tokenizer_id="other-tokenizer",
+        )
+    )
+
+    with pytest.raises(ContractError, match=r"compatibility\.data\.tokenizer_id"):
+        run_training(config_path, resume=True)
+
+
+def test_run_training_resume_rejects_auto_cosine_schedule_target_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "cosine-auto-resume",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            schedule_name="cosine",
+        )
+    )
+    run_training(config_path)
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            schedule_name="cosine",
+        )
+    )
+
+    with pytest.raises(ContractError, match=r"compatibility\.optimizer\.schedule\.total_steps"):
+        run_training(config_path, resume=True)
+
+
+def test_run_training_resume_allows_explicit_cosine_schedule_target_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "cosine-explicit-resume",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            schedule_name="cosine",
+            total_steps=2,
+        )
+    )
+    run_training(config_path)
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            schedule_name="cosine",
+            total_steps=2,
+        )
+    )
+
+    resumed = run_training(config_path, resume=True)
+
+    assert resumed.steps == 2
+    assert resumed.tokens_seen == 16
 
 
 def test_run_training_resume_records_restore_failure_without_checkpoint(
@@ -314,18 +495,28 @@ def _training_config(
     target_tokens: int,
     log_every_steps: int,
     checkpoint_every_steps: int = 10,
+    seed: int = 7,
+    hidden_size: int = 8,
+    weight_decay: float = 0.0,
+    schedule_name: str = "constant",
+    total_steps: int | None = None,
+    tokenizer_id: str = "toy-tokenizer",
+    seq_len: int = 4,
+    global_batch_size: int = 2,
+    axis_sizes: tuple[int, ...] = (1,),
 ) -> str:
+    total_steps_line = "" if total_steps is None else f"total_steps = {total_steps}\n"
     return f"""
 [run]
 id = "loop"
-seed = 7
+seed = {seed}
 output_dir = "runs"
 
 [model]
 name = "decoder"
 variant = "tiny"
 vocab_size = 64
-hidden_size = 8
+hidden_size = {hidden_size}
 intermediate_size = 16
 num_layers = 1
 num_heads = 2
@@ -335,26 +526,27 @@ compute_dtype = "float32"
 
 [optimizer]
 name = "adamw"
-weight_decay = 0.0
+weight_decay = {weight_decay}
 
 [optimizer.schedule]
-name = "constant"
+name = "{schedule_name}"
 peak_lr = 0.001
+{total_steps_line}
 
 [data]
 train_manifest = "{Path(train_manifest).as_posix()}"
-tokenizer_id = "toy-tokenizer"
+tokenizer_id = "{tokenizer_id}"
 
 [training]
-seq_len = 4
-global_batch_size = 2
+seq_len = {seq_len}
+global_batch_size = {global_batch_size}
 target_tokens = {target_tokens}
 log_every_steps = {log_every_steps}
 checkpoint_every_steps = {checkpoint_every_steps}
 
 [mesh]
 axis_names = ["data"]
-axis_sizes = [1]
+axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 """
 
 
