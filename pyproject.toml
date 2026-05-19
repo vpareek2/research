@@ -1,5 +1,5 @@
 [project]
-name = "research"
+name = "jaxtitan"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
@@ -22,19 +22,7 @@ dependencies = [
 ]
 
 [project.scripts]
-pretrain = "research.pretrain:main"
-experiment = "research.utils.experiment:main"
-eval-checkpoint = "research.utils.eval_checkpoint:main"
-eval-core = "research.utils.core_eval:main"
-summarize-run = "research.utils.run_summary:main"
-register-run = "research.utils.run_registry:main"
-list-runs = "research.utils.run_registry:list_main"
-prepare-data = "research.prepare_data:main"
-preflight = "research.preflight:main"
-inspect-batch = "research.utils.inspect_batch:main"
-param-count = "research.utils.param_count:main"
-profile = "research.utils.profile_run:main"
-train-budget = "research.utils.train_budget:main"
+jaxtitan = "jaxtitan.cli:main"
 
 [build-system]
 requires = ["setuptools>=69"]
@@ -42,3 +30,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["jaxtitan*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/jaxtitan"]

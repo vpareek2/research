@@ -1,7 +1,7 @@
 __pycache__/
 .pytest_cache/
 .venv/
-research.egg-info/
+*.egg-info/
 /data/
 profiles/
 runs/**/checkpoints/
