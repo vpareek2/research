@@ -3,10 +3,12 @@
 from dataclasses import dataclass
 from typing import Any
 
+from flax import struct
+
 PyTree = Any
 
 
-@dataclass(frozen=True, slots=True)
+@struct.dataclass
 class RngState:
     """Explicit RNG streams for deterministic JAX execution."""
 
@@ -16,7 +18,7 @@ class RngState:
     sample: PyTree
 
 
-@dataclass(frozen=True, slots=True)
+@struct.dataclass
 class TrainState:
     """Device-relevant training state passed through compiled steps."""
 

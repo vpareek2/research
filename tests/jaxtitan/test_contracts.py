@@ -1,6 +1,7 @@
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
+import jax
 import pytest
 
 from jaxtitan.errors import ContractError
@@ -73,3 +74,15 @@ def test_state_and_metrics_contracts_are_constructible() -> None:
     assert host_state.dataset == dataset_state
     assert StepMetrics(loss_sum=2.0, token_count=4, lr=1e-3).token_count == 4
     assert EvalMetrics(loss_sum=3.0, token_count=6, num_batches=2).num_batches == 2
+
+
+def test_device_state_is_pytree_and_host_state_is_not() -> None:
+    rng = RngState(train=1, data=2, eval=3, sample=4)
+    train_state = TrainState(step=0, tokens_seen=0, model={"weight": 5}, opt_state={"momentum": 6}, rng=rng)
+    dataset_state = DatasetState(shard_index=0, token_offset=0, epoch=0)
+    host_state = HostState(dataset=dataset_state, last_checkpoint_step=0, wallclock_start_ns=123, run_id="smoke")
+
+    assert jax.tree.leaves(rng) == [1, 2, 3, 4]
+    assert jax.tree.leaves(train_state) == [0, 0, 5, 6, 1, 2, 3, 4]
+    assert jax.tree.leaves(dataset_state) == [dataset_state]
+    assert jax.tree.leaves(host_state) == [host_state]

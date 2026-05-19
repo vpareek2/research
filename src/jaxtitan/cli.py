@@ -38,6 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser = run_commands.add_parser("init", help="Initialize a local run directory from a TOML config.")
     init_parser.add_argument("path", help="Path to a Jaxtitan TOML config.")
 
+    train_parser = run_commands.add_parser("train", help="Run a minimal local training loop from a TOML config.")
+    train_parser.add_argument("path", help="Path to a Jaxtitan TOML config.")
+
     return parser
 
 
@@ -69,6 +72,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "run" and args.run_command == "init":
             manifest = initialize_run(args.path)
             print(manifest.run_dir)
+            return 0
+
+        if args.command == "run" and args.run_command == "train":
+            from jaxtitan.runtime import run_training
+
+            summary = run_training(args.path)
+            print(summary.run_dir)
             return 0
     except JaxtitanError as exc:
         print(f"error: {exc}", file=sys.stderr)
