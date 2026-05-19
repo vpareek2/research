@@ -36,6 +36,7 @@ class TomlScheduleSection:
     warmup_steps: int = 0
     total_steps: int | None = None
     min_lr_ratio: float = 0.0
+    stable_steps: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

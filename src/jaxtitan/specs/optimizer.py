@@ -20,6 +20,7 @@ class ScheduleSpec:
     warmup_steps: int = 0
     total_steps: int | None = None
     min_lr_ratio: float = 0.0
+    stable_steps: int | None = None
 
     def __post_init__(self) -> None:
         if self.name not in _SCHEDULE_NAMES:
@@ -32,6 +33,8 @@ class ScheduleSpec:
             raise ContractError(f"optimizer.schedule.total_steps must be positive, got {self.total_steps}")
         if not 0.0 <= self.min_lr_ratio <= 1.0:
             raise ContractError(f"optimizer.schedule.min_lr_ratio must be in [0, 1], got {self.min_lr_ratio}")
+        if self.stable_steps is not None and self.stable_steps < 0:
+            raise ContractError(f"optimizer.schedule.stable_steps must be non-negative, got {self.stable_steps}")
 
 
 @dataclass(frozen=True, slots=True)

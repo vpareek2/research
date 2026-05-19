@@ -151,6 +151,7 @@ def _schedule_section(raw: Mapping[str, Any]) -> TomlScheduleSection:
         warmup_steps=int(raw.get("warmup_steps", 0)),
         total_steps=_optional_int(raw, "total_steps", "optimizer.schedule"),
         min_lr_ratio=float(raw.get("min_lr_ratio", 0.0)),
+        stable_steps=_optional_int(raw, "stable_steps", "optimizer.schedule"),
     )
 
 
