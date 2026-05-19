@@ -95,6 +95,26 @@ def test_load_config_accepts_explicit_model_runtime_fields(tmp_path: Path) -> No
     assert spec.model.compute_dtype == "float32"
 
 
+def test_load_config_accepts_validation_eval(tmp_path: Path) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG
+        + """
+[[evals]]
+name = "validation"
+every_steps = 10
+num_batches = 2
+"""
+    )
+
+    spec = load_config(config_path)
+
+    assert len(spec.evals) == 1
+    assert spec.evals[0].name == "validation"
+    assert spec.evals[0].every_steps == 10
+    assert spec.evals[0].num_batches == 2
+
+
 def test_load_config_rejects_cross_spec_mismatch(tmp_path: Path) -> None:
     config_path = tmp_path / "bad.toml"
     config_path.write_text(MINIMAL_CONFIG.replace("max_seq_len = 64", "max_seq_len = 32"))

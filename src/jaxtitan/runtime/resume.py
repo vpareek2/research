@@ -55,7 +55,13 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
     return ResumeCompatibility(payload=payload, runtime_fingerprint=_hash(payload))
 
 
-def checkpoint_metadata(spec: RunSpec, row: Mapping[str, Any], *, reason: str) -> dict[str, Any]:
+def checkpoint_metadata(
+    spec: RunSpec,
+    row: Mapping[str, Any],
+    *,
+    reason: str,
+    eval_row: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build canonical metadata saved with a checkpoint."""
 
     compat = build_resume_compat(spec)
@@ -69,6 +75,10 @@ def checkpoint_metadata(spec: RunSpec, row: Mapping[str, Any], *, reason: str) -
             "step": step,
             "tokens_seen": tokens_seen,
             "reason": reason,
+        },
+        "metrics": {
+            "train_loss": _required_row_float(row, "loss"),
+            "eval_loss": None if eval_row is None else _required_row_float(eval_row, "loss"),
         },
         "runtime_fingerprint": compat.runtime_fingerprint,
         "compatibility": compat.payload,
@@ -136,6 +146,13 @@ def _required_row_int(row: Mapping[str, Any], key: str) -> int:
     if not isinstance(value, int):
         raise ContractError(f"checkpoint metadata row {key} must be an integer")
     return value
+
+
+def _required_row_float(row: Mapping[str, Any], key: str) -> float:
+    value = row.get(key)
+    if not isinstance(value, int | float):
+        raise ContractError(f"checkpoint metadata row {key} must be numeric")
+    return float(value)
 
 
 def _require_int_equal(raw: Mapping[str, Any], key: str, expected: int) -> None:

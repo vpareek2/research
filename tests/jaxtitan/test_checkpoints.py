@@ -64,6 +64,26 @@ def test_multiple_saves_keep_only_max_to_keep_checkpoints(tmp_path) -> None:
     service.close()
 
 
+def test_protected_checkpoint_survives_max_to_keep_cleanup(tmp_path) -> None:
+    built = build_model(_tiny_spec(), seed=0)
+    optimizer = _optimizer(built.state, built.metadata)
+    train_state = initialize_train_state(built.state, optimizer.transform, seed=1)
+    service = LocalOrbaxCheckpointService(tmp_path / "run", max_to_keep=2)
+
+    for step in (1, 2, 3):
+        if step == 3:
+            service.set_protected_steps({1})
+        dataset_state = DatasetState(shard_index=0, token_offset=step * 8, epoch=0, shuffle_state=None)
+        host_state = HostState(dataset=dataset_state, last_checkpoint_step=step, wallclock_start_ns=123, run_id="smoke")
+        train_state = train_state.replace(step=jnp.asarray(step, dtype=jnp.int32))
+        service.save(step, train_state, dataset_state, host_state, {"step": step})
+
+    assert service.latest_step() == 3
+    assert "000001" in {path.name for path in (tmp_path / "run" / "checkpoints").iterdir()}
+    assert "000003" in {path.name for path in (tmp_path / "run" / "checkpoints").iterdir()}
+    service.close()
+
+
 def test_restore_latest_fails_when_no_checkpoint_exists(tmp_path) -> None:
     built = build_model(_tiny_spec(), seed=0)
     optimizer = _optimizer(built.state, built.metadata)

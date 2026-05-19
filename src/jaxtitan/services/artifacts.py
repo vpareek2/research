@@ -27,6 +27,8 @@ class ArtifactWriter(Protocol):
 
     def append_eval_metrics(self, row: Mapping[str, Any]) -> None: ...
 
+    def write_checkpoint_index(self, index: Mapping[str, Any]) -> None: ...
+
     def write_summary(self, summary: Mapping[str, Any]) -> None: ...
 
 
@@ -118,6 +120,9 @@ class LocalArtifactWriter:
 
     def append_eval_metrics(self, row: Mapping[str, Any]) -> None:
         self._append_jsonl(self.run_dir / "metrics" / "eval.jsonl", row)
+
+    def write_checkpoint_index(self, index: Mapping[str, Any]) -> None:
+        self._write_json(self.run_dir / "checkpoints" / "index.json", index)
 
     def write_summary(self, summary: Mapping[str, Any]) -> None:
         self._write_json(self.run_dir / "summaries" / "final.json", summary)

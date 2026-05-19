@@ -41,6 +41,7 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     events = _jsonl(run_dir / "events.jsonl")
     metrics = _jsonl(run_dir / "metrics" / "train.jsonl")
     final = json.loads((run_dir / "summaries" / "final.json").read_text())
+    index = json.loads((run_dir / "checkpoints" / "index.json").read_text())
 
     assert [event["type"] for event in events] == [
         "run_initialized",
@@ -63,6 +64,24 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert final["steps"] == metrics[-1]["step"]
     assert final["tokens_seen"] == metrics[-1]["tokens_seen"]
     assert final["final_loss"] == pytest.approx(metrics[-1]["loss"])
+    assert final["latest_checkpoint_path"] == "checkpoints/000002"
+    assert final["best_eval_step"] is None
+    assert final["best_eval_loss"] is None
+    assert final["best_checkpoint_path"] is None
+    assert index["latest_step"] == 2
+    assert index["latest_checkpoint_path"] == "checkpoints/000002"
+    assert index["best_eval_step"] is None
+    assert index["records"] == [
+        {
+            "checkpoint_path": "checkpoints/000002",
+            "eval_loss": None,
+            "reason": "final",
+            "retained": True,
+            "step": 2,
+            "tokens_seen": 16,
+            "train_loss": metrics[-1]["loss"],
+        }
+    ]
     assert (run_dir / "checkpoints" / "000002").is_dir()
 
 
@@ -160,6 +179,253 @@ def test_run_training_records_failure_when_dataset_exhausts(
     assert not (run_dir / "summaries" / "final.json").exists()
 
 
+def test_run_training_with_validation_eval_writes_eval_metrics_and_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "eval-loop",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            eval_every_steps=1,
+            eval_num_batches=2,
+        )
+    )
+
+    summary = run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    eval_metrics = _jsonl(run_dir / "metrics" / "eval.jsonl")
+    final = json.loads((run_dir / "summaries" / "final.json").read_text())
+    index = json.loads((run_dir / "checkpoints" / "index.json").read_text())
+    events = _jsonl(run_dir / "events.jsonl")
+    assert [row["step"] for row in eval_metrics] == [1, 2]
+    assert eval_metrics[-1]["eval_name"] == "validation"
+    assert eval_metrics[-1]["num_batches"] == 2
+    assert eval_metrics[-1]["token_count"] == 16
+    assert eval_metrics[-1]["token_start"] == 25
+    assert eval_metrics[-1]["token_end"] == 41
+    assert eval_metrics[-1]["examples"] == 4
+    assert eval_metrics[-1]["target_tokens"] == 16
+    assert final["final_eval_loss"] == pytest.approx(eval_metrics[-1]["loss"])
+    assert final["final_eval_token_count"] == eval_metrics[-1]["token_count"]
+    assert final["final_eval_num_batches"] == eval_metrics[-1]["num_batches"]
+    assert final["best_eval_loss"] == pytest.approx(index["best_eval_loss"])
+    assert final["best_checkpoint_path"] == index["best_checkpoint_path"]
+    assert index["latest_step"] == 2
+    assert index["latest_checkpoint_path"] == "checkpoints/000002"
+    assert len(index["records"]) == 1
+    assert index["records"][0]["step"] == 2
+    assert index["records"][0]["reason"] == "final"
+    assert index["records"][0]["eval_loss"] == pytest.approx(eval_metrics[-1]["loss"])
+    assert index["records"][0]["train_loss"] == pytest.approx(_jsonl(run_dir / "metrics" / "train.jsonl")[-1]["loss"])
+    assert summary.final_eval_loss == pytest.approx(eval_metrics[-1]["loss"])
+    assert [event["type"] for event in events if event["type"].startswith("eval_")] == [
+        "eval_started",
+        "eval_completed",
+        "eval_started",
+        "eval_completed",
+    ]
+
+
+def test_run_training_runs_final_validation_when_cadence_misses_final_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "eval-final",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=24,
+            log_every_steps=1,
+            eval_every_steps=2,
+            eval_num_batches=1,
+        )
+    )
+
+    run_training(config_path)
+
+    eval_metrics = _jsonl(tmp_path / "runs" / "loop" / "metrics" / "eval.jsonl")
+    assert [row["step"] for row in eval_metrics] == [2, 3]
+
+
+def test_run_training_scores_checkpoint_even_when_eval_cadence_does_not_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "checkpoint-score",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            eval_every_steps=10,
+            eval_num_batches=1,
+        )
+    )
+
+    run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    events = _jsonl(run_dir / "events.jsonl")
+    index = json.loads((run_dir / "checkpoints" / "index.json").read_text())
+    assert [row["step"] for row in _jsonl(run_dir / "metrics" / "eval.jsonl")] == [1]
+    assert index["records"][0]["step"] == 1
+    assert index["records"][0]["eval_loss"] is not None
+    assert [event["type"] for event in events[-4:]] == [
+        "eval_started",
+        "eval_completed",
+        "checkpoint_saved",
+        "training_completed",
+    ]
+
+
+def test_run_training_eval_uses_validation_manifest_when_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    train_manifest = prepared_dataset_factory(
+        "eval-train",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=25,
+    )
+    validation_manifest = prepared_dataset_factory(
+        "eval-validation",
+        shard_token_groups=(tuple(range(100, 140)),),
+        train_tokens=10,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            train_manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            eval_every_steps=1,
+            eval_num_batches=1,
+            validation_manifest=validation_manifest,
+        )
+    )
+
+    run_training(config_path)
+
+    eval_metrics = _jsonl(tmp_path / "runs" / "loop" / "metrics" / "eval.jsonl")
+    assert eval_metrics[-1]["token_start"] == 10
+    assert eval_metrics[-1]["token_end"] == 18
+
+
+def test_run_training_rejects_unsupported_eval_runtime_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "bad-eval",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            eval_every_steps=1,
+            eval_name="perplexity",
+        )
+    )
+
+    with pytest.raises(ContractError, match="validation"):
+        run_training(config_path)
+
+    events = _jsonl(tmp_path / "runs" / "loop" / "events.jsonl")
+    assert events[-1]["type"] == "training_failed"
+
+
+def test_run_training_rejects_multiple_eval_runtime_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "multi-eval",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            eval_every_steps=1,
+            second_eval=True,
+        )
+    )
+
+    with pytest.raises(ContractError, match="exactly one eval"):
+        run_training(config_path)
+
+
+def test_run_training_eval_failure_records_eval_and_training_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "small-val",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            eval_every_steps=1,
+            eval_num_batches=1,
+        )
+    )
+
+    with pytest.raises(ContractError, match="val split"):
+        run_training(config_path)
+
+    events = _jsonl(tmp_path / "runs" / "loop" / "events.jsonl")
+    assert events[-3]["type"] == "eval_started"
+    assert events[-2]["type"] == "eval_failed"
+    assert events[-1]["type"] == "training_failed"
+    assert not (tmp_path / "runs" / "loop" / "metrics" / "eval.jsonl").exists()
+
+
 def test_run_training_resume_continues_from_latest_checkpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -198,6 +464,84 @@ def test_run_training_resume_continues_from_latest_checkpoint(
     assert resumed_event["runtime_fingerprint"]
     assert resumed_event["dataset_token_offset"] == 8
     assert (run_dir / "checkpoints" / "000002").is_dir()
+
+
+def test_run_training_resume_with_eval_preserves_train_cursor_and_restarts_eval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "resume-eval",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            eval_every_steps=1,
+        )
+    )
+    run_training(config_path)
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            eval_every_steps=1,
+        )
+    )
+
+    run_training(config_path, resume=True)
+
+    run_dir = tmp_path / "runs" / "loop"
+    train_metrics = _jsonl(run_dir / "metrics" / "train.jsonl")
+    eval_metrics = _jsonl(run_dir / "metrics" / "eval.jsonl")
+    resumed_event = next(event for event in _jsonl(run_dir / "events.jsonl") if event["type"] == "training_resumed")
+    assert resumed_event["dataset_token_offset"] == 8
+    assert [row["token_start"] for row in train_metrics] == [0, 8]
+    assert [row["step"] for row in eval_metrics] == [1, 2]
+    assert [row["token_start"] for row in eval_metrics] == [25, 25]
+    index = json.loads((run_dir / "checkpoints" / "index.json").read_text())
+    assert [record["step"] for record in index["records"]] == [1, 2]
+    assert index["latest_step"] == 2
+
+
+def test_run_training_retains_latest_and_best_checkpoint_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "retention",
+        shard_token_groups=(tuple(range(0, 60)),),
+        train_tokens=33,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=24,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            eval_every_steps=1,
+        )
+    )
+
+    run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    index = json.loads((run_dir / "checkpoints" / "index.json").read_text())
+    assert (run_dir / index["latest_checkpoint_path"]).is_dir()
+    assert index["best_checkpoint_path"] is not None
+    assert (run_dir / index["best_checkpoint_path"]).is_dir()
 
 
 @pytest.mark.parametrize(
@@ -504,8 +848,31 @@ def _training_config(
     seq_len: int = 4,
     global_batch_size: int = 2,
     axis_sizes: tuple[int, ...] = (1,),
+    validation_manifest: Path | str | None = None,
+    eval_every_steps: int | None = None,
+    eval_num_batches: int = 1,
+    eval_name: str = "validation",
+    second_eval: bool = False,
 ) -> str:
     total_steps_line = "" if total_steps is None else f"total_steps = {total_steps}\n"
+    validation_manifest_line = (
+        "" if validation_manifest is None else f'validation_manifest = "{Path(validation_manifest).as_posix()}"\n'
+    )
+    eval_block = ""
+    if eval_every_steps is not None:
+        eval_block = f"""
+[[evals]]
+name = "{eval_name}"
+every_steps = {eval_every_steps}
+num_batches = {eval_num_batches}
+"""
+        if second_eval:
+            eval_block += """
+[[evals]]
+name = "validation"
+every_steps = 1
+num_batches = 1
+"""
     return f"""
 [run]
 id = "loop"
@@ -536,6 +903,7 @@ peak_lr = 0.001
 [data]
 train_manifest = "{Path(train_manifest).as_posix()}"
 tokenizer_id = "{tokenizer_id}"
+{validation_manifest_line}
 
 [training]
 seq_len = {seq_len}
@@ -547,6 +915,7 @@ checkpoint_every_steps = {checkpoint_every_steps}
 [mesh]
 axis_names = ["data"]
 axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
+{eval_block}
 """
 
 

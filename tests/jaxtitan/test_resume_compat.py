@@ -70,7 +70,7 @@ def test_resume_metadata_contains_compatibility_payload(tmp_path: Path, prepared
     spec = _runtime_spec(tmp_path, manifest)
     metadata = checkpoint_metadata(
         spec,
-        {"step": 3, "tokens_seen": 384},
+        {"step": 3, "tokens_seen": 384, "loss": 1.25},
         reason="interval",
     )
 
@@ -78,6 +78,7 @@ def test_resume_metadata_contains_compatibility_payload(tmp_path: Path, prepared
     assert metadata["compat_version"] == 1
     assert metadata["run_id"] == "smoke"
     assert metadata["checkpoint"] == {"step": 3, "tokens_seen": 384, "reason": "interval"}
+    assert metadata["metrics"] == {"train_loss": 1.25, "eval_loss": None}
     assert metadata["runtime_fingerprint"] == build_resume_compat(spec).runtime_fingerprint
     assert metadata["compatibility"] == build_resume_compat(spec).payload
     assert metadata["mutable_controls"] == {
@@ -90,7 +91,7 @@ def test_resume_metadata_contains_compatibility_payload(tmp_path: Path, prepared
 def test_resume_metadata_rejects_malformed_version(tmp_path: Path, prepared_dataset_factory) -> None:
     manifest = prepared_dataset_factory("bad-version")
     spec = _runtime_spec(tmp_path, manifest)
-    metadata = checkpoint_metadata(spec, {"step": 1, "tokens_seen": 128}, reason="interval")
+    metadata = checkpoint_metadata(spec, {"step": 1, "tokens_seen": 128, "loss": 1.0}, reason="interval")
     metadata["schema_version"] = 0
 
     with pytest.raises(ContractError, match="schema_version"):
@@ -101,7 +102,7 @@ def test_resume_metadata_names_mismatched_field(tmp_path: Path, prepared_dataset
     manifest = prepared_dataset_factory("mismatch")
     checkpoint_spec = _runtime_spec(tmp_path, manifest)
     current_spec = _runtime_spec(tmp_path, manifest, hidden_size=16)
-    metadata = checkpoint_metadata(checkpoint_spec, {"step": 1, "tokens_seen": 128}, reason="interval")
+    metadata = checkpoint_metadata(checkpoint_spec, {"step": 1, "tokens_seen": 128, "loss": 1.0}, reason="interval")
 
     with pytest.raises(ContractError, match=r"compatibility\.model\.hidden_size"):
         validate_resume_metadata(metadata, current_spec)
@@ -110,7 +111,7 @@ def test_resume_metadata_names_mismatched_field(tmp_path: Path, prepared_dataset
 def test_resume_restore_rejects_counter_mismatch(tmp_path: Path, prepared_dataset_factory) -> None:
     manifest = prepared_dataset_factory("counter-mismatch")
     spec = _runtime_spec(tmp_path, manifest)
-    metadata = checkpoint_metadata(spec, {"step": 3, "tokens_seen": 24}, reason="interval")
+    metadata = checkpoint_metadata(spec, {"step": 3, "tokens_seen": 24, "loss": 1.0}, reason="interval")
     dataset_state = DatasetState(shard_index=0, token_offset=24, epoch=0, shuffle_state=None)
     restored = SimpleNamespace(
         metadata=metadata,

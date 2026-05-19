@@ -16,11 +16,13 @@ from jaxtitan.errors import ContractError
 from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch, place_replicated
 from jaxtitan.models import build_model
 from jaxtitan.optim import build_optimizer
+from jaxtitan.runtime.checkpoint_index import CheckpointIndex, load_checkpoint_index, record_checkpoint
 from jaxtitan.runtime.resume import checkpoint_metadata, validate_resume_compat, validate_resume_metadata
 from jaxtitan.services import LocalArtifactWriter, LocalOrbaxCheckpointService, initialize_run
+from jaxtitan.specs.eval import EvalSpec
 from jaxtitan.specs.run import RunSpec
 from jaxtitan.state import DatasetState, HostState, TrainState
-from jaxtitan.steps import initialize_train_state, make_train_step
+from jaxtitan.steps import initialize_train_state, make_eval_step, make_train_step
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +36,20 @@ class RunSummary:
     tokens_seen: int
     target_tokens: int
     final_loss: float
+    final_eval_loss: float | None = None
+    final_eval_token_count: int | None = None
+    final_eval_num_batches: int | None = None
+    latest_checkpoint_path: str | None = None
+    best_eval_step: int | None = None
+    best_eval_loss: float | None = None
+    best_checkpoint_path: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EvalRunResult:
+    """Host-normalized result for one validation eval pass."""
+
+    row: dict[str, Any]
 
 
 def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary:
@@ -95,7 +111,11 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
     model_state = place_replicated(model.state, sharding)
     train_state = initialize_train_state(model_state, optimizer.transform, seed=runtime_spec.seed)
     train_step = make_train_step(model.graph, optimizer)
+    eval_spec = _validation_eval_spec(runtime_spec)
+    eval_step = None if eval_spec is None else make_eval_step(model.graph)
     checkpoint_service = LocalOrbaxCheckpointService(runtime_spec.dirs.run_dir)
+    checkpoint_index = load_checkpoint_index(runtime_spec.dirs.run_dir)
+    checkpoint_service.set_protected_steps(checkpoint_index.protected_steps())
 
     try:
         if resume:
@@ -129,6 +149,8 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
             )
 
         last_row: dict[str, Any] | None = None
+        last_eval: EvalRunResult | None = None
+        last_eval_step = -1
         last_logged_step = -1
         while _scalar_int(train_state.tokens_seen) < runtime_spec.training.target_tokens:
             try:
@@ -146,15 +168,30 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
             if _should_log(row["step"], runtime_spec.training.log_every_steps, runtime_spec.training.target_tokens, row["tokens_seen"]):
                 writer.append_train_metrics(row)
                 last_logged_step = row["step"]
-            if row["step"] % runtime_spec.training.checkpoint_every_steps == 0:
-                host_state = _save_checkpoint(
+            checkpoint_due = row["step"] % runtime_spec.training.checkpoint_every_steps == 0
+            eval_due = eval_spec is not None and row["step"] % eval_spec.every_steps == 0
+            if eval_due or (eval_spec is not None and checkpoint_due):
+                last_eval = run_validation_eval(
+                    writer,
+                    runtime_spec,
+                    eval_spec,
+                    eval_step,
+                    sharding,
+                    train_state,
+                    row,
+                )
+                last_eval_step = row["step"]
+            if checkpoint_due:
+                host_state, checkpoint_index = _save_checkpoint(
                     checkpoint_service,
                     writer,
                     runtime_spec,
                     train_state,
                     dataset_state,
                     host_state,
+                    checkpoint_index,
                     row,
+                    last_eval,
                     reason="interval",
                 )
 
@@ -162,17 +199,35 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
             raise ContractError("training.target_tokens was already satisfied before the first train step")
         if last_logged_step != last_row["step"]:
             writer.append_train_metrics(last_row)
+        if eval_spec is not None and last_eval_step != last_row["step"]:
+            last_eval = run_validation_eval(
+                writer,
+                runtime_spec,
+                eval_spec,
+                eval_step,
+                sharding,
+                train_state,
+                last_row,
+            )
+            last_eval_step = last_row["step"]
         if checkpoint_service.latest_step() != last_row["step"]:
-            _save_checkpoint(
+            host_state, checkpoint_index = _save_checkpoint(
                 checkpoint_service,
                 writer,
                 runtime_spec,
                 train_state,
                 dataset_state,
                 host_state,
+                checkpoint_index,
                 last_row,
+                last_eval,
                 reason="final",
             )
+        else:
+            writer.write_checkpoint_index(checkpoint_index.to_dict())
+
+        latest = checkpoint_index.latest_record
+        best = checkpoint_index.best_record
 
         summary = RunSummary(
             run_id=runtime_spec.run_id,
@@ -182,6 +237,13 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
             tokens_seen=last_row["tokens_seen"],
             target_tokens=runtime_spec.training.target_tokens,
             final_loss=last_row["loss"],
+            final_eval_loss=None if last_eval is None else last_eval.row["loss"],
+            final_eval_token_count=None if last_eval is None else last_eval.row["token_count"],
+            final_eval_num_batches=None if last_eval is None else last_eval.row["num_batches"],
+            latest_checkpoint_path=None if latest is None else latest.checkpoint_path.as_posix(),
+            best_eval_step=None if best is None else best.step,
+            best_eval_loss=None if best is None else best.eval_loss,
+            best_checkpoint_path=None if best is None else best.checkpoint_path.as_posix(),
         )
         return summary
     finally:
@@ -197,6 +259,123 @@ def _with_runtime_schedule_steps(spec: RunSpec) -> RunSpec:
         optimizer = replace(spec.optimizer, schedule=schedule)
         return replace(spec, optimizer=optimizer)
     return spec
+
+
+def _validation_eval_spec(spec: RunSpec) -> EvalSpec | None:
+    if not spec.evals:
+        return None
+    if len(spec.evals) > 1:
+        raise ContractError("runtime supports exactly one eval entry for now")
+    eval_spec = spec.evals[0]
+    if eval_spec.name != "validation":
+        raise ContractError(f"runtime supports only eval name 'validation', got {eval_spec.name!r}")
+    return eval_spec
+
+
+def _build_validation_eval_data(spec: RunSpec) -> PreparedDataService:
+    manifest = spec.data.validation_manifest if spec.data.validation_manifest is not None else spec.data.train_manifest
+    return PreparedDataService.from_manifest(
+        manifest,
+        tokenizer_id=spec.data.tokenizer_id,
+        split="val",
+        seq_len=spec.training.seq_len,
+        batch_size=spec.training.global_batch_size,
+    )
+
+
+def run_validation_eval(
+    writer: LocalArtifactWriter,
+    spec: RunSpec,
+    eval_spec: EvalSpec,
+    eval_step: Any,
+    sharding: Any,
+    train_state: TrainState,
+    train_row: dict[str, Any],
+) -> EvalRunResult:
+    """Run one deterministic validation eval pass from the validation split start."""
+
+    writer.append_event(
+        {
+            **_event("eval_started", spec),
+            "step": train_row["step"],
+            "tokens_seen": train_row["tokens_seen"],
+            "eval_name": eval_spec.name,
+            "num_batches": eval_spec.num_batches,
+        }
+    )
+    try:
+        data = _build_validation_eval_data(spec)
+        row = _validation_eval_row(eval_spec, data, eval_step, sharding, train_state, train_row)
+        writer.append_eval_metrics(row)
+        writer.append_event(
+            {
+                **_event("eval_completed", spec),
+                "step": row["step"],
+                "tokens_seen": row["tokens_seen"],
+                "eval_name": eval_spec.name,
+                "loss": row["loss"],
+                "token_count": row["token_count"],
+                "num_batches": row["num_batches"],
+            }
+        )
+        return EvalRunResult(row=row)
+    except Exception as exc:
+        writer.append_event(
+            {
+                **_event("eval_failed", spec),
+                "step": train_row["step"],
+                "tokens_seen": train_row["tokens_seen"],
+                "eval_name": eval_spec.name,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+        )
+        raise
+
+
+def _validation_eval_row(
+    eval_spec: EvalSpec,
+    data: PreparedDataService,
+    eval_step: Any,
+    sharding: Any,
+    train_state: TrainState,
+    train_row: dict[str, Any],
+) -> dict[str, Any]:
+    dataset_state = data.initial_state()
+    loss_sum = 0.0
+    token_count = 0
+    first_token_start: int | None = None
+    token_end = dataset_state.token_offset
+    examples = 0
+    target_tokens = 0
+    for _idx in range(eval_spec.num_batches):
+        try:
+            batch, dataset_state, provenance = data.next_batch(dataset_state, repeat=False)
+        except StopIteration as exc:
+            raise ContractError(
+                f"validation split ended before eval.num_batches={eval_spec.num_batches} completed"
+            ) from exc
+        metrics = eval_step(train_state.model, place_batch(batch, sharding))
+        loss_sum += _scalar_float(metrics.loss_sum)
+        token_count += _scalar_int(metrics.token_count)
+        first_token_start = provenance.token_start if first_token_start is None else first_token_start
+        token_end = provenance.token_end
+        examples += provenance.examples
+        target_tokens += provenance.target_tokens
+    return {
+        "schema_version": 1,
+        "step": train_row["step"],
+        "tokens_seen": train_row["tokens_seen"],
+        "eval_name": eval_spec.name,
+        "loss_sum": loss_sum,
+        "token_count": token_count,
+        "loss": loss_sum / token_count,
+        "num_batches": eval_spec.num_batches,
+        "token_start": first_token_start,
+        "token_end": token_end,
+        "examples": examples,
+        "target_tokens": target_tokens,
+    }
 
 
 def _metrics_row(train_state: TrainState, metrics: Any, provenance: Any) -> dict[str, Any]:
@@ -228,10 +407,12 @@ def _save_checkpoint(
     train_state: TrainState,
     dataset_state: DatasetState,
     host_state: HostState,
+    checkpoint_index: CheckpointIndex,
     row: dict[str, Any],
+    eval_result: EvalRunResult | None,
     *,
     reason: str,
-) -> HostState:
+) -> tuple[HostState, CheckpointIndex]:
     step = row["step"]
     next_host_state = HostState(
         dataset=dataset_state,
@@ -239,23 +420,37 @@ def _save_checkpoint(
         wallclock_start_ns=host_state.wallclock_start_ns,
         run_id=host_state.run_id,
     )
+    checkpoint_service.set_protected_steps(checkpoint_index.protected_steps())
     checkpoint_service.save(
         step,
         train_state,
         dataset_state,
         next_host_state,
-        checkpoint_metadata(spec, row, reason=reason),
+        checkpoint_metadata(spec, row, reason=reason, eval_row=None if eval_result is None else eval_result.row),
     )
+    checkpoint_path = checkpoint_service.latest_path()
+    next_index = record_checkpoint(
+        checkpoint_index,
+        spec.dirs.run_dir,
+        step=step,
+        tokens_seen=row["tokens_seen"],
+        checkpoint_path=checkpoint_path or spec.dirs.checkpoints_dir / f"{step:06d}",
+        reason=reason,
+        train_loss=row["loss"],
+        eval_loss=None if eval_result is None else eval_result.row["loss"],
+    )
+    checkpoint_service.set_protected_steps(next_index.protected_steps())
+    writer.write_checkpoint_index(next_index.to_dict())
     writer.append_event(
         {
             **_event("checkpoint_saved", spec),
             "step": step,
             "tokens_seen": row["tokens_seen"],
-            "checkpoint_path": checkpoint_service.latest_path(),
+            "checkpoint_path": checkpoint_path,
             "reason": reason,
         }
     )
-    return next_host_state
+    return next_host_state, next_index
 
 
 def _should_log(step: int, log_every_steps: int, target_tokens: int, tokens_seen: int) -> bool:

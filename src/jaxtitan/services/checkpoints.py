@@ -37,6 +37,8 @@ class CheckpointService(Protocol):
 
     def restore_latest_metadata(self) -> dict[str, Any]: ...
 
+    def set_protected_steps(self, steps: set[int]) -> None: ...
+
     def latest_step(self) -> int | None: ...
 
     def latest_path(self) -> Path | None: ...
@@ -47,11 +49,12 @@ class CheckpointService(Protocol):
 class LocalOrbaxCheckpointService:
     """Concrete local checkpoint service using Orbax CheckpointManager."""
 
-    def __init__(self, run_dir: str | Path, *, max_to_keep: int = 2) -> None:
+    def __init__(self, run_dir: str | Path, *, max_to_keep: int = 2, protected_steps: set[int] | None = None) -> None:
         if max_to_keep <= 0:
             raise ContractError(f"max_to_keep must be positive, got {max_to_keep}")
         self.run_dir = Path(run_dir)
         self.checkpoints_dir = self.run_dir / "checkpoints"
+        self._protected_steps = set() if protected_steps is None else set(protected_steps)
         import orbax.checkpoint as ocp
 
         self._ocp = ocp
@@ -61,6 +64,7 @@ class LocalOrbaxCheckpointService:
                 max_to_keep=max_to_keep,
                 step_format_fixed_length=6,
                 create=True,
+                should_keep_fn=self._should_keep,
             ),
         )
 
@@ -141,10 +145,18 @@ class LocalOrbaxCheckpointService:
         step = self.latest_step()
         return None if step is None else self.checkpoints_dir / f"{step:06d}"
 
+    def set_protected_steps(self, steps: set[int]) -> None:
+        """Protect specific checkpoint steps from max_to_keep deletion."""
+
+        self._protected_steps = set(steps)
+
     def close(self) -> None:
         """Close the underlying Orbax manager."""
 
         self._manager.close()
+
+    def _should_keep(self, step: int) -> bool:
+        return int(step) in self._protected_steps
 
 
 def _dataset_to_dict(state: DatasetState) -> dict[str, Any]:
