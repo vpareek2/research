@@ -31,9 +31,13 @@ def test_inspect_run_reports_summary_checkpoints_and_recent_metrics(
     assert payload["latest_checkpoint"]["checkpoint_path"] == "checkpoints/000002"
     assert payload["best_checkpoint"]["eval_loss"] is not None
     assert payload["checkpoints"][0]["retained"] is True
+    assert payload["diagnostics"]["path"] == "diagnostics/runtime.json"
+    assert payload["diagnostics"]["jax_backend"]
+    assert payload["diagnostics"]["flops_per_token"] > 0
     assert payload["recent_train_metrics"][-1]["step"] == 2
     assert payload["recent_eval_metrics"][-1]["eval_name"] == "validation"
     assert "run: loop" in text
+    assert "runtime:" in text
     assert "best checkpoint:" in text
     assert json.loads(run_inspection_to_json(inspection))["run_id"] == "loop"
 
@@ -121,6 +125,7 @@ def test_cli_run_inspect_json_does_not_import_jax(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert '"run_id":"fake"' in result.stdout
+    assert '"diagnostics":null' in result.stdout
     assert "JAX_LOADED False" in result.stdout
 
 

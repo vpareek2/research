@@ -17,6 +17,15 @@ from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch, 
 from jaxtitan.models import build_model
 from jaxtitan.optim import build_optimizer
 from jaxtitan.runtime.checkpoint_index import CheckpointIndex, load_checkpoint_index, record_checkpoint
+from jaxtitan.runtime.diagnostics import (
+    PhaseTimer,
+    build_runtime_diagnostics,
+    enrich_eval_metrics,
+    enrich_train_metrics,
+    sample_device_telemetry,
+    sync_and_time,
+    training_diagnostics_summary,
+)
 from jaxtitan.runtime.resume import checkpoint_metadata, validate_resume_compat, validate_resume_metadata
 from jaxtitan.services import LocalArtifactWriter, LocalOrbaxCheckpointService, initialize_run
 from jaxtitan.specs.eval import EvalSpec
@@ -43,6 +52,15 @@ class RunSummary:
     best_eval_step: int | None = None
     best_eval_loss: float | None = None
     best_checkpoint_path: str | None = None
+    total_wall_sec: float | None = None
+    avg_train_tokens_per_sec: float | None = None
+    final_train_tokens_per_sec: float | None = None
+    steady_train_tokens_per_sec: float | None = None
+    avg_mfu: float | None = None
+    final_mfu: float | None = None
+    device_kind: str | None = None
+    device_count: int | None = None
+    runtime_diagnostics_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +91,12 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
                 "tokens_seen": summary.tokens_seen,
                 "target_tokens": summary.target_tokens,
                 "final_loss": summary.final_loss,
+                "total_wall_sec": summary.total_wall_sec,
+                "final_train_tokens_per_sec": summary.final_train_tokens_per_sec,
+                "avg_train_tokens_per_sec": summary.avg_train_tokens_per_sec,
+                "steady_train_tokens_per_sec": summary.steady_train_tokens_per_sec,
+                "final_mfu": summary.final_mfu,
+                "avg_mfu": summary.avg_mfu,
             }
         )
         writer.write_summary(asdict(summary))
@@ -89,6 +113,7 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
 
 
 def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, resume: bool) -> RunSummary:
+    run_started_at = time.perf_counter()
     runtime_spec = _with_runtime_schedule_steps(spec)
     data = PreparedDataService.from_manifest(
         runtime_spec.data.train_manifest,
@@ -107,6 +132,8 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
     context = build_mesh_context(runtime_spec.mesh)
     sharding = build_sharding_plan(context)
     model = build_model(runtime_spec.model, seed=runtime_spec.seed)
+    runtime_diagnostics = build_runtime_diagnostics(runtime_spec, context, model.metadata)
+    writer.write_runtime_diagnostics(runtime_diagnostics.payload)
     optimizer = build_optimizer(runtime_spec.optimizer, model.state, model.metadata)
     model_state = place_replicated(model.state, sharding)
     train_state = initialize_train_state(model_state, optimizer.transform, seed=runtime_spec.seed)
@@ -152,21 +179,42 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
         last_eval: EvalRunResult | None = None
         last_eval_step = -1
         last_logged_step = -1
+        logged_rows: list[dict[str, Any]] = []
         while _scalar_int(train_state.tokens_seen) < runtime_spec.training.target_tokens:
-            try:
-                batch, dataset_state, provenance = data.next_batch(dataset_state, repeat=False)
-            except StopIteration as exc:
-                raise ContractError(
-                    "prepared train split ended before training.target_tokens was reached; "
-                    f"tokens_seen={_scalar_int(train_state.tokens_seen)} target_tokens={runtime_spec.training.target_tokens}"
-                ) from exc
-            placed_batch = place_batch(batch, sharding)
-            train_state, metrics = train_step(train_state, placed_batch)
-            row = _metrics_row(train_state, metrics, provenance)
+            timer = PhaseTimer()
+            with timer.phase("data"):
+                try:
+                    batch, dataset_state, provenance = data.next_batch(dataset_state, repeat=False)
+                except StopIteration as exc:
+                    raise ContractError(
+                        "prepared train split ended before training.target_tokens was reached; "
+                        f"tokens_seen={_scalar_int(train_state.tokens_seen)} target_tokens={runtime_spec.training.target_tokens}"
+                    ) from exc
+            with timer.phase("placement"):
+                placed_batch = place_batch(batch, sharding)
+            with timer.phase("train_dispatch"):
+                train_state, metrics = train_step(train_state, placed_batch)
+            metrics_sync_sec = sync_and_time(_train_sync_target(train_state, metrics))
+            timer.add("metrics_sync", metrics_sync_sec)
+            base_row = _metrics_row(train_state, metrics, provenance)
+            row = enrich_train_metrics(
+                base_row,
+                timings={
+                    "data_sec": timer.seconds("data"),
+                    "placement_sec": timer.seconds("placement"),
+                    "train_dispatch_sec": timer.seconds("train_dispatch"),
+                    "metrics_sync_sec": timer.seconds("metrics_sync"),
+                    "train_step_sec": timer.seconds("train_dispatch") + timer.seconds("metrics_sync"),
+                    "step_sec": timer.total_sec(),
+                },
+                runtime=runtime_diagnostics,
+                telemetry=sample_device_telemetry(context.devices),
+            )
             last_row = row
             host_state = replace(host_state, dataset=dataset_state)
             if _should_log(row["step"], runtime_spec.training.log_every_steps, runtime_spec.training.target_tokens, row["tokens_seen"]):
                 writer.append_train_metrics(row)
+                logged_rows.append(row)
                 last_logged_step = row["step"]
             checkpoint_due = row["step"] % runtime_spec.training.checkpoint_every_steps == 0
             eval_due = eval_spec is not None and row["step"] % eval_spec.every_steps == 0
@@ -199,6 +247,7 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
             raise ContractError("training.target_tokens was already satisfied before the first train step")
         if last_logged_step != last_row["step"]:
             writer.append_train_metrics(last_row)
+            logged_rows.append(last_row)
         if eval_spec is not None and last_eval_step != last_row["step"]:
             last_eval = run_validation_eval(
                 writer,
@@ -228,6 +277,11 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
 
         latest = checkpoint_index.latest_record
         best = checkpoint_index.best_record
+        diagnostic_summary = training_diagnostics_summary(
+            logged_rows,
+            total_wall_sec=time.perf_counter() - run_started_at,
+            runtime=runtime_diagnostics,
+        )
 
         summary = RunSummary(
             run_id=runtime_spec.run_id,
@@ -244,6 +298,15 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
             best_eval_step=None if best is None else best.step,
             best_eval_loss=None if best is None else best.eval_loss,
             best_checkpoint_path=None if best is None else best.checkpoint_path.as_posix(),
+            total_wall_sec=diagnostic_summary["total_wall_sec"],
+            avg_train_tokens_per_sec=diagnostic_summary["avg_train_tokens_per_sec"],
+            final_train_tokens_per_sec=diagnostic_summary["final_train_tokens_per_sec"],
+            steady_train_tokens_per_sec=diagnostic_summary["steady_train_tokens_per_sec"],
+            avg_mfu=diagnostic_summary["avg_mfu"],
+            final_mfu=diagnostic_summary["final_mfu"],
+            device_kind=diagnostic_summary["device_kind"],
+            device_count=diagnostic_summary["device_count"],
+            runtime_diagnostics_path=diagnostic_summary["runtime_diagnostics_path"],
         )
         return summary
     finally:
@@ -294,6 +357,7 @@ def run_validation_eval(
 ) -> EvalRunResult:
     """Run one deterministic validation eval pass from the validation split start."""
 
+    eval_started_at = time.perf_counter()
     writer.append_event(
         {
             **_event("eval_started", spec),
@@ -306,6 +370,7 @@ def run_validation_eval(
     try:
         data = _build_validation_eval_data(spec)
         row = _validation_eval_row(eval_spec, data, eval_step, sharding, train_state, train_row)
+        row = enrich_eval_metrics(row, eval_sec=time.perf_counter() - eval_started_at)
         writer.append_eval_metrics(row)
         writer.append_event(
             {
@@ -316,6 +381,7 @@ def run_validation_eval(
                 "loss": row["loss"],
                 "token_count": row["token_count"],
                 "num_batches": row["num_batches"],
+                "eval_sec": row["eval_sec"],
             }
         )
         return EvalRunResult(row=row)
@@ -328,6 +394,7 @@ def run_validation_eval(
                 "eval_name": eval_spec.name,
                 "error_type": type(exc).__name__,
                 "error": str(exc),
+                "eval_sec": time.perf_counter() - eval_started_at,
             }
         )
         raise
@@ -413,6 +480,7 @@ def _save_checkpoint(
     *,
     reason: str,
 ) -> tuple[HostState, CheckpointIndex]:
+    checkpoint_started_at = time.perf_counter()
     step = row["step"]
     next_host_state = HostState(
         dataset=dataset_state,
@@ -441,6 +509,7 @@ def _save_checkpoint(
     )
     checkpoint_service.set_protected_steps(next_index.protected_steps())
     writer.write_checkpoint_index(next_index.to_dict())
+    checkpoint_sec = time.perf_counter() - checkpoint_started_at
     writer.append_event(
         {
             **_event("checkpoint_saved", spec),
@@ -448,6 +517,7 @@ def _save_checkpoint(
             "tokens_seen": row["tokens_seen"],
             "checkpoint_path": checkpoint_path,
             "reason": reason,
+            "checkpoint_sec": checkpoint_sec,
         }
     )
     return next_host_state, next_index
@@ -464,6 +534,20 @@ def _event(event_type: str, spec: RunSpec) -> dict[str, Any]:
         "run_id": spec.run_id,
         "created_at": _utc_now(),
     }
+
+
+def _train_sync_target(train_state: TrainState, metrics: Any) -> tuple[Any, ...]:
+    values = [
+        train_state.step,
+        train_state.tokens_seen,
+        metrics.loss_sum,
+        metrics.token_count,
+        metrics.lr,
+    ]
+    for value in (metrics.grad_norm, metrics.param_norm, metrics.update_norm, metrics.overflow):
+        if value is not None:
+            values.append(value)
+    return tuple(values)
 
 
 def _optional_scalar_float(value: Any) -> float | None:

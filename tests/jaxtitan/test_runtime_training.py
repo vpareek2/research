@@ -37,11 +37,13 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert (run_dir / "config" / "source.toml").is_file()
     assert (run_dir / "config" / "resolved.json").is_file()
     assert (run_dir / "manifest.json").is_file()
+    assert (run_dir / "diagnostics" / "runtime.json").is_file()
 
     events = _jsonl(run_dir / "events.jsonl")
     metrics = _jsonl(run_dir / "metrics" / "train.jsonl")
     final = json.loads((run_dir / "summaries" / "final.json").read_text())
     index = json.loads((run_dir / "checkpoints" / "index.json").read_text())
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
 
     assert [event["type"] for event in events] == [
         "run_initialized",
@@ -51,6 +53,7 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     ]
     assert events[-2]["step"] == 2
     assert events[-2]["reason"] == "final"
+    assert events[-2]["checkpoint_sec"] >= 0.0
     assert [row["step"] for row in metrics] == [1, 2]
     assert metrics[-1]["tokens_seen"] == 16
     assert metrics[-1]["token_count"] == 8
@@ -60,10 +63,33 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert metrics[-1]["token_end"] == 16
     assert metrics[-1]["examples"] == 2
     assert metrics[-1]["target_tokens"] == 8
+    assert metrics[-1]["data_sec"] >= 0.0
+    assert metrics[-1]["placement_sec"] >= 0.0
+    assert metrics[-1]["train_dispatch_sec"] >= 0.0
+    assert metrics[-1]["metrics_sync_sec"] >= 0.0
+    assert metrics[-1]["train_step_sec"] >= metrics[-1]["metrics_sync_sec"]
+    assert metrics[-1]["step_sec"] >= metrics[-1]["train_step_sec"]
+    assert metrics[-1]["tokens_per_sec"] > 0.0
+    assert metrics[-1]["train_tokens_per_sec"] > 0.0
+    assert metrics[-1]["examples_per_sec"] > 0.0
+    assert metrics[-1]["flops_per_token"] == diagnostics["performance"]["flops_per_token"]
+    assert metrics[-1]["flops_per_step"] == metrics[-1]["flops_per_token"] * metrics[-1]["target_tokens"]
+    assert metrics[-1]["peak_flops_per_device"] == diagnostics["performance"]["peak_flops_per_device"]
+    assert "device_memory_used_bytes" in metrics[-1]
     assert final["status"] == "completed"
     assert final["steps"] == metrics[-1]["step"]
     assert final["tokens_seen"] == metrics[-1]["tokens_seen"]
     assert final["final_loss"] == pytest.approx(metrics[-1]["loss"])
+    assert final["total_wall_sec"] > 0.0
+    assert final["avg_train_tokens_per_sec"] == pytest.approx(
+        sum(row["train_tokens_per_sec"] for row in metrics) / len(metrics)
+    )
+    assert final["final_train_tokens_per_sec"] == pytest.approx(metrics[-1]["train_tokens_per_sec"])
+    assert final["steady_train_tokens_per_sec"] == pytest.approx(metrics[-1]["train_tokens_per_sec"])
+    assert final["final_mfu"] == metrics[-1]["mfu"]
+    assert final["device_kind"] == diagnostics["performance"]["device_kind"]
+    assert final["device_count"] == diagnostics["performance"]["device_count"]
+    assert final["runtime_diagnostics_path"] == "diagnostics/runtime.json"
     assert final["latest_checkpoint_path"] == "checkpoints/000002"
     assert final["best_eval_step"] is None
     assert final["best_eval_loss"] is None
@@ -82,6 +108,10 @@ def test_run_training_writes_artifacts_metrics_and_summary(
             "train_loss": metrics[-1]["loss"],
         }
     ]
+    assert events[-1]["total_wall_sec"] == pytest.approx(final["total_wall_sec"])
+    assert events[-1]["final_train_tokens_per_sec"] == pytest.approx(final["final_train_tokens_per_sec"])
+    assert diagnostics["jax"]["backend"]
+    assert diagnostics["packages"]["jaxtitan"]
     assert (run_dir / "checkpoints" / "000002").is_dir()
 
 
@@ -216,6 +246,9 @@ def test_run_training_with_validation_eval_writes_eval_metrics_and_summary(
     assert eval_metrics[-1]["token_end"] == 41
     assert eval_metrics[-1]["examples"] == 4
     assert eval_metrics[-1]["target_tokens"] == 16
+    assert eval_metrics[-1]["eval_sec"] > 0.0
+    assert eval_metrics[-1]["eval_tokens_per_sec"] > 0.0
+    assert eval_metrics[-1]["eval_examples_per_sec"] > 0.0
     assert final["final_eval_loss"] == pytest.approx(eval_metrics[-1]["loss"])
     assert final["final_eval_token_count"] == eval_metrics[-1]["token_count"]
     assert final["final_eval_num_batches"] == eval_metrics[-1]["num_batches"]
@@ -235,6 +268,8 @@ def test_run_training_with_validation_eval_writes_eval_metrics_and_summary(
         "eval_started",
         "eval_completed",
     ]
+    eval_completed = [event for event in events if event["type"] == "eval_completed"]
+    assert eval_completed[-1]["eval_sec"] == pytest.approx(eval_metrics[-1]["eval_sec"])
 
 
 def test_run_training_runs_final_validation_when_cadence_misses_final_step(

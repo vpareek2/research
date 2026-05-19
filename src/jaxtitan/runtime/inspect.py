@@ -24,6 +24,7 @@ def inspect_run(run_dir: str | Path) -> RunInspection:
     manifest = _read_required_json(run_dir / "manifest.json", "run manifest")
     final = _read_required_json(run_dir / "summaries" / "final.json", "final summary")
     raw_index = _read_required_json(run_dir / "checkpoints" / "index.json", "checkpoint index")
+    diagnostics = _read_optional_json(run_dir / "diagnostics" / "runtime.json", "runtime diagnostics")
     index = load_checkpoint_index(run_dir)
     _validate_checkpoint_paths(run_dir, raw_index)
 
@@ -46,6 +47,7 @@ def inspect_run(run_dir: str | Path) -> RunInspection:
         "latest_checkpoint": None if latest is None else _checkpoint_summary(run_dir, latest),
         "best_checkpoint": None if best is None else _checkpoint_summary(run_dir, best),
         "checkpoints": [_checkpoint_summary(run_dir, record) for record in index.records],
+        "diagnostics": _diagnostics_summary(diagnostics),
         "recent_train_metrics": _read_recent_jsonl(run_dir / "metrics" / "train.jsonl"),
         "recent_eval_metrics": _read_recent_jsonl(run_dir / "metrics" / "eval.jsonl"),
     }
@@ -71,6 +73,13 @@ def format_run_inspection(inspection: RunInspection) -> str:
     if final["eval_loss"] is not None:
         lines.append(
             f"validation: loss={final['eval_loss']} tokens={final['eval_token_count']} batches={final['eval_num_batches']}"
+        )
+    diagnostics = payload["diagnostics"]
+    if diagnostics is not None:
+        lines.append(
+            "runtime: "
+            f"backend={diagnostics['jax_backend']} device={diagnostics['device_kind']} "
+            f"devices={diagnostics['device_count']}"
         )
     latest = payload["latest_checkpoint"]
     best = payload["best_checkpoint"]
@@ -128,6 +137,26 @@ def _validate_checkpoint_paths(run_dir: Path, raw_index: Mapping[str, Any]) -> N
                 raise ContractError(f"checkpoint index retained path does not exist: {path}")
 
 
+def _diagnostics_summary(raw: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    performance = raw.get("performance")
+    jax_info = raw.get("jax")
+    if not isinstance(performance, Mapping) or not isinstance(jax_info, Mapping):
+        raise ContractError("runtime diagnostics must include performance and jax objects")
+    return {
+        "path": "diagnostics/runtime.json",
+        "jax_backend": jax_info.get("backend"),
+        "process_count": jax_info.get("process_count"),
+        "process_index": jax_info.get("process_index"),
+        "device_kind": performance.get("device_kind"),
+        "device_count": performance.get("device_count"),
+        "flops_per_token": performance.get("flops_per_token"),
+        "peak_flops_per_device": performance.get("peak_flops_per_device"),
+        "peak_flops_total": performance.get("peak_flops_total"),
+    }
+
+
 def _read_required_json(path: Path, name: str) -> Mapping[str, Any]:
     if not path.is_file():
         raise ContractError(f"missing {name}: {path}")
@@ -138,6 +167,12 @@ def _read_required_json(path: Path, name: str) -> Mapping[str, Any]:
     if not isinstance(raw, Mapping):
         raise ContractError(f"{name} must be a JSON object")
     return raw
+
+
+def _read_optional_json(path: Path, name: str) -> Mapping[str, Any] | None:
+    if not path.is_file():
+        return None
+    return _read_required_json(path, name)
 
 
 def _read_recent_jsonl(path: Path, *, limit: int = 5) -> list[dict[str, Any]]:

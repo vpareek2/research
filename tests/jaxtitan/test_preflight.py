@@ -33,13 +33,22 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert payload["optimizer"]["name"] == "adamw"
     assert payload["training"]["estimated_steps"] == 2
     assert payload["training"]["compile"] == "passed"
+    assert payload["training"]["first_step_train_tokens_per_sec"] > 0.0
+    assert "first_step_mfu" in payload["training"]
     assert payload["eval"]["name"] == "validation"
     assert payload["eval"]["num_batches"] == 2
     assert payload["eval"]["compile"] == "passed"
+    assert payload["diagnostics"]["run_id"] == "loop"
+    assert payload["diagnostics"]["jax"]["backend"]
+    assert payload["diagnostics"]["performance"]["flops_per_token"] > 0
+    assert payload["diagnostics"]["device_telemetry"]["device_memory_used_bytes"] is None or isinstance(
+        payload["diagnostics"]["device_telemetry"]["device_memory_used_bytes"], int
+    )
     assert decoded == payload
     assert "preflight: passed" in text
     assert "mesh:" in text
     assert "devices:" in text
+    assert "runtime:" in text
     assert "compile=passed" in text
     assert not (tmp_path / "runs" / "loop").exists()
 

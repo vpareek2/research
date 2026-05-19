@@ -16,9 +16,17 @@ from jaxtitan.errors import ContractError
 from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch, place_replicated
 from jaxtitan.models import build_model, count_parameters
 from jaxtitan.optim import build_optimizer
+from jaxtitan.runtime.diagnostics import (
+    PhaseTimer,
+    build_runtime_diagnostics,
+    enrich_train_metrics,
+    sample_device_telemetry,
+    sync_and_time,
+)
 from jaxtitan.runtime.training import (
     _build_validation_eval_data,
     _metrics_row,
+    _train_sync_target,
     _validation_eval_row,
     _validation_eval_spec,
     _with_runtime_schedule_steps,
@@ -54,15 +62,31 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
     context = build_mesh_context(runtime_spec.mesh)
     sharding = build_sharding_plan(context)
     model = build_model(runtime_spec.model, seed=runtime_spec.seed)
+    runtime_diagnostics = build_runtime_diagnostics(runtime_spec, context, model.metadata)
     optimizer = build_optimizer(runtime_spec.optimizer, model.state, model.metadata)
     model_state = place_replicated(model.state, sharding)
     train_state = initialize_train_state(model_state, optimizer.transform, seed=runtime_spec.seed)
     train_step = make_train_step(model.graph, optimizer)
 
-    next_train_state, train_metrics = train_step(train_state, place_batch(train_batch, sharding))
-    jax.block_until_ready(next_train_state.step)
-    jax.block_until_ready(train_metrics.loss_sum)
-    train_row = _metrics_row(next_train_state, train_metrics, train_provenance)
+    timer = PhaseTimer()
+    with timer.phase("placement"):
+        placed_train_batch = place_batch(train_batch, sharding)
+    with timer.phase("train_dispatch"):
+        next_train_state, train_metrics = train_step(train_state, placed_train_batch)
+    timer.add("metrics_sync", sync_and_time(_train_sync_target(next_train_state, train_metrics)))
+    train_row = enrich_train_metrics(
+        _metrics_row(next_train_state, train_metrics, train_provenance),
+        timings={
+            "data_sec": 0.0,
+            "placement_sec": timer.seconds("placement"),
+            "train_dispatch_sec": timer.seconds("train_dispatch"),
+            "metrics_sync_sec": timer.seconds("metrics_sync"),
+            "train_step_sec": timer.seconds("train_dispatch") + timer.seconds("metrics_sync"),
+            "step_sec": timer.total_sec(),
+        },
+        runtime=runtime_diagnostics,
+        telemetry=sample_device_telemetry(context.devices),
+    )
 
     eval_spec = _validation_eval_spec(runtime_spec)
     eval_report = None
@@ -151,8 +175,11 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
             "checkpoint_every_steps": runtime_spec.training.checkpoint_every_steps,
             "compile": "passed",
             "first_step_loss": train_row["loss"],
+            "first_step_train_tokens_per_sec": train_row["train_tokens_per_sec"],
+            "first_step_mfu": train_row["mfu"],
         },
         "eval": eval_report,
+        "diagnostics": runtime_diagnostics.payload,
     }
     return PreflightReport(payload=_normalize(report))
 
@@ -173,6 +200,9 @@ def format_preflight_report(report: PreflightReport) -> str:
     data = payload["data"]
     model = payload["model"]
     optimizer = payload["optimizer"]
+    diagnostics = payload["diagnostics"]
+    performance = diagnostics["performance"]
+    jax_info = diagnostics["jax"]
     lines = [
         f"preflight: {payload['status']}",
         f"run: {payload['run_id']}",
@@ -183,6 +213,11 @@ def format_preflight_report(report: PreflightReport) -> str:
             f"platforms={','.join(devices['platforms'])}"
         ),
         f"mesh: axes={mesh['axis_names']} sizes={mesh['axis_sizes']}",
+        (
+            "runtime: "
+            f"backend={jax_info['backend']} device_kind={performance['device_kind']} "
+            f"peak_flops={performance['peak_flops_per_device']}"
+        ),
         (
             "train data: "
             f"manifest={data['train_manifest']} tokens={data['train_split_tokens']} "

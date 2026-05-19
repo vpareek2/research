@@ -27,6 +27,8 @@ class ArtifactWriter(Protocol):
 
     def append_eval_metrics(self, row: Mapping[str, Any]) -> None: ...
 
+    def write_runtime_diagnostics(self, diagnostics: Mapping[str, Any]) -> None: ...
+
     def write_checkpoint_index(self, index: Mapping[str, Any]) -> None: ...
 
     def append_checkpoint_sample(self, step: int, row: Mapping[str, Any]) -> None: ...
@@ -58,6 +60,7 @@ def initialize_run(config_path: str | Path) -> RunManifest:
             "config": "config",
             "metrics": "metrics",
             "checkpoints": "checkpoints",
+            "diagnostics": "diagnostics",
             "evals": "evals",
             "samples": "samples",
             "summaries": "summaries",
@@ -123,6 +126,9 @@ class LocalArtifactWriter:
     def append_eval_metrics(self, row: Mapping[str, Any]) -> None:
         self._append_jsonl(self.run_dir / "metrics" / "eval.jsonl", row)
 
+    def write_runtime_diagnostics(self, diagnostics: Mapping[str, Any]) -> None:
+        self._write_json(self.run_dir / "diagnostics" / "runtime.json", diagnostics)
+
     def write_checkpoint_index(self, index: Mapping[str, Any]) -> None:
         self._write_json(self.run_dir / "checkpoints" / "index.json", index)
 
@@ -139,6 +145,7 @@ class LocalArtifactWriter:
             self.run_dir / "config",
             self.run_dir / "metrics",
             self.run_dir / "checkpoints",
+            self.run_dir / "diagnostics",
             self.run_dir / "evals",
             self.run_dir / "samples",
             self.run_dir / "summaries",
