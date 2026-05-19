@@ -56,6 +56,18 @@ def build_parser() -> argparse.ArgumentParser:
     checkpoint_eval_parser.add_argument("--checkpoint", required=True, help="'best', 'latest', or a checkpoint step.")
     checkpoint_eval_parser.add_argument("--json", action="store_true", help="Print checkpoint eval JSON.")
 
+    sample_parser = commands.add_parser("sample", help="Generate token samples from local artifacts.")
+    sample_commands = sample_parser.add_subparsers(dest="sample_command", required=True)
+
+    checkpoint_sample_parser = sample_commands.add_parser("checkpoint", help="Sample token ids from a retained checkpoint.")
+    checkpoint_sample_parser.add_argument("run_dir", help="Path to a local Jaxtitan run directory.")
+    checkpoint_sample_parser.add_argument("--checkpoint", required=True, help="'best', 'latest', or a checkpoint step.")
+    checkpoint_sample_parser.add_argument("--prompt-ids", required=True, help="Comma-separated prompt token ids.")
+    checkpoint_sample_parser.add_argument("--max-new-tokens", required=True, type=int, help="Number of tokens to generate.")
+    checkpoint_sample_parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature.")
+    checkpoint_sample_parser.add_argument("--top-k", type=int, default=None, help="Top-k sampling cutoff.")
+    checkpoint_sample_parser.add_argument("--json", action="store_true", help="Print checkpoint sample JSON.")
+
     return parser
 
 
@@ -132,6 +144,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(checkpoint_eval_to_json(payload))
             else:
                 print(format_checkpoint_eval(payload))
+            return 0
+
+        if args.command == "sample" and args.sample_command == "checkpoint":
+            from jaxtitan.runtime.sampling import (
+                checkpoint_sample_to_json,
+                format_checkpoint_sample,
+                sample_checkpoint,
+            )
+
+            payload = sample_checkpoint(
+                args.run_dir,
+                args.checkpoint,
+                args.prompt_ids,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                top_k=args.top_k,
+            )
+            if args.json:
+                print(checkpoint_sample_to_json(payload))
+            else:
+                print(format_checkpoint_sample(payload))
             return 0
     except JaxtitanError as exc:
         print(f"error: {exc}", file=sys.stderr)

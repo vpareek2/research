@@ -29,6 +29,8 @@ class ArtifactWriter(Protocol):
 
     def write_checkpoint_index(self, index: Mapping[str, Any]) -> None: ...
 
+    def append_checkpoint_sample(self, step: int, row: Mapping[str, Any]) -> None: ...
+
     def write_summary(self, summary: Mapping[str, Any]) -> None: ...
 
 
@@ -123,6 +125,11 @@ class LocalArtifactWriter:
 
     def write_checkpoint_index(self, index: Mapping[str, Any]) -> None:
         self._write_json(self.run_dir / "checkpoints" / "index.json", index)
+
+    def append_checkpoint_sample(self, step: int, row: Mapping[str, Any]) -> None:
+        path = self.run_dir / "samples" / "checkpoints" / f"{step:06d}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._append_jsonl(path, row)
 
     def write_summary(self, summary: Mapping[str, Any]) -> None:
         self._write_json(self.run_dir / "summaries" / "final.json", summary)

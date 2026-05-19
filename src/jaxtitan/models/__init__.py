@@ -7,7 +7,9 @@ from jaxtitan.models.decoder import (
     apply_model,
     build_model,
     count_parameters,
+    decode_model,
     dtype_from_name,
+    prefill_model,
 )
 
 __all__ = [
@@ -17,5 +19,7 @@ __all__ = [
     "apply_model",
     "build_model",
     "count_parameters",
+    "decode_model",
     "dtype_from_name",
+    "prefill_model",
 ]

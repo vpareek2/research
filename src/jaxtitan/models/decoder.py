@@ -61,6 +61,34 @@ def apply_model(graph: Any, state: Any, input_ids: Any) -> jax.Array:
     return model(input_ids)
 
 
+def prefill_model(
+    graph: Any,
+    state: Any,
+    input_ids: Any,
+    positions: Any,
+    attention_mask: Any,
+    cache: Any,
+) -> tuple[jax.Array, jax.Array, Any]:
+    """Apply model prefill and update a KV cache."""
+
+    model = nnx.merge(graph, state)
+    return model.prefill(input_ids, positions, attention_mask, cache)
+
+
+def decode_model(
+    graph: Any,
+    state: Any,
+    token_ids: Any,
+    positions: Any,
+    attention_mask: Any,
+    cache: Any,
+) -> tuple[jax.Array, Any]:
+    """Apply one-token decode and update a KV cache."""
+
+    model = nnx.merge(graph, state)
+    return model.decode_one(token_ids, positions, attention_mask, cache)
+
+
 def count_parameters(metadata: tuple[ParamMetadata, ...]) -> int:
     """Count parameters from metadata, not by re-walking model state."""
 
@@ -189,8 +217,66 @@ class GroupedQueryAttention(nnx.Module):
         q = apply_rope(self.q_norm(q), cos, sin)
         k = apply_rope(self.k_norm(k), cos, sin)
 
-        out = jax.nn.dot_product_attention(q, k, v, is_causal=True)
+        mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))[None, :, :]
+        out = scaled_dot_product_attention(q, k, v, mask)
         return self.o(out.reshape(batch_size, seq_len, self.hidden_size))
+
+    def prefill(
+        self,
+        x: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+        cache: Any,
+        layer_index: int,
+    ) -> tuple[jax.Array, Any]:
+        batch_size, seq_len, _ = x.shape
+        q = self.q(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+        k = self.k(x).reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
+        v = self.v(x).reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
+        q = apply_rope_at_positions(self.q_norm(q), positions, self.head_dim, theta=cache.rope_theta)
+        k = apply_rope_at_positions(self.k_norm(k), positions, self.head_dim, theta=cache.rope_theta)
+
+        keys, values, lengths = _cache_write(cache, layer_index, positions, attention_mask, k, v)
+        next_cache = cache.replace(keys=keys, values=values, lengths=lengths)
+        cache_positions = jnp.arange(cache.max_cache_len, dtype=positions.dtype)
+        mask = (
+            attention_mask.astype(jnp.bool_)[..., None]
+            & (cache_positions[None, None, :] <= positions[..., None])
+            & (cache_positions[None, None, :] < lengths[:, None, None])
+        )
+        cached_k = next_cache.keys[layer_index]
+        cached_v = next_cache.values[layer_index]
+        out = scaled_dot_product_attention(q, cached_k, cached_v, mask)
+        return self.o(out.reshape(batch_size, seq_len, self.hidden_size)), next_cache
+
+    def decode_one(
+        self,
+        x: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+        cache: Any,
+        layer_index: int,
+    ) -> tuple[jax.Array, Any]:
+        batch_size, _, _ = x.shape
+        positions = positions[:, None]
+        q = self.q(x).reshape(batch_size, 1, self.num_heads, self.head_dim)
+        k = self.k(x).reshape(batch_size, 1, self.n_kv_heads, self.head_dim)
+        v = self.v(x).reshape(batch_size, 1, self.n_kv_heads, self.head_dim)
+        q = apply_rope_at_positions(self.q_norm(q), positions, self.head_dim, theta=cache.rope_theta)
+        k = apply_rope_at_positions(self.k_norm(k), positions, self.head_dim, theta=cache.rope_theta)
+
+        keys, values, lengths = _cache_write(cache, layer_index, positions, jnp.ones_like(positions, dtype=bool), k, v)
+        next_cache = cache.replace(keys=keys, values=values, lengths=lengths)
+        cache_positions = jnp.arange(cache.max_cache_len, dtype=positions.dtype)
+        mask = (
+            attention_mask.astype(jnp.bool_)[:, None, :]
+            & (cache_positions[None, None, :] <= positions[..., None])
+            & (cache_positions[None, None, :] < lengths[:, None, None])
+        )
+        cached_k = next_cache.keys[layer_index]
+        cached_v = next_cache.values[layer_index]
+        out = scaled_dot_product_attention(q, cached_k, cached_v, mask)
+        return self.o(out.reshape(batch_size, 1, self.hidden_size)), next_cache
 
 
 class DecoderBlock(nnx.Module):
@@ -220,6 +306,32 @@ class DecoderBlock(nnx.Module):
         x = x + self.attn(self.pre_norm(x), cos, sin)
         x = x + self.mlp(self.post_norm(x))
         return x
+
+    def prefill(
+        self,
+        x: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+        cache: Any,
+        layer_index: int,
+    ) -> tuple[jax.Array, Any]:
+        attn_out, cache = self.attn.prefill(self.pre_norm(x), positions, attention_mask, cache, layer_index)
+        x = x + attn_out
+        x = x + self.mlp(self.post_norm(x))
+        return x, cache
+
+    def decode_one(
+        self,
+        x: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+        cache: Any,
+        layer_index: int,
+    ) -> tuple[jax.Array, Any]:
+        attn_out, cache = self.attn.decode_one(self.pre_norm(x), positions, attention_mask, cache, layer_index)
+        x = x + attn_out
+        x = x + self.mlp(self.post_norm(x))
+        return x, cache
 
 
 class DecoderModel(nnx.Module):
@@ -274,6 +386,45 @@ class DecoderModel(nnx.Module):
             x = layer(x, cos, sin)
         return self.lm_head(self.norm(x))
 
+    def prefill(self, input_ids: Any, positions: Any, attention_mask: Any, cache: Any) -> tuple[jax.Array, jax.Array, Any]:
+        input_ids = jnp.asarray(input_ids)
+        positions = jnp.asarray(positions)
+        attention_mask = jnp.asarray(attention_mask, dtype=jnp.bool_)
+        if input_ids.ndim != 2:
+            raise ContractError(f"input_ids must have shape [batch, seq], got {input_ids.shape}")
+        batch_size, seq_len = input_ids.shape
+        if positions.shape != input_ids.shape:
+            raise ContractError(f"positions shape {positions.shape} must equal input_ids shape {input_ids.shape}")
+        if attention_mask.shape != input_ids.shape:
+            raise ContractError(
+                f"attention_mask shape {attention_mask.shape} must equal input_ids shape {input_ids.shape}"
+            )
+        if seq_len > self.spec.max_seq_len:
+            raise ContractError(f"input sequence length {seq_len} exceeds model.max_seq_len={self.spec.max_seq_len}")
+
+        x = self.embed(input_ids)
+        for layer_index, layer in enumerate(self.layers):
+            x, cache = layer.prefill(x, positions, attention_mask, cache, layer_index)
+        logits = self.lm_head(self.norm(x))
+        return logits, logits[:, -1, :], cache
+
+    def decode_one(self, token_ids: Any, positions: Any, attention_mask: Any, cache: Any) -> tuple[jax.Array, Any]:
+        token_ids = jnp.asarray(token_ids)
+        positions = jnp.asarray(positions)
+        attention_mask = jnp.asarray(attention_mask, dtype=jnp.bool_)
+        if token_ids.ndim != 1:
+            raise ContractError(f"token_ids must have shape [batch], got {token_ids.shape}")
+        if positions.shape != token_ids.shape:
+            raise ContractError(f"positions shape {positions.shape} must equal token_ids shape {token_ids.shape}")
+        if attention_mask.ndim != 2 or attention_mask.shape[0] != token_ids.shape[0]:
+            raise ContractError("attention_mask must have shape [batch, max_cache_len]")
+
+        x = self.embed(token_ids[:, None])
+        for layer_index, layer in enumerate(self.layers):
+            x, cache = layer.decode_one(x, positions, attention_mask, cache, layer_index)
+        logits = self.lm_head(self.norm(x))[:, 0, :]
+        return logits, cache
+
 
 def precompute_rope(seq_len: int, head_dim: int, theta: float, dtype: Any) -> tuple[jax.Array, jax.Array]:
     """Precompute RoPE cos/sin tables for a fixed sequence length."""
@@ -293,6 +444,60 @@ def apply_rope(x: jax.Array, cos: jax.Array, sin: jax.Array) -> jax.Array:
     x_odd = x[..., 1::2]
     rotated = jnp.stack((x_even * cos - x_odd * sin, x_even * sin + x_odd * cos), axis=-1)
     return rotated.reshape(x.shape)
+
+
+def apply_rope_at_positions(x: jax.Array, positions: jax.Array, head_dim: int, theta: float) -> jax.Array:
+    """Apply RoPE with absolute per-row positions."""
+
+    inv_freq = 1.0 / (theta ** (jnp.arange(0, head_dim, 2, dtype=jnp.float32) / head_dim))
+    freqs = positions.astype(jnp.float32)[..., None] * inv_freq
+    cos = jnp.cos(freqs).astype(x.dtype)[..., None, :]
+    sin = jnp.sin(freqs).astype(x.dtype)[..., None, :]
+    x_even = x[..., 0::2]
+    x_odd = x[..., 1::2]
+    rotated = jnp.stack((x_even * cos - x_odd * sin, x_even * sin + x_odd * cos), axis=-1)
+    return rotated.reshape(x.shape)
+
+
+def scaled_dot_product_attention(q: jax.Array, k: jax.Array, v: jax.Array, mask: jax.Array) -> jax.Array:
+    """Grouped-query scaled dot-product attention."""
+
+    k = _repeat_kv(k, q.shape[2])
+    v = _repeat_kv(v, q.shape[2])
+    logits = jnp.einsum("bthd,bshd->bhts", q.astype(jnp.float32), k.astype(jnp.float32))
+    logits = logits / jnp.sqrt(jnp.asarray(q.shape[-1], dtype=jnp.float32))
+    logits = jnp.where(mask[:, None, :, :], logits, jnp.finfo(jnp.float32).min)
+    probs = jax.nn.softmax(logits, axis=-1).astype(q.dtype)
+    return jnp.einsum("bhts,bshd->bthd", probs, v)
+
+
+def _repeat_kv(x: jax.Array, num_heads: int) -> jax.Array:
+    if x.shape[2] == num_heads:
+        return x
+    if num_heads % x.shape[2] != 0:
+        raise ContractError(f"query heads {num_heads} must be divisible by kv heads {x.shape[2]}")
+    return jnp.repeat(x, num_heads // x.shape[2], axis=2)
+
+
+def _cache_write(
+    cache: Any,
+    layer_index: int,
+    positions: jax.Array,
+    attention_mask: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    batch_indices = jnp.arange(k.shape[0])[:, None]
+    valid = attention_mask.astype(jnp.bool_)
+    existing_k = cache.keys[layer_index, batch_indices, positions]
+    existing_v = cache.values[layer_index, batch_indices, positions]
+    next_k = jnp.where(valid[..., None, None], k, existing_k)
+    next_v = jnp.where(valid[..., None, None], v, existing_v)
+    keys = cache.keys.at[layer_index, batch_indices, positions].set(next_k)
+    values = cache.values.at[layer_index, batch_indices, positions].set(next_v)
+    next_lengths = jnp.max(jnp.where(valid, positions + 1, 0), axis=1)
+    lengths = jnp.maximum(cache.lengths, next_lengths.astype(cache.lengths.dtype))
+    return keys, values, lengths
 
 
 def _tag_for_path(path: tuple[str, ...]) -> str:
