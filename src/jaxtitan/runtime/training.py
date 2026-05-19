@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 import math
 from pathlib import Path
+import time
 from typing import Any
 
 import jax
@@ -15,9 +16,9 @@ from jaxtitan.errors import ContractError
 from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch, place_replicated
 from jaxtitan.models import build_model
 from jaxtitan.optim import build_optimizer
-from jaxtitan.services import LocalArtifactWriter, initialize_run
+from jaxtitan.services import LocalArtifactWriter, LocalOrbaxCheckpointService, initialize_run
 from jaxtitan.specs.run import RunSpec
-from jaxtitan.state import TrainState
+from jaxtitan.state import DatasetState, HostState, TrainState
 from jaxtitan.steps import initialize_train_state, make_train_step
 
 
@@ -34,15 +35,20 @@ class RunSummary:
     final_loss: float
 
 
-def run_training(config_path: str | Path) -> RunSummary:
+def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary:
     """Run the minimal local Jaxtitan training path for one TOML config."""
 
-    manifest = initialize_run(config_path)
-    writer = LocalArtifactWriter(manifest.run_dir)
     spec = load_config(config_path)
+    if resume:
+        if not spec.dirs.run_dir.exists():
+            raise ContractError(f"cannot resume missing run directory: {spec.dirs.run_dir}")
+        writer = LocalArtifactWriter(spec.dirs.run_dir)
+    else:
+        manifest = initialize_run(config_path)
+        writer = LocalArtifactWriter(manifest.run_dir)
     try:
-        writer.append_event(_event("training_started", spec))
-        summary = _run_training_initialized(spec, writer)
+        writer.append_event({**_event("training_started", spec), "resume": resume})
+        summary = _run_training_initialized(spec, writer, resume=resume)
         writer.append_event(
             {
                 **_event("training_completed", spec),
@@ -65,7 +71,7 @@ def run_training(config_path: str | Path) -> RunSummary:
         raise
 
 
-def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter) -> RunSummary:
+def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, resume: bool) -> RunSummary:
     runtime_spec = _with_runtime_schedule_steps(spec)
     data = PreparedDataService.from_manifest(
         runtime_spec.data.train_manifest,
@@ -75,6 +81,12 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter) -> Run
         batch_size=runtime_spec.training.global_batch_size,
     )
     dataset_state = data.initial_state()
+    host_state = HostState(
+        dataset=dataset_state,
+        last_checkpoint_step=0,
+        wallclock_start_ns=time.monotonic_ns(),
+        run_id=runtime_spec.run_id,
+    )
     context = build_mesh_context(runtime_spec.mesh)
     sharding = build_sharding_plan(context)
     model = build_model(runtime_spec.model, seed=runtime_spec.seed)
@@ -82,40 +94,93 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter) -> Run
     model_state = place_replicated(model.state, sharding)
     train_state = initialize_train_state(model_state, optimizer.transform, seed=runtime_spec.seed)
     train_step = make_train_step(model.graph, optimizer)
+    checkpoint_service = LocalOrbaxCheckpointService(runtime_spec.dirs.run_dir)
 
-    last_row: dict[str, Any] | None = None
-    last_logged_step = -1
-    while _scalar_int(train_state.tokens_seen) < runtime_spec.training.target_tokens:
-        try:
-            batch, dataset_state, provenance = data.next_batch(dataset_state, repeat=False)
-        except StopIteration as exc:
-            raise ContractError(
-                "prepared train split ended before training.target_tokens was reached; "
-                f"tokens_seen={_scalar_int(train_state.tokens_seen)} target_tokens={runtime_spec.training.target_tokens}"
-            ) from exc
-        placed_batch = place_batch(batch, sharding)
-        train_state, metrics = train_step(train_state, placed_batch)
-        row = _metrics_row(train_state, metrics, provenance)
-        last_row = row
-        if _should_log(row["step"], runtime_spec.training.log_every_steps, runtime_spec.training.target_tokens, row["tokens_seen"]):
-            writer.append_train_metrics(row)
-            last_logged_step = row["step"]
+    try:
+        if resume:
+            try:
+                restored = checkpoint_service.restore_latest(train_state)
+            except Exception as exc:
+                writer.append_event(
+                    {
+                        **_event("checkpoint_restore_failed", runtime_spec),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
+                raise
+            train_state = restored.train_state
+            dataset_state = restored.dataset_state
+            host_state = restored.host_state
+            writer.append_event(
+                {
+                    **_event("training_resumed", runtime_spec),
+                    "checkpoint_step": restored.step,
+                    "checkpoint_path": restored.path,
+                    "step": _scalar_int(train_state.step),
+                    "tokens_seen": _scalar_int(train_state.tokens_seen),
+                    "dataset_token_offset": dataset_state.token_offset,
+                }
+            )
 
-    if last_row is None:
-        raise ContractError("training.target_tokens was already satisfied before the first train step")
-    if last_logged_step != last_row["step"]:
-        writer.append_train_metrics(last_row)
+        last_row: dict[str, Any] | None = None
+        last_logged_step = -1
+        while _scalar_int(train_state.tokens_seen) < runtime_spec.training.target_tokens:
+            try:
+                batch, dataset_state, provenance = data.next_batch(dataset_state, repeat=False)
+            except StopIteration as exc:
+                raise ContractError(
+                    "prepared train split ended before training.target_tokens was reached; "
+                    f"tokens_seen={_scalar_int(train_state.tokens_seen)} target_tokens={runtime_spec.training.target_tokens}"
+                ) from exc
+            placed_batch = place_batch(batch, sharding)
+            train_state, metrics = train_step(train_state, placed_batch)
+            row = _metrics_row(train_state, metrics, provenance)
+            last_row = row
+            host_state = replace(host_state, dataset=dataset_state)
+            if _should_log(row["step"], runtime_spec.training.log_every_steps, runtime_spec.training.target_tokens, row["tokens_seen"]):
+                writer.append_train_metrics(row)
+                last_logged_step = row["step"]
+            if row["step"] % runtime_spec.training.checkpoint_every_steps == 0:
+                host_state = _save_checkpoint(
+                    checkpoint_service,
+                    writer,
+                    runtime_spec,
+                    train_state,
+                    dataset_state,
+                    host_state,
+                    row,
+                    reason="interval",
+                )
 
-    summary = RunSummary(
-        run_id=runtime_spec.run_id,
-        run_dir=runtime_spec.dirs.run_dir,
-        status="completed",
-        steps=last_row["step"],
-        tokens_seen=last_row["tokens_seen"],
-        target_tokens=runtime_spec.training.target_tokens,
-        final_loss=last_row["loss"],
-    )
-    return summary
+        if last_row is None:
+            raise ContractError("training.target_tokens was already satisfied before the first train step")
+        if last_logged_step != last_row["step"]:
+            writer.append_train_metrics(last_row)
+        if checkpoint_service.latest_step() != last_row["step"]:
+            _save_checkpoint(
+                checkpoint_service,
+                writer,
+                runtime_spec,
+                train_state,
+                dataset_state,
+                host_state,
+                last_row,
+                reason="final",
+            )
+
+        summary = RunSummary(
+            run_id=runtime_spec.run_id,
+            run_dir=runtime_spec.dirs.run_dir,
+            status="completed",
+            steps=last_row["step"],
+            tokens_seen=last_row["tokens_seen"],
+            target_tokens=runtime_spec.training.target_tokens,
+            final_loss=last_row["loss"],
+        )
+        return summary
+    finally:
+        checkpoint_service.close()
 
 
 def _with_runtime_schedule_steps(spec: RunSpec) -> RunSpec:
@@ -149,6 +214,49 @@ def _metrics_row(train_state: TrainState, metrics: Any, provenance: Any) -> dict
         "examples": provenance.examples,
         "target_tokens": provenance.target_tokens,
     }
+
+
+def _save_checkpoint(
+    checkpoint_service: LocalOrbaxCheckpointService,
+    writer: LocalArtifactWriter,
+    spec: RunSpec,
+    train_state: TrainState,
+    dataset_state: DatasetState,
+    host_state: HostState,
+    row: dict[str, Any],
+    *,
+    reason: str,
+) -> HostState:
+    step = row["step"]
+    next_host_state = HostState(
+        dataset=dataset_state,
+        last_checkpoint_step=step,
+        wallclock_start_ns=host_state.wallclock_start_ns,
+        run_id=host_state.run_id,
+    )
+    checkpoint_service.save(
+        step,
+        train_state,
+        dataset_state,
+        next_host_state,
+        {
+            "run_id": spec.run_id,
+            "step": step,
+            "tokens_seen": row["tokens_seen"],
+            "target_tokens": spec.training.target_tokens,
+            "reason": reason,
+        },
+    )
+    writer.append_event(
+        {
+            **_event("checkpoint_saved", spec),
+            "step": step,
+            "tokens_seen": row["tokens_seen"],
+            "checkpoint_path": checkpoint_service.latest_path(),
+            "reason": reason,
+        }
+    )
+    return next_host_state
 
 
 def _should_log(step: int, log_every_steps: int, target_tokens: int, tokens_seen: int) -> bool:

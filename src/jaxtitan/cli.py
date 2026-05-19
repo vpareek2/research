@@ -40,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     train_parser = run_commands.add_parser("train", help="Run a minimal local training loop from a TOML config.")
     train_parser.add_argument("path", help="Path to a Jaxtitan TOML config.")
+    train_parser.add_argument("--resume", action="store_true", help="Resume from the latest local checkpoint.")
 
     return parser
 
@@ -77,7 +78,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "run" and args.run_command == "train":
             from jaxtitan.runtime import run_training
 
-            summary = run_training(args.path)
+            summary = run_training(args.path, resume=args.resume)
             print(summary.run_dir)
             return 0
     except JaxtitanError as exc:

@@ -7,6 +7,7 @@ import pytest
 
 from jaxtitan.errors import ContractError
 from jaxtitan.runtime import run_training
+from jaxtitan.services import initialize_run
 
 
 def test_run_training_writes_artifacts_metrics_and_summary(
@@ -41,7 +42,14 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     metrics = _jsonl(run_dir / "metrics" / "train.jsonl")
     final = json.loads((run_dir / "summaries" / "final.json").read_text())
 
-    assert [event["type"] for event in events] == ["run_initialized", "training_started", "training_completed"]
+    assert [event["type"] for event in events] == [
+        "run_initialized",
+        "training_started",
+        "checkpoint_saved",
+        "training_completed",
+    ]
+    assert events[-2]["step"] == 2
+    assert events[-2]["reason"] == "final"
     assert [row["step"] for row in metrics] == [1, 2]
     assert metrics[-1]["tokens_seen"] == 16
     assert metrics[-1]["token_count"] == 8
@@ -55,6 +63,7 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert final["steps"] == metrics[-1]["step"]
     assert final["tokens_seen"] == metrics[-1]["tokens_seen"]
     assert final["final_loss"] == pytest.approx(metrics[-1]["loss"])
+    assert (run_dir / "checkpoints" / "000002").is_dir()
 
 
 def test_run_training_logs_final_row_even_when_not_on_log_interval(
@@ -76,6 +85,32 @@ def test_run_training_logs_final_row_even_when_not_on_log_interval(
     metrics = _jsonl(tmp_path / "runs" / "loop" / "metrics" / "train.jsonl")
     assert [row["step"] for row in metrics] == [2]
     assert metrics[-1]["tokens_seen"] == 16
+
+
+def test_run_training_saves_interval_checkpoints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "checkpoint-interval",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(manifest, target_tokens=16, log_every_steps=1, checkpoint_every_steps=1)
+    )
+
+    run_training(config_path)
+
+    events = _jsonl(tmp_path / "runs" / "loop" / "events.jsonl")
+    checkpoint_events = [event for event in events if event["type"] == "checkpoint_saved"]
+    assert [event["step"] for event in checkpoint_events] == [1, 2]
+    assert [event["reason"] for event in checkpoint_events] == ["interval", "interval"]
+    assert (tmp_path / "runs" / "loop" / "checkpoints" / "000001").is_dir()
+    assert (tmp_path / "runs" / "loop" / "checkpoints" / "000002").is_dir()
 
 
 def test_run_training_stops_after_crossing_target_token_count(
@@ -125,6 +160,72 @@ def test_run_training_records_failure_when_dataset_exhausts(
     assert not (run_dir / "summaries" / "final.json").exists()
 
 
+def test_run_training_resume_continues_from_latest_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "resume",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(manifest, target_tokens=8, log_every_steps=1, checkpoint_every_steps=1)
+    )
+    first = run_training(config_path)
+    config_path.write_text(
+        _training_config(manifest, target_tokens=16, log_every_steps=1, checkpoint_every_steps=1)
+    )
+
+    resumed = run_training(config_path, resume=True)
+
+    run_dir = tmp_path / "runs" / "loop"
+    events = _jsonl(run_dir / "events.jsonl")
+    metrics = _jsonl(run_dir / "metrics" / "train.jsonl")
+    assert first.steps == 1
+    assert resumed.steps == 2
+    assert resumed.tokens_seen == 16
+    assert [row["step"] for row in metrics] == [1, 2]
+    assert metrics[-1]["token_start"] == 8
+    assert metrics[-1]["token_end"] == 16
+    assert "training_resumed" in [event["type"] for event in events]
+    resumed_event = next(event for event in events if event["type"] == "training_resumed")
+    assert resumed_event["checkpoint_step"] == 1
+    assert resumed_event["dataset_token_offset"] == 8
+    assert (run_dir / "checkpoints" / "000002").is_dir()
+
+
+def test_run_training_resume_records_restore_failure_without_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "restore-failure",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_training_config(manifest, target_tokens=16, log_every_steps=1))
+    initialize_run(config_path)
+
+    with pytest.raises(ContractError, match="no checkpoints"):
+        run_training(config_path, resume=True)
+
+    events = _jsonl(tmp_path / "runs" / "loop" / "events.jsonl")
+    assert [event["type"] for event in events] == [
+        "run_initialized",
+        "training_started",
+        "checkpoint_restore_failed",
+        "training_failed",
+    ]
+    assert events[1]["resume"] is True
+
+
 def test_cli_run_train_succeeds_for_tiny_run(
     tmp_path: Path,
     prepared_dataset_factory,
@@ -151,6 +252,45 @@ def test_cli_run_train_succeeds_for_tiny_run(
     assert (tmp_path / "runs" / "loop" / "summaries" / "final.json").is_file()
 
 
+def test_cli_run_train_resume_succeeds(
+    tmp_path: Path,
+    prepared_dataset_factory,
+) -> None:
+    manifest = prepared_dataset_factory(
+        "cli-resume",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(manifest, target_tokens=8, log_every_steps=1, checkpoint_every_steps=1)
+    )
+    first = subprocess.run(
+        [sys.executable, "-m", "jaxtitan.cli", "run", "train", str(config_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    config_path.write_text(
+        _training_config(manifest, target_tokens=16, log_every_steps=1, checkpoint_every_steps=1)
+    )
+
+    resumed = subprocess.run(
+        [sys.executable, "-m", "jaxtitan.cli", "run", "train", "--resume", str(config_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+
+    metrics = _jsonl(tmp_path / "runs" / "loop" / "metrics" / "train.jsonl")
+    assert first.returncode == 0
+    assert resumed.returncode == 0
+    assert resumed.stdout.strip() == "runs/loop"
+    assert [row["step"] for row in metrics] == [1, 2]
+
+
 def test_cli_run_train_invalid_data_fails_cleanly(tmp_path: Path) -> None:
     config_path = tmp_path / "jaxtitan.toml"
     config_path.write_text(_training_config(tmp_path / "missing" / "manifest.json", target_tokens=8, log_every_steps=1))
@@ -168,7 +308,13 @@ def test_cli_run_train_invalid_data_fails_cleanly(tmp_path: Path) -> None:
     assert "Traceback" not in result.stderr
 
 
-def _training_config(train_manifest: Path | str, *, target_tokens: int, log_every_steps: int) -> str:
+def _training_config(
+    train_manifest: Path | str,
+    *,
+    target_tokens: int,
+    log_every_steps: int,
+    checkpoint_every_steps: int = 10,
+) -> str:
     return f"""
 [run]
 id = "loop"
@@ -204,7 +350,7 @@ seq_len = 4
 global_batch_size = 2
 target_tokens = {target_tokens}
 log_every_steps = {log_every_steps}
-checkpoint_every_steps = 10
+checkpoint_every_steps = {checkpoint_every_steps}
 
 [mesh]
 axis_names = ["data"]
