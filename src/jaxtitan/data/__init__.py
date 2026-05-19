@@ -1,7 +1,5 @@
 """Prepared-data contracts."""
 
-from __future__ import annotations
-
 from jaxtitan.data.manifest import (
     PreparedDatasetManifest,
     TokenShard,

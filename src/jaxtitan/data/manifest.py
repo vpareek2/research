@@ -1,7 +1,5 @@
 """Prepared-token dataset manifest validation."""
 
-from __future__ import annotations
-
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from hashlib import sha256

@@ -1,7 +1,5 @@
 """Stable RunSpec serialization and hashing."""
 
-from __future__ import annotations
-
 from dataclasses import asdict, is_dataclass
 from hashlib import sha256
 import json

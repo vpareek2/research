@@ -1,7 +1,5 @@
 """Deterministic prepared-token data service."""
 
-from __future__ import annotations
-
 import bisect
 from dataclasses import dataclass
 from pathlib import Path

@@ -1,7 +1,5 @@
 """Artifact service contracts and local artifact writer."""
 
-from __future__ import annotations
-
 from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime

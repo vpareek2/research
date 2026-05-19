@@ -1,7 +1,5 @@
 """Cross-spec validation."""
 
-from __future__ import annotations
-
 from jaxtitan.errors import ConfigError
 from jaxtitan.specs.run import RunSpec
 

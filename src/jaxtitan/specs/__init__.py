@@ -1,7 +1,5 @@
 """Static specs for Jaxtitan runs."""
 
-from __future__ import annotations
-
 from jaxtitan.specs.data import DataSpec, DatasetManifest, ShardInfo
 from jaxtitan.specs.eval import EvalSpec
 from jaxtitan.specs.generation import GenerationSpec

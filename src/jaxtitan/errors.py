@@ -1,7 +1,5 @@
 """Jaxtitan exception types."""
 
-from __future__ import annotations
-
 
 class JaxtitanError(Exception):
     """Base class for Jaxtitan errors."""

@@ -1,7 +1,5 @@
 """Metric contracts returned by compiled steps."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Any
 

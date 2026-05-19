@@ -1,4 +1,9 @@
-from __future__ import annotations
+import os
+
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+_xla_flags = os.environ.get("XLA_FLAGS", "")
+if "--xla_force_host_platform_device_count" not in _xla_flags:
+    os.environ["XLA_FLAGS"] = f"{_xla_flags} --xla_force_host_platform_device_count=4".strip()
 
 from collections.abc import Callable, Sequence
 from hashlib import sha256

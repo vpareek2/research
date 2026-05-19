@@ -1,7 +1,5 @@
 """Model architecture specs."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 
 from jaxtitan.errors import ContractError
