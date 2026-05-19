@@ -35,8 +35,13 @@ def load_config(path: str | Path) -> RunSpec:
     """Load a Jaxtitan TOML config into a resolved RunSpec."""
 
     config_path = Path(path)
-    with config_path.open("rb") as handle:
-        raw = tomllib.load(handle)
+    try:
+        with config_path.open("rb") as handle:
+            raw = tomllib.load(handle)
+    except OSError as exc:
+        raise ConfigError(f"failed to read config {config_path}: {exc}") from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"failed to parse config {config_path}: {exc}") from exc
     return run_spec_from_mapping(raw)
 
 

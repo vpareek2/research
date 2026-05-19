@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from hashlib import sha256
+import json
 
 import pytest
 
-from jaxtitan.config import load_config
+from jaxtitan.config import load_config, resolved_config_sha256, run_spec_to_json, source_config_sha256
 from jaxtitan.errors import ConfigError
 
 MINIMAL_CONFIG = """
@@ -69,3 +71,18 @@ def test_load_config_rejects_cross_spec_mismatch(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="max_seq_len"):
         load_config(config_path)
+
+
+def test_run_spec_json_and_hashes_are_stable(tmp_path: Path) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(MINIMAL_CONFIG)
+    spec = load_config(config_path)
+
+    resolved_json = run_spec_to_json(spec)
+    decoded = json.loads(resolved_json)
+
+    assert decoded["run_id"] == "smoke"
+    assert decoded["data"]["train_manifest"] == "data/train/manifest.json"
+    assert resolved_json == run_spec_to_json(spec)
+    assert resolved_config_sha256(spec) == sha256(resolved_json.encode("utf-8")).hexdigest()
+    assert source_config_sha256(config_path) == sha256(MINIMAL_CONFIG.encode("utf-8")).hexdigest()

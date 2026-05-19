@@ -111,3 +111,37 @@ class RunSpec:
     @property
     def dirs(self) -> RunDirs:
         return RunDirs(root=self.output_dir, run_id=self.run_id)
+
+
+@dataclass(frozen=True, slots=True)
+class RunManifest:
+    """Canonical local run initialization manifest."""
+
+    schema_version: int
+    artifact_layout_version: int
+    run_id: str
+    created_at: str
+    source_config_path: Path
+    source_config_sha256: str
+    resolved_config_sha256: str
+    package: dict[str, str]
+    directories: dict[str, str]
+    run_dir: Path
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_config_path", Path(self.source_config_path))
+        object.__setattr__(self, "run_dir", Path(self.run_dir))
+        if self.schema_version <= 0:
+            raise ContractError(f"manifest.schema_version must be positive, got {self.schema_version}")
+        if self.artifact_layout_version <= 0:
+            raise ContractError(
+                f"manifest.artifact_layout_version must be positive, got {self.artifact_layout_version}"
+            )
+        if not self.run_id:
+            raise ContractError("manifest.run_id must be non-empty")
+        if not self.created_at:
+            raise ContractError("manifest.created_at must be non-empty")
+        if not self.source_config_sha256:
+            raise ContractError("manifest.source_config_sha256 must be non-empty")
+        if not self.resolved_config_sha256:
+            raise ContractError("manifest.resolved_config_sha256 must be non-empty")
