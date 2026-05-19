@@ -115,15 +115,21 @@ def _run_section(raw: Mapping[str, Any]) -> TomlRunSection:
 
 
 def _model_section(raw: Mapping[str, Any]) -> TomlModelSection:
+    rope_theta = _optional_float(raw, "rope_theta", "model")
+    norm_epsilon = _optional_float(raw, "norm_epsilon", "model")
     return TomlModelSection(
         name=_required_str(raw, "name", "model"),
         variant=_required_str(raw, "variant", "model"),
         vocab_size=_required_int(raw, "vocab_size", "model"),
         hidden_size=_required_int(raw, "hidden_size", "model"),
+        intermediate_size=_required_int(raw, "intermediate_size", "model"),
         num_layers=_required_int(raw, "num_layers", "model"),
         num_heads=_required_int(raw, "num_heads", "model"),
         max_seq_len=_required_int(raw, "max_seq_len", "model"),
         n_kv_heads=_optional_int(raw, "n_kv_heads", "model"),
+        rope_theta=1_000_000.0 if rope_theta is None else rope_theta,
+        norm_epsilon=1e-6 if norm_epsilon is None else norm_epsilon,
+        tied_embeddings=_optional_bool(raw, "tied_embeddings", "model", default=False),
         param_dtype=_optional_str(raw, "param_dtype", "model", default="float32"),
         compute_dtype=_optional_str(raw, "compute_dtype", "model", default="bfloat16"),
     )
@@ -244,6 +250,13 @@ def _optional_float(raw: Mapping[str, Any], key: str, section: str) -> float | N
     if not isinstance(value, int | float):
         raise ConfigError(f"{section}.{key} must be numeric")
     return float(value)
+
+
+def _optional_bool(raw: Mapping[str, Any], key: str, section: str, *, default: bool) -> bool:
+    value = raw.get(key, default)
+    if not isinstance(value, bool):
+        raise ConfigError(f"{section}.{key} must be a boolean")
+    return value
 
 
 def _optional_path(raw: Mapping[str, Any], key: str, section: str) -> Path | None:

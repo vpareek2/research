@@ -17,10 +17,14 @@ class TomlModelSection:
     variant: str
     vocab_size: int
     hidden_size: int
+    intermediate_size: int
     num_layers: int
     num_heads: int
     max_seq_len: int
     n_kv_heads: int | None = None
+    rope_theta: float = 1_000_000.0
+    norm_epsilon: float = 1e-6
+    tied_embeddings: bool = False
     param_dtype: str = "float32"
     compute_dtype: str = "bfloat16"
 

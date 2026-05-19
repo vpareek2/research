@@ -14,6 +14,7 @@ name = "decoder"
 variant = "tiny"
 vocab_size = 32000
 hidden_size = 128
+intermediate_size = 512
 num_layers = 2
 num_heads = 4
 max_seq_len = 64

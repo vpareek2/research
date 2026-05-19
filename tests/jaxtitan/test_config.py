@@ -18,6 +18,7 @@ name = "decoder"
 variant = "tiny"
 vocab_size = 32000
 hidden_size = 128
+intermediate_size = 512
 num_layers = 2
 num_heads = 4
 max_seq_len = 64
@@ -56,11 +57,42 @@ def test_load_config_resolves_minimal_toml(tmp_path: Path) -> None:
     assert spec.run_id == "smoke"
     assert spec.seed == 11
     assert spec.model.hidden_size == 128
+    assert spec.model.intermediate_size == 512
+    assert spec.model.rope_theta == 1_000_000.0
+    assert spec.model.norm_epsilon == 1e-6
+    assert spec.model.tied_embeddings is False
     assert spec.optimizer.schedule.peak_lr == 0.001
     assert spec.data.train_manifest == Path("data/train/manifest.json")
     assert spec.training.target_tokens == 128
     assert spec.mesh.axis_names == ("data",)
     assert spec.artifacts.root == Path("runs")
+
+
+def test_load_config_accepts_explicit_model_runtime_fields(tmp_path: Path) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace(
+            "max_seq_len = 64",
+            "\n".join(
+                [
+                    "max_seq_len = 64",
+                    "n_kv_heads = 2",
+                    "rope_theta = 10000.0",
+                    "norm_epsilon = 0.00001",
+                    'param_dtype = "bfloat16"',
+                    'compute_dtype = "float32"',
+                ]
+            ),
+        )
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.model.n_kv_heads == 2
+    assert spec.model.rope_theta == 10000.0
+    assert spec.model.norm_epsilon == 0.00001
+    assert spec.model.param_dtype == "bfloat16"
+    assert spec.model.compute_dtype == "float32"
 
 
 def test_load_config_rejects_cross_spec_mismatch(tmp_path: Path) -> None:
