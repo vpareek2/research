@@ -6,9 +6,7 @@ import sys
 
 from jaxtitan import __version__
 from jaxtitan.config import load_config, run_spec_to_json
-from jaxtitan.data import prepared_dataset_manifest_to_json, validate_dataset_manifest
 from jaxtitan.errors import JaxtitanError
-from jaxtitan.services import initialize_run
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,6 +40,18 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("path", help="Path to a Jaxtitan TOML config.")
     train_parser.add_argument("--resume", action="store_true", help="Resume from the latest local checkpoint.")
 
+    inspect_parser = run_commands.add_parser("inspect", help="Inspect local run artifacts.")
+    inspect_parser.add_argument("run_dir", help="Path to a local Jaxtitan run directory.")
+    inspect_parser.add_argument("--json", action="store_true", help="Print inspection JSON.")
+
+    eval_parser = commands.add_parser("eval", help="Run deterministic evals over local artifacts.")
+    eval_commands = eval_parser.add_subparsers(dest="eval_command", required=True)
+
+    checkpoint_eval_parser = eval_commands.add_parser("checkpoint", help="Evaluate a retained checkpoint.")
+    checkpoint_eval_parser.add_argument("run_dir", help="Path to a local Jaxtitan run directory.")
+    checkpoint_eval_parser.add_argument("--checkpoint", required=True, help="'best', 'latest', or a checkpoint step.")
+    checkpoint_eval_parser.add_argument("--json", action="store_true", help="Print checkpoint eval JSON.")
+
     return parser
 
 
@@ -59,6 +69,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "data" and args.data_command == "check":
+            from jaxtitan.data import prepared_dataset_manifest_to_json, validate_dataset_manifest
+
             manifest = validate_dataset_manifest(
                 args.path,
                 tokenizer_id=args.tokenizer,
@@ -71,6 +83,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "run" and args.run_command == "init":
+            from jaxtitan.services import initialize_run
+
             manifest = initialize_run(args.path)
             print(manifest.run_dir)
             return 0
@@ -80,6 +94,30 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             summary = run_training(args.path, resume=args.resume)
             print(summary.run_dir)
+            return 0
+
+        if args.command == "run" and args.run_command == "inspect":
+            from jaxtitan.runtime.inspect import format_run_inspection, inspect_run, run_inspection_to_json
+
+            inspection = inspect_run(args.run_dir)
+            if args.json:
+                print(run_inspection_to_json(inspection))
+            else:
+                print(format_run_inspection(inspection))
+            return 0
+
+        if args.command == "eval" and args.eval_command == "checkpoint":
+            from jaxtitan.runtime.checkpoint_eval import (
+                checkpoint_eval_to_json,
+                evaluate_checkpoint,
+                format_checkpoint_eval,
+            )
+
+            payload = evaluate_checkpoint(args.run_dir, args.checkpoint)
+            if args.json:
+                print(checkpoint_eval_to_json(payload))
+            else:
+                print(format_checkpoint_eval(payload))
             return 0
     except JaxtitanError as exc:
         print(f"error: {exc}", file=sys.stderr)

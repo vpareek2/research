@@ -33,7 +33,11 @@ class CheckpointService(Protocol):
         metadata: Mapping[str, Any],
     ) -> None: ...
 
+    def restore(self, step: int, template_train_state: TrainState) -> CheckpointRestore: ...
+
     def restore_latest(self, template_train_state: TrainState) -> CheckpointRestore: ...
+
+    def restore_metadata(self, step: int) -> dict[str, Any]: ...
 
     def restore_latest_metadata(self) -> dict[str, Any]: ...
 
@@ -99,6 +103,13 @@ class LocalOrbaxCheckpointService:
         step = self.latest_step()
         if step is None:
             raise ContractError(f"no checkpoints found in {self.checkpoints_dir}")
+        return self.restore(step, template_train_state)
+
+    def restore(self, step: int, template_train_state: TrainState) -> CheckpointRestore:
+        """Restore one checkpoint step using a template TrainState tree."""
+
+        if not (self.checkpoints_dir / f"{step:06d}").is_dir():
+            raise ContractError(f"checkpoint step {step} does not exist in {self.checkpoints_dir}")
         restored = self._manager.restore(
             step,
             args=self._ocp.args.Composite(
@@ -118,7 +129,7 @@ class LocalOrbaxCheckpointService:
             host_state=host_state,
             metadata=dict(_require_mapping(restored["metadata"], "metadata")),
             step=step,
-            path=self.latest_path() or self.checkpoints_dir / f"{step:06d}",
+            path=self.checkpoints_dir / f"{step:06d}",
         )
 
     def restore_latest_metadata(self) -> dict[str, Any]:
@@ -127,6 +138,13 @@ class LocalOrbaxCheckpointService:
         step = self.latest_step()
         if step is None:
             raise ContractError(f"no checkpoints found in {self.checkpoints_dir}")
+        return self.restore_metadata(step)
+
+    def restore_metadata(self, step: int) -> dict[str, Any]:
+        """Restore only metadata from one checkpoint step."""
+
+        if not (self.checkpoints_dir / f"{step:06d}").is_dir():
+            raise ContractError(f"checkpoint step {step} does not exist in {self.checkpoints_dir}")
         restored = self._manager.restore(
             step,
             args=self._ocp.args.Composite(metadata=self._ocp.args.JsonRestore()),
