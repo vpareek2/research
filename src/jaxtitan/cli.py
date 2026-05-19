@@ -36,6 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser = run_commands.add_parser("init", help="Initialize a local run directory from a TOML config.")
     init_parser.add_argument("path", help="Path to a Jaxtitan TOML config.")
 
+    preflight_parser = run_commands.add_parser("preflight", help="Check whether a config is ready to run locally.")
+    preflight_parser.add_argument("path", help="Path to a Jaxtitan TOML config.")
+    preflight_parser.add_argument("--json", action="store_true", help="Print preflight report JSON.")
+
     train_parser = run_commands.add_parser("train", help="Run a minimal local training loop from a TOML config.")
     train_parser.add_argument("path", help="Path to a Jaxtitan TOML config.")
     train_parser.add_argument("--resume", action="store_true", help="Resume from the latest local checkpoint.")
@@ -87,6 +91,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             manifest = initialize_run(args.path)
             print(manifest.run_dir)
+            return 0
+
+        if args.command == "run" and args.run_command == "preflight":
+            from jaxtitan.runtime.preflight import format_preflight_report, preflight_report_to_json, run_preflight
+
+            report = run_preflight(args.path)
+            if args.json:
+                print(preflight_report_to_json(report))
+            else:
+                print(format_preflight_report(report))
             return 0
 
         if args.command == "run" and args.run_command == "train":
