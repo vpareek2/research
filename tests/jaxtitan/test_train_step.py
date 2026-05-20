@@ -317,6 +317,38 @@ def test_block_remat_train_step_matches_plain_with_gradient_accumulation() -> No
     assert _trees_close(next_remat.model, next_plain.model)
 
 
+def test_muon_train_step_supports_accumulation_remat_donation_and_sharding() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(compute_dtype="float32", remat="block"), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
+    plan = build_sharding_plan(context)
+    model_state = place_replicated(built.state, plan)
+    optimizer = _optimizer(model_state, built.metadata, optimizer_name="muon")
+    state = initialize_train_state(model_state, optimizer.transform, seed=1)
+    step = make_train_step(
+        built.graph,
+        optimizer,
+        sharding=plan,
+        state_template=state,
+        donate_state=True,
+        expected_batch_shape=(2, 8, 4),
+    )
+    micro = _batch(batch_size=8, seq_len=4, vocab_size=16)
+    batch = Batch(
+        input_ids=np.stack([micro.input_ids, micro.input_ids]),
+        target_ids=np.stack([micro.target_ids, micro.target_ids]),
+        loss_mask=np.ones((2, 8, 4), dtype=np.bool_),
+    )
+
+    next_state, metrics = step(state, place_accumulated_batch(batch, plan))
+
+    assert next_state.step == 1
+    assert next_state.tokens_seen == 64
+    assert metrics.token_count == 64
+    assert metrics.loss_sum.shape == ()
+    assert {assignment.backend for assignment in optimizer.route_assignments} == {"adamw", "muon"}
+
+
 def test_train_step_with_data_axis_sharding_reports_global_metrics() -> None:
     require_fake_devices()
     built = build_model(_tiny_spec(), seed=0)
@@ -412,11 +444,11 @@ def test_data_axis_sharded_train_step_matches_one_device_global_batch() -> None:
     assert _trees_close(next_four.model, next_one.model)
 
 
-def _optimizer(model_state, metadata, *, schedule: ScheduleSpec | None = None):
+def _optimizer(model_state, metadata, *, schedule: ScheduleSpec | None = None, optimizer_name: str = "adamw"):
     if schedule is None:
         schedule = ScheduleSpec(peak_lr=1e-3)
     return build_optimizer(
-        OptimizerSpec(name="adamw", schedule=schedule, weight_decay=0.01),
+        OptimizerSpec(name=optimizer_name, schedule=schedule, weight_decay=0.01),
         model_state,
         metadata,
     )

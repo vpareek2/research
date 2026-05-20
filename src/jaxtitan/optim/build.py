@@ -16,13 +16,34 @@ import optax
 
 from jaxtitan.errors import ContractError
 from jaxtitan.models import ParamMetadata
+from jaxtitan.optim.muon import muon_policy_constants, muon_transform
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
 
 PyTree = Any
 ADAMW_B1 = 0.9
 ADAMW_B2 = 0.999
 ADAMW_EPS = 1e-8
-_SUPPORTED_RUNTIME_BACKENDS = {"adamw"}
+_SUPPORTED_RUNTIME_BACKENDS = {"adamw", "muon"}
+_MUON_TAGS = frozenset(
+    {
+        "attention_q",
+        "attention_k",
+        "attention_v",
+        "attention_o",
+        "mlp_gate",
+        "mlp_up",
+        "mlp_down",
+    }
+)
+_NORM_TAGS = frozenset(
+    {
+        "attention_q_norm",
+        "attention_k_norm",
+        "block_pre_norm",
+        "block_post_norm",
+        "final_norm",
+    }
+)
 
 
 class OptimizerTransform(Protocol):
@@ -43,6 +64,7 @@ class RouteAssignment:
     tag: str
     backend: str
     weight_decay: bool
+    fallback_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,21 +126,22 @@ def build_optimizer(
     metadata = tuple(metadata)
     assignments = _route_assignments(spec, metadata)
     schedule = build_lr_schedule(spec.schedule)
-    weight_decay_mask = _weight_decay_mask(model_state, assignments)
+    _validate_assignment_paths(model_state, assignments)
 
     transforms = []
     if spec.grad_clip_norm is not None:
         transforms.append(optax.clip_by_global_norm(spec.grad_clip_norm))
-    transforms.append(
-        optax.adamw(
-            learning_rate=schedule,
-            b1=ADAMW_B1,
-            b2=ADAMW_B2,
-            eps=ADAMW_EPS,
-            weight_decay=spec.weight_decay,
-            mask=weight_decay_mask,
+
+    if spec.name == "adamw":
+        transforms.append(_adamw_transform(schedule, spec, assignments, model_state))
+    elif spec.name == "muon":
+        transforms.extend(_muon_primary_transforms(schedule, spec, assignments, model_state))
+    else:
+        raise ContractError(
+            f"optimizer.name {spec.name!r} is valid config but has no Jaxtitan runtime adapter yet; "
+            f"supported runtime backends: {sorted(_SUPPORTED_RUNTIME_BACKENDS)}"
         )
-    )
+
     transform = optax.chain(*transforms)
     return OptimizerBuildResult(
         transform=transform,
@@ -140,7 +163,55 @@ def describe_optimizer(spec: OptimizerSpec) -> str:
         f"min_lr_ratio={spec.schedule.min_lr_ratio:g} stable_steps={stable} "
         f"weight_decay={spec.weight_decay:g} grad_clip_norm={clip} "
         f"adamw_b1={ADAMW_B1:g} adamw_b2={ADAMW_B2:g} adamw_eps={ADAMW_EPS:g}"
+        f"{_muon_description_suffix(spec)}"
     )
+
+
+def optimizer_policy_summary(
+    spec: OptimizerSpec,
+    assignments: Iterable[RouteAssignment] | None = None,
+) -> dict[str, Any]:
+    """Return a stable optimizer policy payload for artifacts and compatibility checks."""
+
+    assignments = None if assignments is None else tuple(assignments)
+    payload = {
+        "name": spec.name,
+        "supported_runtime_backends": sorted(_SUPPORTED_RUNTIME_BACKENDS),
+        "adamw": {
+            "b1": ADAMW_B1,
+            "b2": ADAMW_B2,
+            "eps": ADAMW_EPS,
+        },
+        "muon": {
+            **muon_policy_constants(),
+            "hidden_matrix_tags": sorted(_MUON_TAGS),
+            "fallback_tags": ["embedding", "lm_head", *sorted(_NORM_TAGS)],
+        },
+        "route_counts": None,
+        "fallback_counts": None,
+        "routes": None,
+    }
+    if assignments is not None:
+        route_counts: dict[str, int] = {}
+        fallback_counts: dict[str, int] = {}
+        routes = []
+        for assignment in assignments:
+            route_counts[assignment.backend] = route_counts.get(assignment.backend, 0) + 1
+            if assignment.fallback_reason is not None:
+                fallback_counts[assignment.fallback_reason] = fallback_counts.get(assignment.fallback_reason, 0) + 1
+            routes.append(
+                {
+                    "path": list(assignment.path),
+                    "tag": assignment.tag,
+                    "backend": assignment.backend,
+                    "weight_decay": assignment.weight_decay,
+                    "fallback_reason": assignment.fallback_reason,
+                }
+            )
+        payload["route_counts"] = dict(sorted(route_counts.items()))
+        payload["fallback_counts"] = dict(sorted(fallback_counts.items()))
+        payload["routes"] = routes
+    return payload
 
 
 def _route_assignments(spec: OptimizerSpec, metadata: tuple[ParamMetadata, ...]) -> tuple[RouteAssignment, ...]:
@@ -166,18 +237,130 @@ def _route_assignments(spec: OptimizerSpec, metadata: tuple[ParamMetadata, ...])
     assignments = []
     for item in metadata:
         rule = routes_by_tag.get(item.tag)
+        backend = _default_backend(spec, item) if rule is None else rule.transform
+        weight_decay = True if rule is None else rule.weight_decay
+        _validate_route(item, backend)
         assignments.append(
             RouteAssignment(
                 path=item.path,
                 tag=item.tag,
-                backend=spec.name if rule is None else rule.transform,
-                weight_decay=True if rule is None else rule.weight_decay,
+                backend=backend,
+                weight_decay=weight_decay,
+                fallback_reason=_fallback_reason(spec, item, backend, rule is not None),
             )
         )
     return tuple(assignments)
 
 
-def _weight_decay_mask(params: PyTree, assignments: tuple[RouteAssignment, ...]) -> PyTree:
+def _adamw_transform(
+    schedule: Callable[[Any], jax.Array],
+    spec: OptimizerSpec,
+    assignments: tuple[RouteAssignment, ...],
+    params: PyTree,
+) -> optax.GradientTransformationExtraArgs:
+    return optax.adamw(
+        learning_rate=schedule,
+        b1=ADAMW_B1,
+        b2=ADAMW_B2,
+        eps=ADAMW_EPS,
+        weight_decay=spec.weight_decay,
+        mask=_mask_from_assignments(params, assignments, lambda assignment: assignment.weight_decay),
+    )
+
+
+def _muon_primary_transforms(
+    schedule: Callable[[Any], jax.Array],
+    spec: OptimizerSpec,
+    assignments: tuple[RouteAssignment, ...],
+    params: PyTree,
+) -> list[optax.GradientTransformationExtraArgs]:
+    transforms = []
+    muon_decay_mask = _mask_from_assignments(
+        params,
+        assignments,
+        lambda assignment: assignment.backend == "muon" and assignment.weight_decay,
+    )
+    muon_no_decay_mask = _mask_from_assignments(
+        params,
+        assignments,
+        lambda assignment: assignment.backend == "muon" and not assignment.weight_decay,
+    )
+    adamw_mask = _mask_from_assignments(params, assignments, lambda assignment: assignment.backend == "adamw")
+    adamw_decay_mask = _mask_from_assignments(
+        params,
+        assignments,
+        lambda assignment: assignment.backend == "adamw" and assignment.weight_decay,
+    )
+    if _mask_any(muon_decay_mask):
+        transforms.append(
+            optax.masked(
+                muon_transform(schedule, weight_decay=spec.weight_decay),
+                muon_decay_mask,
+                mask_compatible_extra_args=True,
+            )
+        )
+    if _mask_any(muon_no_decay_mask):
+        transforms.append(
+            optax.masked(
+                muon_transform(schedule, weight_decay=0.0),
+                muon_no_decay_mask,
+                mask_compatible_extra_args=True,
+            )
+        )
+    if _mask_any(adamw_mask):
+        transforms.append(
+            optax.masked(
+                optax.adamw(
+                    learning_rate=schedule,
+                    b1=ADAMW_B1,
+                    b2=ADAMW_B2,
+                    eps=ADAMW_EPS,
+                    weight_decay=spec.weight_decay,
+                    mask=adamw_decay_mask,
+                ),
+                adamw_mask,
+                mask_compatible_extra_args=True,
+            )
+        )
+    return transforms
+
+
+def _default_backend(spec: OptimizerSpec, item: ParamMetadata) -> str:
+    if spec.name == "adamw":
+        return "adamw"
+    if spec.name == "muon":
+        return "muon" if item.tag in _MUON_TAGS else "adamw"
+    return spec.name
+
+
+def _validate_route(item: ParamMetadata, backend: str) -> None:
+    if backend == "muon" and len(item.shape) != 2:
+        raise ContractError(
+            f"Muon route for parameter {'.'.join(item.path)!r} requires a rank-2 matrix, got shape {item.shape}"
+        )
+    if item.tag in _MUON_TAGS and len(item.shape) != 2:
+        raise ContractError(
+            f"Muon-eligible parameter {'.'.join(item.path)!r} has tag {item.tag!r} but shape {item.shape}"
+        )
+
+
+def _fallback_reason(spec: OptimizerSpec, item: ParamMetadata, backend: str, explicit_rule: bool) -> str | None:
+    if spec.name != "muon" or backend != "adamw":
+        return None
+    if explicit_rule:
+        return "route_rule"
+    if item.tag == "embedding":
+        return "embedding"
+    if item.tag == "lm_head":
+        return "lm_head"
+    if item.tag in _NORM_TAGS:
+        return "norm"
+    if len(item.shape) != 2:
+        return "rank_not_two"
+    return "not_hidden_matrix"
+
+
+def _validate_assignment_paths(params: PyTree, assignments: tuple[RouteAssignment, ...]) -> None:
     assignments_by_path = {assignment.path: assignment for assignment in assignments}
     param_paths = {_metadata_path_from_jax_path(path) for path, _value in jax.tree_util.tree_flatten_with_path(params)[0]}
     assignment_paths = set(assignments_by_path)
@@ -188,11 +371,38 @@ def _weight_decay_mask(params: PyTree, assignments: tuple[RouteAssignment, ...])
     if extra:
         raise ContractError(f"optimizer metadata has stale parameter path {'.'.join(extra[0])!r}")
 
+
+def _mask_from_assignments(
+    params: PyTree,
+    assignments: tuple[RouteAssignment, ...],
+    predicate: Callable[[RouteAssignment], bool],
+) -> PyTree:
+    assignments_by_path = {assignment.path: assignment for assignment in assignments}
+
     def leaf_mask(path, _value):
         metadata_path = _metadata_path_from_jax_path(path)
-        return assignments_by_path[metadata_path].weight_decay
+        return bool(predicate(assignments_by_path[metadata_path]))
 
     return jax.tree_util.tree_map_with_path(leaf_mask, params)
+
+
+def _mask_any(mask: PyTree) -> bool:
+    return any(jax.tree.leaves(mask))
+
+
+def _muon_description_suffix(spec: OptimizerSpec) -> str:
+    if spec.name != "muon":
+        return ""
+    constants = muon_policy_constants()
+    return (
+        f" muon_momentum={constants['momentum']:g} "
+        f"muon_nesterov={str(constants['nesterov']).lower()} "
+        f"muon_ns_steps={constants['newton_schulz_steps']} "
+        f"muon_ns_coefficients={constants['newton_schulz_coefficients']} "
+        f"muon_scale_mode={constants['scale_mode']} "
+        f"muon_rms_match_scale={constants['rms_match_scale']:g} "
+        "adamw_fallback=true"
+    )
 
 
 def _metadata_path_from_jax_path(path) -> tuple[str, ...]:

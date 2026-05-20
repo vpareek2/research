@@ -12,6 +12,7 @@ import numpy as np
 
 from jaxtitan.data import data_pipeline_compat_payload, dataset_manifest_sha256
 from jaxtitan.errors import ContractError
+from jaxtitan.optim import optimizer_policy_summary
 from jaxtitan.services import CheckpointRestore
 from jaxtitan.specs.run import RunSpec
 
@@ -33,7 +34,10 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
     payload = {
         "seed": spec.seed,
         "model": _normalize(spec.model),
-        "optimizer": _normalize(spec.optimizer),
+        "optimizer": {
+            **_normalize(spec.optimizer),
+            "policy": optimizer_policy_summary(spec.optimizer),
+        },
         "mesh": _normalize(spec.mesh),
         "data": {
             "train_manifest": spec.data.train_manifest.as_posix(),

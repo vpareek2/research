@@ -233,15 +233,16 @@ def _run_training_initialized(
     context = build_mesh_context(runtime_spec.mesh)
     sharding = build_sharding_plan(context)
     model = build_model(runtime_spec.model, seed=runtime_spec.seed)
+    optimizer = build_optimizer(runtime_spec.optimizer, model.state, model.metadata)
     runtime_diagnostics = build_runtime_diagnostics(
         runtime_spec,
         context,
         model.metadata,
+        optimizer=optimizer,
         sharding=sharding,
         data_pipeline=data.describe(),
     )
     writer.write_runtime_diagnostics(runtime_diagnostics.payload)
-    optimizer = build_optimizer(runtime_spec.optimizer, model.state, model.metadata)
     model_state = place_replicated(model.state, sharding)
     train_state = initialize_train_state(model_state, optimizer.transform, seed=runtime_spec.seed)
     expected_train_shape = (

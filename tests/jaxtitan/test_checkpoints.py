@@ -134,15 +134,35 @@ def test_restored_train_state_can_continue_one_train_step(tmp_path) -> None:
     assert metrics.token_count == 8
 
 
+def test_muon_optimizer_state_round_trips_and_can_continue(tmp_path) -> None:
+    built = build_model(_tiny_spec(), seed=0)
+    optimizer = _optimizer(built.state, built.metadata, optimizer_name="muon")
+    train_state = _advanced_state(built, optimizer)
+    dataset_state = _dataset_state(token_offset=8, next_record_index=2)
+    host_state = HostState(dataset=dataset_state, last_checkpoint_step=1, wallclock_start_ns=123, run_id="smoke")
+    service = LocalOrbaxCheckpointService(tmp_path / "run", max_to_keep=2)
+    service.save(1, train_state, dataset_state, host_state, {"step": 1, "optimizer": "muon"})
+
+    restored = service.restore_latest(initialize_train_state(built.state, optimizer.transform, seed=2))
+    next_state, metrics = make_train_step(built.graph, optimizer)(restored.train_state, _batch(offset=8))
+    service.close()
+
+    assert restored.metadata["optimizer"] == "muon"
+    assert _trees_equal(restored.train_state.opt_state, train_state.opt_state)
+    assert next_state.step == 2
+    assert next_state.tokens_seen == 16
+    assert metrics.token_count == 8
+
+
 def _advanced_state(built, optimizer):
     state = initialize_train_state(built.state, optimizer.transform, seed=1)
     next_state, _ = make_train_step(built.graph, optimizer)(state, _batch())
     return next_state
 
 
-def _optimizer(model_state, metadata):
+def _optimizer(model_state, metadata, *, optimizer_name: str = "adamw"):
     return build_optimizer(
-        OptimizerSpec(name="adamw", schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.01),
+        OptimizerSpec(name=optimizer_name, schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.01),
         model_state,
         metadata,
     )

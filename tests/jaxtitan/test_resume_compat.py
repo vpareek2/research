@@ -36,6 +36,7 @@ def test_resume_fingerprint_ignores_safe_runtime_controls(tmp_path: Path, prepar
     [
         {"hidden_size": 16},
         {"remat": "block"},
+        {"optimizer_name": "muon"},
         {"weight_decay": 0.2},
         {"axis_sizes": (2,)},
         {"seed": 12},
@@ -127,6 +128,9 @@ def test_resume_metadata_contains_compatibility_payload(tmp_path: Path, prepared
     assert metadata["metrics"] == {"train_loss": 1.25, "eval_loss": None}
     assert metadata["runtime_fingerprint"] == build_resume_compat(spec).runtime_fingerprint
     assert metadata["compatibility"] == build_resume_compat(spec).payload
+    assert metadata["compatibility"]["optimizer"]["name"] == "adamw"
+    assert metadata["compatibility"]["optimizer"]["policy"]["name"] == "adamw"
+    assert metadata["compatibility"]["optimizer"]["policy"]["muon"]["scale_mode"] == "match_rms_adamw"
     assert metadata["mutable_controls"] == {
         "target_tokens": 128,
         "log_every_steps": 1,
@@ -209,6 +213,7 @@ def _config_text(
     hidden_size: int = 8,
     remat: str = "none",
     weight_decay: float = 0.0,
+    optimizer_name: str = "adamw",
     schedule_name: str = "constant",
     total_steps: int | None = None,
     tokenizer_id: str = "toy-tokenizer",
@@ -252,7 +257,7 @@ compute_dtype = "float32"
 remat = "{remat}"
 
 [optimizer]
-name = "adamw"
+name = "{optimizer_name}"
 weight_decay = {weight_decay}
 
 [optimizer.schedule]

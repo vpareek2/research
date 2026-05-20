@@ -16,6 +16,7 @@ import numpy as np
 
 from jaxtitan import __version__
 from jaxtitan.models import ParamMetadata, count_parameters
+from jaxtitan.optim import optimizer_policy_summary
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.run import RunSpec
 
@@ -138,6 +139,7 @@ def build_runtime_diagnostics(
     context: Any,
     metadata: tuple[ParamMetadata, ...],
     *,
+    optimizer: Any | None = None,
     sharding: Any | None = None,
     data_pipeline: Mapping[str, Any] | None = None,
 ) -> RuntimeDiagnostics:
@@ -207,6 +209,10 @@ def build_runtime_diagnostics(
             "gradient_accumulation_steps": spec.training.gradient_accumulation_steps,
             "remat": spec.model.remat,
         },
+        "optimizer": optimizer_policy_summary(
+            spec.optimizer,
+            None if optimizer is None else optimizer.route_assignments,
+        ),
         "performance": {
             "device_kind": device_kind,
             "device_count": device_count,

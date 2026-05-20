@@ -181,6 +181,8 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert diagnostics["packages"]["jaxtitan"]
     assert diagnostics["packages"]["grain"]
     assert diagnostics["model"]["remat"] == "none"
+    assert diagnostics["optimizer"]["name"] == "adamw"
+    assert diagnostics["optimizer"]["route_counts"] == {"adamw": diagnostics["model"]["parameter_leaves"]}
     assert diagnostics["data_pipeline"]["backend"] == "grain"
     assert diagnostics["data_pipeline"]["order"] == "sequential"
     assert diagnostics["data_pipeline"]["shuffle_seed"] is None
@@ -203,6 +205,35 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert diagnostics["sharding"]["batch"]["accumulated_input_ids"]["partition_spec"] == "PartitionSpec(None, 'data', None)"
     assert diagnostics["sharding"]["train_state"]["model"]["partition_spec"] == "PartitionSpec()"
     assert (run_dir / "checkpoints" / "000002").is_dir()
+
+
+def test_run_training_records_muon_optimizer_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "muon-loop",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            optimizer_name="muon",
+        )
+    )
+
+    run_training(config_path)
+
+    diagnostics = json.loads((tmp_path / "runs" / "loop" / "diagnostics" / "runtime.json").read_text())
+    assert diagnostics["optimizer"]["name"] == "muon"
+    assert diagnostics["optimizer"]["route_counts"] == {"adamw": 7, "muon": 7}
+    assert diagnostics["optimizer"]["muon"]["scale_mode"] == "match_rms_adamw"
 
 
 def test_run_training_with_four_device_data_axis_reports_global_and_per_device_metrics(
@@ -1367,6 +1398,7 @@ def _training_config(
     seed: int = 7,
     hidden_size: int = 8,
     remat: str = "none",
+    optimizer_name: str = "adamw",
     weight_decay: float = 0.0,
     schedule_name: str = "constant",
     total_steps: int | None = None,
@@ -1430,7 +1462,7 @@ compute_dtype = "float32"
 remat = "{remat}"
 
 [optimizer]
-name = "adamw"
+name = "{optimizer_name}"
 weight_decay = {weight_decay}
 
 [optimizer.schedule]

@@ -62,6 +62,8 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert payload["diagnostics"]["data_pipeline"]["worker_buffer_size"] == 1
     assert payload["diagnostics"]["packages"]["grain"]
     assert payload["diagnostics"]["model"]["remat"] == "none"
+    assert payload["diagnostics"]["optimizer"]["name"] == "adamw"
+    assert payload["diagnostics"]["optimizer"]["route_counts"] == {"adamw": payload["model"]["parameter_leaves"]}
     assert payload["diagnostics"]["jax"]["backend"]
     assert payload["compile"]["train"]["donate_state"] is True
     assert payload["compile"]["train"]["expected_batch_shape"] == [1, 2, 4]
@@ -144,6 +146,32 @@ def test_run_preflight_reports_block_remat(
     assert report.payload["diagnostics"]["model"]["remat"] == "block"
     assert report.payload["training"]["compile"] == "passed"
     assert "remat=block" in format_preflight_report(report)
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_accepts_muon_optimizer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("muon", shard_token_groups=(tuple(range(0, 50)),), train_tokens=25)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_preflight_config(manifest, optimizer_name="muon"))
+
+    report = run_preflight(config_path)
+    payload = report.payload
+    text = format_preflight_report(report)
+
+    assert payload["optimizer"]["name"] == "muon"
+    assert payload["optimizer"]["policy"]["route_counts"] == {"adamw": 7, "muon": 7}
+    assert payload["optimizer"]["policy"]["fallback_counts"] == {
+        "embedding": 1,
+        "lm_head": 1,
+        "norm": 5,
+    }
+    assert payload["diagnostics"]["optimizer"] == payload["optimizer"]["policy"]
+    assert "routes={'adamw': 7, 'muon': 7}" in text
     assert not (tmp_path / "runs" / "loop").exists()
 
 
@@ -319,7 +347,7 @@ def test_run_preflight_rejects_existing_run_directory(
         ({"tokenizer_id": "wrong-tokenizer"}, "does not match config tokenizer"),
         ({"eval_name": "perplexity", "eval_every_steps": 1}, "validation"),
         ({"second_eval": True, "eval_every_steps": 1}, "exactly one eval"),
-        ({"optimizer_name": "muon"}, "no Jaxtitan runtime adapter"),
+        ({"optimizer_name": "soap"}, "no Jaxtitan runtime adapter"),
     ],
 )
 def test_run_preflight_rejects_invalid_runtime_inputs(

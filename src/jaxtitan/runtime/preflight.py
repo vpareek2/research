@@ -72,14 +72,15 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
     context = build_mesh_context(runtime_spec.mesh)
     sharding = build_sharding_plan(context)
     model = build_model(runtime_spec.model, seed=runtime_spec.seed)
+    optimizer = build_optimizer(runtime_spec.optimizer, model.state, model.metadata)
     runtime_diagnostics = build_runtime_diagnostics(
         runtime_spec,
         context,
         model.metadata,
+        optimizer=optimizer,
         sharding=sharding,
         data_pipeline=train_data.describe(),
     )
-    optimizer = build_optimizer(runtime_spec.optimizer, model.state, model.metadata)
     model_state = place_replicated(model.state, sharding)
     train_state = initialize_train_state(model_state, optimizer.transform, seed=runtime_spec.seed)
     expected_train_shape = (
@@ -225,6 +226,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
             "peak_lr": runtime_spec.optimizer.schedule.peak_lr,
             "total_steps": runtime_spec.optimizer.schedule.total_steps,
             "description": optimizer.description,
+            "policy": runtime_diagnostics.payload["optimizer"],
         },
         "training": {
             "seq_len": runtime_spec.training.seq_len,
@@ -326,7 +328,8 @@ def format_preflight_report(report: PreflightReport) -> str:
         (
             "optimizer: "
             f"{optimizer['name']} schedule={optimizer['schedule']} "
-            f"peak_lr={optimizer['peak_lr']} total_steps={optimizer['total_steps']}"
+            f"peak_lr={optimizer['peak_lr']} total_steps={optimizer['total_steps']} "
+            f"routes={optimizer['policy']['route_counts']}"
         ),
         (
             "training: "

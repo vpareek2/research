@@ -4,7 +4,13 @@ import pytest
 
 from jaxtitan.errors import ContractError
 from jaxtitan.models import ParamMetadata, build_model
-from jaxtitan.optim import build_lr_schedule, build_optimizer, describe_optimizer
+from jaxtitan.optim import (
+    build_lr_schedule,
+    build_optimizer,
+    describe_optimizer,
+    muon_policy_constants,
+    zeropower_via_newton_schulz,
+)
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ParamRouteRule, ScheduleSpec
 
@@ -68,6 +74,99 @@ def test_adamw_build_init_and_update_accept_nnx_model_state() -> None:
     assert len(jax.tree.leaves(updates)) == len(jax.tree.leaves(result.state))
     assert len(jax.tree.leaves(next_opt_state)) == len(jax.tree.leaves(opt_state))
     assert any(jnp.any(leaf != 0) for leaf in jax.tree.leaves(updates))
+
+
+def test_muon_newton_schulz_is_finite_shape_preserving_and_deterministic() -> None:
+    tall = jnp.arange(15, dtype=jnp.float32).reshape(5, 3) / 10.0
+    wide = jnp.arange(15, dtype=jnp.float32).reshape(3, 5) / 10.0
+
+    first = zeropower_via_newton_schulz(tall)
+    second = zeropower_via_newton_schulz(tall)
+    wide_result = zeropower_via_newton_schulz(wide)
+
+    assert first.shape == tall.shape
+    assert wide_result.shape == wide.shape
+    assert jnp.all(jnp.isfinite(first))
+    assert jnp.all(jnp.isfinite(wide_result))
+    assert jnp.all(first == second)
+
+
+def test_muon_primary_routes_hidden_matrices_to_muon_with_adamw_fallback() -> None:
+    result = build_model(_tiny_spec(), seed=0)
+    built = build_optimizer(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.1),
+        result.state,
+        result.metadata,
+    )
+
+    assignments = {assignment.path: assignment for assignment in built.route_assignments}
+    tags_by_backend = {}
+    for assignment in built.route_assignments:
+        tags_by_backend.setdefault(assignment.backend, set()).add(assignment.tag)
+
+    assert tags_by_backend["muon"] == {
+        "attention_q",
+        "attention_k",
+        "attention_v",
+        "attention_o",
+        "mlp_gate",
+        "mlp_up",
+        "mlp_down",
+    }
+    assert "embedding" in tags_by_backend["adamw"]
+    assert "lm_head" in tags_by_backend["adamw"]
+    assert "final_norm" in tags_by_backend["adamw"]
+    assert assignments[("embed", "embedding")].fallback_reason == "embedding"
+    assert assignments[("lm_head", "kernel")].fallback_reason == "lm_head"
+    assert assignments[("norm", "scale")].fallback_reason == "norm"
+
+
+def test_muon_build_init_and_update_accept_nnx_model_state() -> None:
+    result = build_model(_tiny_spec(), seed=0)
+    built = build_optimizer(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.1),
+        result.state,
+        result.metadata,
+    )
+
+    opt_state = built.transform.init(result.state)
+    grads = jax.tree.map(jnp.ones_like, result.state)
+    updates, next_opt_state = built.transform.update(grads, opt_state, params=result.state)
+
+    assert {assignment.backend for assignment in built.route_assignments} == {"adamw", "muon"}
+    assert len(jax.tree.leaves(updates)) == len(jax.tree.leaves(result.state))
+    assert len(jax.tree.leaves(next_opt_state)) == len(jax.tree.leaves(opt_state))
+    assert any(jnp.any(leaf != 0) for leaf in jax.tree.leaves(updates))
+
+
+def test_muon_momentum_matches_reference_convention() -> None:
+    params = {"w": jnp.ones((2, 3), dtype=jnp.float32)}
+    grads = {"w": jnp.full((2, 3), 2.0, dtype=jnp.float32)}
+    metadata = (ParamMetadata(path=("w",), shape=(2, 3), dtype="float32", count=6, tag="attention_q"),)
+    built = build_optimizer(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3)),
+        params,
+        metadata,
+    )
+
+    opt_state = built.transform.init(params)
+    _updates, next_opt_state = built.transform.update(grads, opt_state, params=params)
+    momentum_leaf = jax.tree.leaves(next_opt_state)[1]
+
+    expected = (1.0 - muon_policy_constants()["momentum"]) * grads["w"]
+    assert jnp.allclose(momentum_leaf, expected)
+
+
+def test_muon_rejects_eligible_tags_that_are_not_matrices() -> None:
+    params = {"w": jnp.asarray([1.0, 2.0])}
+    metadata = (ParamMetadata(path=("w",), shape=(2,), dtype="float32", count=2, tag="attention_q"),)
+
+    with pytest.raises(ContractError, match="Muon route"):
+        build_optimizer(
+            OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1.0)),
+            params,
+            metadata,
+        )
 
 
 def test_grad_clip_norm_changes_adamw_update_deterministically() -> None:
@@ -158,7 +257,7 @@ def test_build_optimizer_rejects_stale_metadata_paths() -> None:
 def test_unsupported_optimizer_names_fail_at_runtime_build() -> None:
     params = {"w": jnp.asarray([1.0])}
     metadata = (ParamMetadata(path=("w",), shape=(1,), dtype="float32", count=1, tag="weight"),)
-    spec = OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1.0))
+    spec = OptimizerSpec(name="soap", schedule=ScheduleSpec(peak_lr=1.0))
 
     with pytest.raises(ContractError, match="runtime adapter"):
         build_optimizer(spec, params, metadata)
@@ -181,6 +280,16 @@ def test_describe_optimizer_includes_backend_schedule_and_adamw_defaults() -> No
     assert "grad_clip_norm=1" in description
     assert "adamw_b1=0.9" in description
     assert "adamw_eps=1e-08" in description
+
+
+def test_describe_optimizer_includes_muon_policy_constants() -> None:
+    description = describe_optimizer(OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=0.001)))
+
+    assert "muon" in description
+    assert "muon_momentum=0.95" in description
+    assert "muon_ns_steps=5" in description
+    assert "muon_scale_mode=match_rms_adamw" in description
+    assert "adamw_fallback=true" in description
 
 
 def _tiny_spec(**overrides) -> ModelSpec:
