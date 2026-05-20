@@ -61,9 +61,11 @@ def test_load_config_resolves_minimal_toml(tmp_path: Path) -> None:
     assert spec.model.rope_theta == 1_000_000.0
     assert spec.model.norm_epsilon == 1e-6
     assert spec.model.tied_embeddings is False
+    assert spec.model.remat == "none"
     assert spec.optimizer.schedule.peak_lr == 0.001
     assert spec.data.train_manifest == Path("data/train/manifest.json")
     assert spec.training.target_tokens == 128
+    assert spec.training.gradient_accumulation_steps == 1
     assert spec.mesh.axis_names == ("data",)
     assert spec.artifacts.root == Path("runs")
 
@@ -81,6 +83,7 @@ def test_load_config_accepts_explicit_model_runtime_fields(tmp_path: Path) -> No
                     "norm_epsilon = 0.00001",
                     'param_dtype = "bfloat16"',
                     'compute_dtype = "float32"',
+                    'remat = "block"',
                 ]
             ),
         )
@@ -93,6 +96,15 @@ def test_load_config_accepts_explicit_model_runtime_fields(tmp_path: Path) -> No
     assert spec.model.norm_epsilon == 0.00001
     assert spec.model.param_dtype == "bfloat16"
     assert spec.model.compute_dtype == "float32"
+    assert spec.model.remat == "block"
+
+
+def test_load_config_rejects_invalid_remat_policy(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad.toml"
+    config_path.write_text(MINIMAL_CONFIG.replace('variant = "tiny"', 'variant = "tiny"\nremat = "layer"'))
+
+    with pytest.raises(ConfigError, match="model.remat"):
+        load_config(config_path)
 
 
 def test_load_config_accepts_validation_eval(tmp_path: Path) -> None:
@@ -113,6 +125,20 @@ num_batches = 2
     assert spec.evals[0].name == "validation"
     assert spec.evals[0].every_steps == 10
     assert spec.evals[0].num_batches == 2
+
+
+def test_load_config_accepts_gradient_accumulation_steps(tmp_path: Path) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace(
+            "global_batch_size = 2",
+            "global_batch_size = 2\ngradient_accumulation_steps = 4",
+        ).replace("target_tokens = 128", "target_tokens = 512")
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.training.gradient_accumulation_steps == 4
 
 
 def test_load_config_rejects_cross_spec_mismatch(tmp_path: Path) -> None:

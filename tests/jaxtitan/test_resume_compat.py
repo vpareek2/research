@@ -35,12 +35,14 @@ def test_resume_fingerprint_ignores_safe_runtime_controls(tmp_path: Path, prepar
     "kwargs",
     [
         {"hidden_size": 16},
+        {"remat": "block"},
         {"weight_decay": 0.2},
         {"axis_sizes": (2,)},
         {"seed": 12},
         {"precision": "fp32"},
         {"seq_len": 2},
         {"global_batch_size": 1},
+        {"gradient_accumulation_steps": 2},
         {"tokenizer_id": "other-tokenizer"},
     ],
 )
@@ -157,6 +159,7 @@ def _config_text(
     *,
     seed: int = 11,
     hidden_size: int = 8,
+    remat: str = "none",
     weight_decay: float = 0.0,
     schedule_name: str = "constant",
     total_steps: int | None = None,
@@ -164,6 +167,7 @@ def _config_text(
     precision: str = "bf16",
     seq_len: int = 4,
     global_batch_size: int = 2,
+    gradient_accumulation_steps: int = 1,
     target_tokens: int = 128,
     log_every_steps: int = 1,
     checkpoint_every_steps: int = 10,
@@ -187,6 +191,7 @@ num_heads = 2
 n_kv_heads = 1
 max_seq_len = 4
 compute_dtype = "float32"
+remat = "{remat}"
 
 [optimizer]
 name = "adamw"
@@ -203,6 +208,7 @@ tokenizer_id = "{tokenizer_id}"
 [training]
 seq_len = {seq_len}
 global_batch_size = {global_batch_size}
+gradient_accumulation_steps = {gradient_accumulation_steps}
 target_tokens = {target_tokens}
 precision = "{precision}"
 log_every_steps = {log_every_steps}

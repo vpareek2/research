@@ -3,10 +3,11 @@ import jax
 import numpy as np
 
 from jaxtitan.batch import Batch
-from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch
+from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_accumulated_batch, place_batch
 from jaxtitan.runtime import diagnostics
 from jaxtitan.runtime.diagnostics import (
     PhaseTimer,
+    compile_contract_summary,
     enrich_train_metrics,
     estimate_flops_per_token,
     peak_flops_for_device,
@@ -15,8 +16,11 @@ from jaxtitan.runtime.diagnostics import (
     sharding_policy_summary,
     training_diagnostics_summary,
 )
+from jaxtitan.specs.data import DataSpec
 from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
+from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
+from jaxtitan.specs.run import RunSpec, TrainingSpec
 
 FAKE_DEVICE_COUNT = 4
 
@@ -148,11 +152,44 @@ def test_sharding_policy_summary_records_data_parallel_policy() -> None:
 
     assert summary["batch"]["input_ids"]["partition_spec"] == "PartitionSpec('data', None)"
     assert summary["batch"]["loss_mask"]["partition_spec"] == "PartitionSpec('data', None)"
+    assert summary["batch"]["accumulated_input_ids"]["partition_spec"] == "PartitionSpec(None, 'data', None)"
+    assert summary["batch"]["accumulated_loss_mask"]["partition_spec"] == "PartitionSpec(None, 'data', None)"
     assert summary["train_state"]["model"]["partition_spec"] == "PartitionSpec()"
     assert summary["optimizer_state"]["partition_spec"] == "PartitionSpec()"
     assert summary["metrics"]["partition_spec"] == "PartitionSpec()"
     assert summary["checkpoint"]["restore_template"]["partition_spec"] == "PartitionSpec()"
     assert summary["reserved"] == {"fsdp": None, "tp": None, "kv_cache": None}
+
+
+def test_compile_contract_summary_records_donation_shapes_and_shardings() -> None:
+    require_fake_devices()
+    context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
+    plan = build_sharding_plan(context)
+    spec = RunSpec(
+        run_id="diagnostics",
+        seed=0,
+        output_dir="runs",
+        model=_tiny_model_spec(),
+        optimizer=OptimizerSpec(name="adamw", schedule=ScheduleSpec(peak_lr=1e-3)),
+        data=DataSpec(train_manifest="manifest.json"),
+        mesh=MeshSpec(axis_names=("data",), axis_sizes=(4,)),
+        training=TrainingSpec(
+            seq_len=4,
+            global_batch_size=8,
+            target_tokens=64,
+            gradient_accumulation_steps=2,
+        ),
+    )
+
+    summary = compile_contract_summary(spec, plan)
+
+    assert summary["train"]["donate_state"] is True
+    assert summary["train"]["expected_batch_shape"] == [2, 8, 4]
+    assert summary["train"]["input_shardings"]["state"]["partition_spec"] == "PartitionSpec()"
+    assert summary["train"]["input_shardings"]["input_ids"]["partition_spec"] == "PartitionSpec(None, 'data', None)"
+    assert summary["eval"]["donate_state"] is False
+    assert summary["eval"]["expected_batch_shape"] == [8, 4]
+    assert summary["eval"]["input_shardings"]["input_ids"]["partition_spec"] == "PartitionSpec('data', None)"
 
 
 def test_placed_array_summary_reports_global_and_shard_shapes() -> None:
@@ -172,6 +209,24 @@ def test_placed_array_summary_reports_global_and_shard_shapes() -> None:
     assert summary["addressable_shard_count"] == 4
     assert summary["unique_addressable_shard_shapes"] == [[2, 4]]
     assert summary["sharding"]["partition_spec"] == "PartitionSpec('data', None)"
+
+
+def test_placed_array_summary_reports_accumulated_batch_shards() -> None:
+    require_fake_devices()
+    context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
+    plan = build_sharding_plan(context)
+    batch = Batch(
+        input_ids=np.arange(64, dtype=np.int32).reshape(2, 8, 4),
+        target_ids=np.arange(64, 128, dtype=np.int32).reshape(2, 8, 4),
+        loss_mask=np.ones((2, 8, 4), dtype=np.bool_),
+    )
+
+    summary = placed_array_summary(place_accumulated_batch(batch, plan).input_ids)
+
+    assert summary["global_shape"] == [2, 8, 4]
+    assert summary["addressable_shard_count"] == 4
+    assert summary["unique_addressable_shard_shapes"] == [[2, 2, 4]]
+    assert summary["sharding"]["partition_spec"] == "PartitionSpec(None, 'data', None)"
 
 
 def test_training_diagnostics_summary_uses_logged_rows_and_steady_state() -> None:

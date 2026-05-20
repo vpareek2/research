@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from jaxtitan.errors import ContractError
+from jaxtitan.models.execution import apply_layer
 from jaxtitan.specs.model import ModelSpec
 
 
@@ -383,7 +384,7 @@ class DecoderModel(nnx.Module):
             dtype=x.dtype,
         )
         for layer in self.layers:
-            x = layer(x, cos, sin)
+            x = apply_layer(layer, x, cos, sin, remat=self.spec.remat)
         return self.lm_head(self.norm(x))
 
     def prefill(self, input_ids: Any, positions: Any, attention_mask: Any, cache: Any) -> tuple[jax.Array, jax.Array, Any]:

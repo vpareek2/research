@@ -17,6 +17,8 @@ def test_model_spec_validates_decoder_runtime_fields() -> None:
         _tiny_spec(param_dtype="fp32")
     with pytest.raises(ContractError, match="compute_dtype"):
         _tiny_spec(compute_dtype="bf16")
+    with pytest.raises(ContractError, match="remat"):
+        _tiny_spec(remat="layer")
 
 
 def test_dtype_from_name_resolves_supported_dtypes() -> None:
@@ -56,6 +58,26 @@ def test_apply_model_rejects_sequences_longer_than_model_limit() -> None:
 
     with pytest.raises(ContractError, match="max_seq_len"):
         apply_model(result.graph, result.state, input_ids)
+
+
+def test_apply_model_rejects_sequences_longer_than_model_limit_with_remat() -> None:
+    result = build_model(_tiny_spec(max_seq_len=4, remat="block"), seed=0)
+    input_ids = jnp.arange(5, dtype=jnp.int32).reshape(1, 5)
+
+    with pytest.raises(ContractError, match="max_seq_len"):
+        apply_model(result.graph, result.state, input_ids)
+
+
+def test_block_remat_matches_plain_forward_and_metadata() -> None:
+    plain = build_model(_tiny_spec(num_layers=2, compute_dtype="float32", remat="none"), seed=0)
+    remat = build_model(_tiny_spec(num_layers=2, compute_dtype="float32", remat="block"), seed=0)
+    input_ids = jnp.arange(16, dtype=jnp.int32).reshape(2, 8)
+
+    plain_logits = apply_model(plain.graph, plain.state, input_ids)
+    remat_logits = apply_model(remat.graph, remat.state, input_ids)
+
+    assert remat.metadata == plain.metadata
+    assert jnp.allclose(remat_logits, plain_logits, rtol=1e-6, atol=1e-6)
 
 
 def test_model_parameter_dtype_follows_spec() -> None:

@@ -12,8 +12,13 @@ def validate_run_spec(spec: RunSpec) -> None:
             f"model.max_seq_len ({spec.model.max_seq_len}) must be >= "
             f"training.seq_len ({spec.training.seq_len})"
         )
-    if spec.training.target_tokens < spec.training.global_batch_size * spec.training.seq_len:
-        raise ConfigError("training.target_tokens must cover at least one global training batch")
+    effective_batch_tokens = (
+        spec.training.global_batch_size
+        * spec.training.seq_len
+        * spec.training.gradient_accumulation_steps
+    )
+    if spec.training.target_tokens < effective_batch_tokens:
+        raise ConfigError("training.target_tokens must cover at least one effective optimizer batch")
     if spec.optimizer.grad_clip_norm is not None and spec.training.grad_clip_norm is not None:
         raise ConfigError("set grad_clip_norm in either [optimizer] or [training], not both")
     data_axis_size = 1

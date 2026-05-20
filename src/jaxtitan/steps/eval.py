@@ -47,6 +47,7 @@ def make_eval_step(
     *,
     sharding: ShardingPlan | None = None,
     state_template: Any | None = None,
+    expected_batch_shape: tuple[int, int] | None = None,
 ) -> Callable[[Any, Batch], EvalMetrics]:
     """Create a compiled eval callable bound to a static model graph."""
 
@@ -72,7 +73,7 @@ def make_eval_step(
     _compiled = jax.jit(_compiled_impl, in_shardings=in_shardings, out_shardings=out_shardings)
 
     def _eval(state: Any, batch: Batch) -> EvalMetrics:
-        _validate_batch(batch)
+        _validate_batch(batch, expected_batch_shape=expected_batch_shape)
         loss_sum, token_count = _compiled(state, batch.input_ids, batch.target_ids, batch.loss_mask)
         return EvalMetrics(
             loss_sum=loss_sum,
@@ -84,7 +85,7 @@ def make_eval_step(
     return _eval
 
 
-def _validate_batch(batch: Batch) -> None:
+def _validate_batch(batch: Batch, *, expected_batch_shape: tuple[int, int] | None = None) -> None:
     _validate_rank2(batch.input_ids, "batch.input_ids")
     _validate_rank2(batch.target_ids, "batch.target_ids")
     _validate_rank2(batch.loss_mask, "batch.loss_mask")
@@ -93,6 +94,14 @@ def _validate_batch(batch: Batch) -> None:
         raise ContractError(f"batch.target_ids shape {_shape(batch.target_ids)} must equal input_ids shape {input_shape}")
     if _shape(batch.loss_mask) != input_shape:
         raise ContractError(f"batch.loss_mask shape {_shape(batch.loss_mask)} must equal input_ids shape {input_shape}")
+    if not _is_integer_dtype(batch.input_ids):
+        raise ContractError(f"batch.input_ids must have integer dtype, got {_dtype(batch.input_ids)}")
+    if not _is_integer_dtype(batch.target_ids):
+        raise ContractError(f"batch.target_ids must have integer dtype, got {_dtype(batch.target_ids)}")
+    if _dtype(batch.loss_mask) != jnp.dtype(jnp.bool_):
+        raise ContractError(f"batch.loss_mask must have bool dtype, got {_dtype(batch.loss_mask)}")
+    if expected_batch_shape is not None and input_shape != expected_batch_shape:
+        raise ContractError(f"eval batch shape {input_shape} must match expected compiled shape {expected_batch_shape}")
 
 
 def _validate_loss_shapes(logits: Any, target_ids: Any, loss_mask: Any) -> None:
@@ -114,3 +123,11 @@ def _validate_rank2(value: Any, name: str) -> None:
 
 def _shape(value: Any) -> tuple[int, ...]:
     return tuple(int(dim) for dim in jnp.shape(value))
+
+
+def _dtype(value: Any) -> Any:
+    return jnp.asarray(value).dtype
+
+
+def _is_integer_dtype(value: Any) -> bool:
+    return bool(jnp.issubdtype(_dtype(value), jnp.integer))

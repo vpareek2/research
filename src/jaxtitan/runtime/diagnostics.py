@@ -147,6 +147,9 @@ def build_runtime_diagnostics(
     peak_flops_per_device = peak_flops_for_device(device_kind)
     device_count = len(context.devices)
     peak_flops_total = None if peak_flops_per_device is None else peak_flops_per_device * device_count
+    micro_tokens_per_step = spec.training.global_batch_size * spec.training.seq_len
+    effective_tokens_per_step = micro_tokens_per_step * spec.training.gradient_accumulation_steps
+    effective_global_batch_size = spec.training.global_batch_size * spec.training.gradient_accumulation_steps
     payload = {
         "schema_version": 1,
         "created_at": _utc_now(),
@@ -181,9 +184,14 @@ def build_runtime_diagnostics(
             "selected_device_count": device_count,
             "selected_addressable_device_count": device_count,
             "global_batch_size": spec.training.global_batch_size,
+            "micro_global_batch_size": spec.training.global_batch_size,
+            "effective_global_batch_size": effective_global_batch_size,
+            "gradient_accumulation_steps": spec.training.gradient_accumulation_steps,
             "per_device_batch_size": spec.training.global_batch_size // context.data_axis_size,
-            "global_tokens_per_step": spec.training.global_batch_size * spec.training.seq_len,
-            "per_device_tokens_per_step": (spec.training.global_batch_size * spec.training.seq_len) // context.data_axis_size,
+            "micro_tokens_per_step": micro_tokens_per_step,
+            "effective_tokens_per_step": effective_tokens_per_step,
+            "global_tokens_per_step": effective_tokens_per_step,
+            "per_device_tokens_per_step": effective_tokens_per_step // context.data_axis_size,
             "selected_devices": [_device_summary(device) for device in context.devices],
         },
         "model": {
@@ -193,6 +201,9 @@ def build_runtime_diagnostics(
             "parameter_leaves": len(metadata),
             "seq_len": spec.training.seq_len,
             "global_batch_size": spec.training.global_batch_size,
+            "effective_global_batch_size": effective_global_batch_size,
+            "gradient_accumulation_steps": spec.training.gradient_accumulation_steps,
+            "remat": spec.model.remat,
         },
         "performance": {
             "device_kind": device_kind,
@@ -201,6 +212,7 @@ def build_runtime_diagnostics(
             "peak_flops_per_device": peak_flops_per_device,
             "peak_flops_total": peak_flops_total,
         },
+        "compile": compile_contract_summary(spec, sharding),
         "parallelism": parallelism_summary(spec, context),
         "sharding": None if sharding is None else sharding_policy_summary(sharding),
         "device_telemetry": sample_device_telemetry(context.devices),
@@ -208,10 +220,53 @@ def build_runtime_diagnostics(
     return RuntimeDiagnostics(payload=_normalize(payload))
 
 
+def compile_contract_summary(spec: RunSpec, sharding: Any | None) -> dict[str, Any]:
+    """Summarize fixed JIT input contracts used by runtime/preflight."""
+
+    train_shape = (
+        spec.training.gradient_accumulation_steps,
+        spec.training.global_batch_size,
+        spec.training.seq_len,
+    )
+    eval_shape = (spec.training.global_batch_size, spec.training.seq_len)
+    train_shardings = None
+    eval_shardings = None
+    if sharding is not None:
+        train_shardings = {
+            "state": _sharding_summary(sharding.replicated),
+            "input_ids": _sharding_summary(sharding.batch.accumulated_input_ids),
+            "target_ids": _sharding_summary(sharding.batch.accumulated_target_ids),
+            "loss_mask": _sharding_summary(sharding.batch.accumulated_loss_mask),
+        }
+        eval_shardings = {
+            "state": _sharding_summary(sharding.replicated),
+            "input_ids": _sharding_summary(sharding.batch.input_ids),
+            "target_ids": _sharding_summary(sharding.batch.target_ids),
+            "loss_mask": _sharding_summary(sharding.batch.loss_mask),
+        }
+    return _normalize(
+        {
+            "schema_version": 1,
+            "train": {
+                "donate_state": True,
+                "expected_batch_shape": train_shape,
+                "input_shardings": train_shardings,
+            },
+            "eval": {
+                "donate_state": False,
+                "expected_batch_shape": eval_shape,
+                "input_shardings": eval_shardings,
+            },
+        }
+    )
+
+
 def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
     """Summarize the runtime execution and artifact policy."""
 
-    global_tokens_per_step = spec.training.global_batch_size * spec.training.seq_len
+    micro_tokens_per_step = spec.training.global_batch_size * spec.training.seq_len
+    global_tokens_per_step = micro_tokens_per_step * spec.training.gradient_accumulation_steps
+    effective_global_batch_size = spec.training.global_batch_size * spec.training.gradient_accumulation_steps
     return _normalize(
         {
             "schema_version": 1,
@@ -236,7 +291,12 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
             },
             "batch": {
                 "global_batch_size": spec.training.global_batch_size,
+                "micro_global_batch_size": spec.training.global_batch_size,
+                "effective_global_batch_size": effective_global_batch_size,
+                "gradient_accumulation_steps": spec.training.gradient_accumulation_steps,
                 "per_device_batch_size": spec.training.global_batch_size // context.data_axis_size,
+                "micro_tokens_per_step": micro_tokens_per_step,
+                "effective_tokens_per_step": global_tokens_per_step,
                 "global_tokens_per_step": global_tokens_per_step,
                 "per_device_tokens_per_step": global_tokens_per_step // context.data_axis_size,
             },
@@ -259,6 +319,9 @@ def sharding_policy_summary(plan: Any) -> dict[str, Any]:
                 "input_ids": _sharding_summary(plan.batch.input_ids),
                 "target_ids": _sharding_summary(plan.batch.target_ids),
                 "loss_mask": _sharding_summary(plan.batch.loss_mask),
+                "accumulated_input_ids": _sharding_summary(plan.batch.accumulated_input_ids),
+                "accumulated_target_ids": _sharding_summary(plan.batch.accumulated_target_ids),
+                "accumulated_loss_mask": _sharding_summary(plan.batch.accumulated_loss_mask),
             },
             "train_state": {
                 "step": replicated,

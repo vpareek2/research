@@ -44,6 +44,9 @@ class BatchSharding:
     input_ids: NamedSharding
     target_ids: NamedSharding
     loss_mask: NamedSharding
+    accumulated_input_ids: NamedSharding
+    accumulated_target_ids: NamedSharding
+    accumulated_loss_mask: NamedSharding
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,10 +88,18 @@ def build_sharding_plan(context: MeshContext) -> ShardingPlan:
     """Build v1 shardings for data-sharded batches and replicated state."""
 
     batch_matrix = NamedSharding(context.mesh, P("data", None))
+    accumulated_batch = NamedSharding(context.mesh, P(None, "data", None))
     replicated = NamedSharding(context.mesh, P())
     return ShardingPlan(
         mesh=context,
-        batch=BatchSharding(input_ids=batch_matrix, target_ids=batch_matrix, loss_mask=batch_matrix),
+        batch=BatchSharding(
+            input_ids=batch_matrix,
+            target_ids=batch_matrix,
+            loss_mask=batch_matrix,
+            accumulated_input_ids=accumulated_batch,
+            accumulated_target_ids=accumulated_batch,
+            accumulated_loss_mask=accumulated_batch,
+        ),
         replicated=replicated,
         metrics=replicated,
     )
@@ -106,6 +117,18 @@ def place_batch(batch: Batch, plan: ShardingPlan) -> Batch:
     )
 
 
+def place_accumulated_batch(batch: Batch, plan: ShardingPlan) -> Batch:
+    """Place an accumulated Batch with shape [accum, global_batch, seq]."""
+
+    _validate_accumulated_batch_dims(batch)
+    return Batch(
+        input_ids=place_accumulated_batch_array(batch.input_ids, plan.mesh),
+        target_ids=place_accumulated_batch_array(batch.target_ids, plan.mesh),
+        loss_mask=place_accumulated_batch_array(batch.loss_mask, plan.mesh),
+        doc_ids=None if batch.doc_ids is None else place_accumulated_batch_array(batch.doc_ids, plan.mesh),
+    )
+
+
 def place_batch_array(value: Any, context: MeshContext) -> jax.Array:
     """Place one batch array with its leading dimension sharded over data."""
 
@@ -117,6 +140,20 @@ def place_batch_array(value: Any, context: MeshContext) -> jax.Array:
             f"batch leading dimension {array.shape[0]} must be divisible by data axis size {context.data_axis_size}"
         )
     sharding = NamedSharding(context.mesh, P("data", *([None] * (array.ndim - 1))))
+    return jax.device_put(array, sharding)
+
+
+def place_accumulated_batch_array(value: Any, context: MeshContext) -> jax.Array:
+    """Place an accumulated batch array with its batch axis sharded over data."""
+
+    array = np.asarray(value)
+    if array.ndim < 2:
+        raise ContractError("accumulated batch arrays must have accumulation and batch dimensions")
+    if array.shape[1] % context.data_axis_size != 0:
+        raise ContractError(
+            f"accumulated batch dimension {array.shape[1]} must be divisible by data axis size {context.data_axis_size}"
+        )
+    sharding = NamedSharding(context.mesh, P(None, "data", *([None] * (array.ndim - 2))))
     return jax.device_put(array, sharding)
 
 
@@ -171,3 +208,17 @@ def _validate_batch_leading_dims(batch: Batch) -> None:
         leading_dims.append(array.shape[0])
     if len(set(leading_dims)) != 1:
         raise ContractError(f"all batch fields must share the same leading dimension, got {leading_dims}")
+
+
+def _validate_accumulated_batch_dims(batch: Batch) -> None:
+    arrays = [batch.input_ids, batch.target_ids, batch.loss_mask]
+    if batch.doc_ids is not None:
+        arrays.append(batch.doc_ids)
+    prefix_dims = []
+    for value in arrays:
+        array = np.asarray(value)
+        if array.ndim < 2:
+            raise ContractError("accumulated batch arrays must have accumulation and batch dimensions")
+        prefix_dims.append(array.shape[:2])
+    if len(set(prefix_dims)) != 1:
+        raise ContractError(f"all accumulated batch fields must share accumulation/batch dimensions, got {prefix_dims}")

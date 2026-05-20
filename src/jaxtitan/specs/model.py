@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from jaxtitan.errors import ContractError
 
 _DTYPE_NAMES = {"float32", "bfloat16"}
+_REMAT_POLICIES = {"none", "block"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +30,7 @@ class ModelSpec:
     tied_embeddings: bool = False
     param_dtype: str = "float32"
     compute_dtype: str = "bfloat16"
+    remat: str = "none"
 
     def __post_init__(self) -> None:
         for field_name in ("vocab_size", "hidden_size", "intermediate_size", "num_layers", "num_heads", "max_seq_len"):
@@ -43,6 +45,8 @@ class ModelSpec:
             value = getattr(self, field_name)
             if value not in _DTYPE_NAMES:
                 raise ContractError(f"model.{field_name} must be one of {sorted(_DTYPE_NAMES)}, got {value!r}")
+        if self.remat not in _REMAT_POLICIES:
+            raise ContractError(f"model.remat must be one of {sorted(_REMAT_POLICIES)}, got {self.remat!r}")
         if self.tied_embeddings:
             raise ContractError("model.tied_embeddings is not supported yet")
 

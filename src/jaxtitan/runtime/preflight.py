@@ -16,6 +16,7 @@ from jaxtitan.errors import ContractError
 from jaxtitan.mesh import (
     build_mesh_context,
     build_sharding_plan,
+    place_accumulated_batch,
     place_batch,
     place_replicated,
     require_single_process_runtime,
@@ -34,6 +35,7 @@ from jaxtitan.runtime.diagnostics import (
 from jaxtitan.runtime.training import (
     _build_validation_eval_data,
     _metrics_row,
+    _next_accumulated_train_batch,
     _train_sync_target,
     _validation_eval_row,
     _validation_eval_spec,
@@ -67,7 +69,11 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
         batch_size=runtime_spec.training.global_batch_size,
     )
     train_dataset_state = train_data.initial_state()
-    train_batch, _next_dataset_state, train_provenance = train_data.next_batch(train_dataset_state, repeat=False)
+    train_batch, _next_dataset_state, train_provenance = _next_accumulated_train_batch(
+        train_data,
+        train_dataset_state,
+        runtime_spec.training.gradient_accumulation_steps,
+    )
 
     context = build_mesh_context(runtime_spec.mesh)
     sharding = build_sharding_plan(context)
@@ -76,11 +82,24 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
     optimizer = build_optimizer(runtime_spec.optimizer, model.state, model.metadata)
     model_state = place_replicated(model.state, sharding)
     train_state = initialize_train_state(model_state, optimizer.transform, seed=runtime_spec.seed)
-    train_step = make_train_step(model.graph, optimizer, sharding=sharding, state_template=train_state)
+    expected_train_shape = (
+        runtime_spec.training.gradient_accumulation_steps,
+        runtime_spec.training.global_batch_size,
+        runtime_spec.training.seq_len,
+    )
+    expected_eval_shape = (runtime_spec.training.global_batch_size, runtime_spec.training.seq_len)
+    train_step = make_train_step(
+        model.graph,
+        optimizer,
+        sharding=sharding,
+        state_template=train_state,
+        donate_state=True,
+        expected_batch_shape=expected_train_shape,
+    )
 
     timer = PhaseTimer()
     with timer.phase("placement"):
-        placed_train_batch = place_batch(train_batch, sharding)
+        placed_train_batch = place_accumulated_batch(train_batch, sharding)
     with timer.phase("train_dispatch"):
         next_train_state, train_metrics = train_step(train_state, placed_train_batch)
     timer.add("metrics_sync", sync_and_time(_train_sync_target(next_train_state, train_metrics)))
@@ -102,13 +121,18 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
     eval_report = None
     if eval_spec is not None:
         eval_data = _build_validation_eval_data(runtime_spec)
-        eval_step = make_eval_step(model.graph, sharding=sharding, state_template=train_state.model)
+        eval_step = make_eval_step(
+            model.graph,
+            sharding=sharding,
+            state_template=next_train_state.model,
+            expected_batch_shape=expected_eval_shape,
+        )
         eval_row = _validation_eval_row(
             eval_spec,
             eval_data,
             eval_step,
             sharding,
-            train_state,
+            next_train_state,
             {"step": 0, "tokens_seen": 0},
         )
         eval_report = {
@@ -129,8 +153,9 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
             "compile": "passed",
         }
 
-    batch_tokens = runtime_spec.training.global_batch_size * runtime_spec.training.seq_len
-    train_state_leaves = jax.tree.leaves(train_state)
+    micro_tokens = runtime_spec.training.global_batch_size * runtime_spec.training.seq_len
+    batch_tokens = micro_tokens * runtime_spec.training.gradient_accumulation_steps
+    train_state_leaves = jax.tree.leaves(next_train_state)
     report = {
         "schema_version": 1,
         "status": "passed",
@@ -172,6 +197,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
             "parameter_leaves": len(model.metadata),
             "param_dtype": runtime_spec.model.param_dtype,
             "compute_dtype": runtime_spec.model.compute_dtype,
+            "remat": runtime_spec.model.remat,
         },
         "optimizer": {
             "name": runtime_spec.optimizer.name,
@@ -183,8 +209,16 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
         "training": {
             "seq_len": runtime_spec.training.seq_len,
             "global_batch_size": runtime_spec.training.global_batch_size,
+            "micro_global_batch_size": runtime_spec.training.global_batch_size,
+            "effective_global_batch_size": (
+                runtime_spec.training.global_batch_size
+                * runtime_spec.training.gradient_accumulation_steps
+            ),
             "target_tokens": runtime_spec.training.target_tokens,
             "batch_tokens": batch_tokens,
+            "micro_tokens_per_step": micro_tokens,
+            "effective_tokens_per_step": batch_tokens,
+            "gradient_accumulation_steps": runtime_spec.training.gradient_accumulation_steps,
             "data_axis_size": context.data_axis_size,
             "per_device_batch_size": runtime_spec.training.global_batch_size // context.data_axis_size,
             "per_device_target_tokens": batch_tokens // context.data_axis_size,
@@ -198,6 +232,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
         },
         "eval": eval_report,
         "diagnostics": runtime_diagnostics.payload,
+        "compile": runtime_diagnostics.payload["compile"],
         "parallelism": runtime_diagnostics.payload["parallelism"],
         "sharding": runtime_diagnostics.payload["sharding"],
         "observed_sharding": {
@@ -231,6 +266,7 @@ def format_preflight_report(report: PreflightReport) -> str:
     model = payload["model"]
     optimizer = payload["optimizer"]
     diagnostics = payload["diagnostics"]
+    compile_contract = payload["compile"]
     parallelism = payload["parallelism"]
     performance = diagnostics["performance"]
     jax_info = diagnostics["jax"]
@@ -265,7 +301,7 @@ def format_preflight_report(report: PreflightReport) -> str:
         (
             "model: "
             f"{model['name']} variant={model['variant']} parameters={model['parameters']} "
-            f"param_dtype={model['param_dtype']} compute_dtype={model['compute_dtype']}"
+            f"param_dtype={model['param_dtype']} compute_dtype={model['compute_dtype']} remat={model['remat']}"
         ),
         (
             "optimizer: "
@@ -275,9 +311,18 @@ def format_preflight_report(report: PreflightReport) -> str:
         (
             "training: "
             f"estimated_steps={training['estimated_steps']} batch_tokens={training['batch_tokens']} "
+            f"grad_accum={training['gradient_accumulation_steps']} "
+            f"effective_batch={training['effective_global_batch_size']} "
             f"per_device_batch={training['per_device_batch_size']} "
             f"log_every={training['log_every_steps']} checkpoint_every={training['checkpoint_every_steps']} "
             f"compile={training['compile']}"
+        ),
+        (
+            "compile contract: "
+            f"train_shape={compile_contract['train']['expected_batch_shape']} "
+            f"donate_train={compile_contract['train']['donate_state']} "
+            f"eval_shape={compile_contract['eval']['expected_batch_shape']} "
+            f"donate_eval={compile_contract['eval']['donate_state']}"
         ),
     ]
     if payload["eval"] is None:

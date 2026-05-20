@@ -38,6 +38,7 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert payload["devices"]["selected_device_count"] == 1
     assert payload["mesh"]["axis_names"] == ["data"]
     assert payload["model"]["parameters"] > 0
+    assert payload["model"]["remat"] == "none"
     assert payload["optimizer"]["name"] == "adamw"
     assert payload["training"]["estimated_steps"] == 2
     assert payload["training"]["compile"] == "passed"
@@ -47,13 +48,21 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert payload["eval"]["num_batches"] == 2
     assert payload["eval"]["compile"] == "passed"
     assert payload["diagnostics"]["run_id"] == "loop"
+    assert payload["diagnostics"]["model"]["remat"] == "none"
     assert payload["diagnostics"]["jax"]["backend"]
+    assert payload["compile"]["train"]["donate_state"] is True
+    assert payload["compile"]["train"]["expected_batch_shape"] == [1, 2, 4]
+    assert payload["compile"]["train"]["input_shardings"]["input_ids"]["partition_spec"] == "PartitionSpec(None, 'data', None)"
+    assert payload["compile"]["eval"]["donate_state"] is False
+    assert payload["compile"]["eval"]["expected_batch_shape"] == [2, 4]
+    assert payload["compile"]["eval"]["input_shardings"]["input_ids"]["partition_spec"] == "PartitionSpec('data', None)"
+    assert payload["diagnostics"]["compile"] == payload["compile"]
     assert payload["parallelism"]["execution_mode"] == "replicated_data_parallel"
     assert payload["parallelism"]["metrics_scope"] == "global"
     assert payload["parallelism"]["artifact_writer"] == "single_host"
     assert payload["sharding"]["batch"]["input_ids"]["partition_spec"] == "PartitionSpec('data', None)"
     assert payload["sharding"]["metrics"]["partition_spec"] == "PartitionSpec()"
-    assert payload["observed_sharding"]["first_train_batch"]["input_ids"]["global_shape"] == [2, 4]
+    assert payload["observed_sharding"]["first_train_batch"]["input_ids"]["global_shape"] == [1, 2, 4]
     assert payload["observed_sharding"]["train_state"]["replicated_leaf_count"] > 0
     assert payload["diagnostics"]["performance"]["flops_per_token"] > 0
     assert payload["diagnostics"]["device_telemetry"]["device_memory_used_bytes"] is None or isinstance(
@@ -67,6 +76,27 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert "devices:" in text
     assert "runtime:" in text
     assert "compile=passed" in text
+    assert "compile contract:" in text
+    assert "donate_train=True" in text
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_reports_block_remat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("remat", shard_token_groups=(tuple(range(0, 50)),), train_tokens=25)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_preflight_config(manifest, remat="block"))
+
+    report = run_preflight(config_path)
+
+    assert report.payload["model"]["remat"] == "block"
+    assert report.payload["diagnostics"]["model"]["remat"] == "block"
+    assert report.payload["training"]["compile"] == "passed"
+    assert "remat=block" in format_preflight_report(report)
     assert not (tmp_path / "runs" / "loop").exists()
 
 
@@ -92,7 +122,36 @@ def test_run_preflight_accepts_four_device_data_axis_without_artifacts(
     assert payload["training"]["per_device_batch_size"] == 2
     assert payload["training"]["per_device_target_tokens"] == 8
     assert payload["diagnostics"]["mesh"]["per_device_batch_size"] == 2
-    assert payload["observed_sharding"]["first_train_batch"]["input_ids"]["unique_addressable_shard_shapes"] == [[2, 4]]
+    assert payload["observed_sharding"]["first_train_batch"]["input_ids"]["unique_addressable_shard_shapes"] == [[1, 2, 4]]
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_reports_gradient_accumulation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("accum", shard_token_groups=(tuple(range(0, 50)),), train_tokens=35)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_preflight_config(manifest, target_tokens=32, gradient_accumulation_steps=2))
+
+    report = run_preflight(config_path)
+    payload = report.payload
+    text = format_preflight_report(report)
+
+    assert payload["data"]["first_batch"]["target_tokens"] == 16
+    assert payload["training"]["estimated_steps"] == 2
+    assert payload["training"]["gradient_accumulation_steps"] == 2
+    assert payload["training"]["micro_global_batch_size"] == 2
+    assert payload["training"]["effective_global_batch_size"] == 4
+    assert payload["training"]["micro_tokens_per_step"] == 8
+    assert payload["training"]["effective_tokens_per_step"] == 16
+    assert payload["compile"]["train"]["expected_batch_shape"] == [2, 2, 4]
+    assert payload["parallelism"]["batch"]["gradient_accumulation_steps"] == 2
+    assert payload["observed_sharding"]["first_train_batch"]["input_ids"]["global_shape"] == [2, 2, 4]
+    assert "grad_accum=2" in text
+    assert "effective_batch=4" in text
     assert not (tmp_path / "runs" / "loop").exists()
 
 
@@ -303,6 +362,8 @@ def _preflight_config(
     axis_names: tuple[str, ...] = ("data",),
     axis_sizes: tuple[int, ...] = (1,),
     global_batch_size: int = 2,
+    gradient_accumulation_steps: int = 1,
+    remat: str = "none",
     eval_every_steps: int | None = None,
     eval_num_batches: int = 1,
     eval_name: str = "validation",
@@ -340,6 +401,7 @@ num_heads = 2
 n_kv_heads = 1
 max_seq_len = 4
 compute_dtype = "float32"
+remat = "{remat}"
 
 [optimizer]
 name = "{optimizer_name}"
@@ -356,6 +418,7 @@ tokenizer_id = "{tokenizer_id}"
 [training]
 seq_len = 4
 global_batch_size = {global_batch_size}
+gradient_accumulation_steps = {gradient_accumulation_steps}
 target_tokens = {target_tokens}
 log_every_steps = 1
 checkpoint_every_steps = 10

@@ -65,6 +65,8 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert events[1]["execution_mode"] == "replicated_data_parallel"
     assert events[1]["metrics_scope"] == "global"
     assert events[1]["artifact_writer"] == "single_host"
+    assert events[1]["model_remat"] == "none"
+    assert events[1]["gradient_accumulation_steps"] == 1
     assert [row["step"] for row in metrics] == [1, 2]
     assert metrics[-1]["tokens_seen"] == 16
     assert metrics[-1]["token_count"] == 8
@@ -74,6 +76,11 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert metrics[-1]["token_end"] == 16
     assert metrics[-1]["examples"] == 2
     assert metrics[-1]["target_tokens"] == 8
+    assert metrics[-1]["gradient_accumulation_steps"] == 1
+    assert metrics[-1]["micro_global_batch_size"] == 2
+    assert metrics[-1]["effective_global_batch_size"] == 2
+    assert metrics[-1]["micro_tokens_per_step"] == 8
+    assert metrics[-1]["effective_tokens_per_step"] == 8
     assert metrics[-1]["execution_mode"] == "replicated_data_parallel"
     assert metrics[-1]["metrics_scope"] == "global"
     assert metrics[-1]["artifact_writer"] == "single_host"
@@ -107,6 +114,11 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert final["execution_mode"] == "replicated_data_parallel"
     assert final["metrics_scope"] == "global"
     assert final["artifact_writer"] == "single_host"
+    assert final["model_remat"] == "none"
+    assert final["gradient_accumulation_steps"] == 1
+    assert final["effective_global_batch_size"] == 2
+    assert final["micro_tokens_per_step"] == 8
+    assert final["effective_tokens_per_step"] == 8
     assert final["latest_checkpoint_path"] == "checkpoints/000002"
     assert final["best_eval_step"] is None
     assert final["best_eval_loss"] is None
@@ -130,12 +142,24 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert events[-1]["execution_mode"] == "replicated_data_parallel"
     assert events[-1]["metrics_scope"] == "global"
     assert events[-1]["artifact_writer"] == "single_host"
+    assert events[-1]["model_remat"] == "none"
+    assert events[-1]["gradient_accumulation_steps"] == 1
+    assert events[-1]["effective_global_batch_size"] == 2
+    assert events[-1]["effective_tokens_per_step"] == 8
     assert diagnostics["jax"]["backend"]
     assert diagnostics["packages"]["jaxtitan"]
+    assert diagnostics["model"]["remat"] == "none"
     assert diagnostics["parallelism"]["execution_mode"] == "replicated_data_parallel"
     assert diagnostics["parallelism"]["metrics_scope"] == "global"
     assert diagnostics["parallelism"]["artifact_writer"] == "single_host"
+    assert diagnostics["compile"]["train"]["donate_state"] is True
+    assert diagnostics["compile"]["train"]["expected_batch_shape"] == [1, 2, 4]
+    assert diagnostics["compile"]["train"]["input_shardings"]["input_ids"]["partition_spec"] == "PartitionSpec(None, 'data', None)"
+    assert diagnostics["compile"]["eval"]["donate_state"] is False
+    assert diagnostics["compile"]["eval"]["expected_batch_shape"] == [2, 4]
+    assert diagnostics["compile"]["eval"]["input_shardings"]["input_ids"]["partition_spec"] == "PartitionSpec('data', None)"
     assert diagnostics["sharding"]["batch"]["input_ids"]["partition_spec"] == "PartitionSpec('data', None)"
+    assert diagnostics["sharding"]["batch"]["accumulated_input_ids"]["partition_spec"] == "PartitionSpec(None, 'data', None)"
     assert diagnostics["sharding"]["train_state"]["model"]["partition_spec"] == "PartitionSpec()"
     assert (run_dir / "checkpoints" / "000002").is_dir()
 
@@ -194,6 +218,101 @@ def test_run_training_with_four_device_data_axis_reports_global_and_per_device_m
     assert final["per_device_batch_size"] == 2
     assert final["selected_device_count"] == 4
     assert final["single_process"] is True
+
+
+def test_run_training_with_gradient_accumulation_records_effective_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "grad-accum-loop",
+        shard_token_groups=(tuple(range(0, 80)),),
+        train_tokens=60,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=32,
+            log_every_steps=1,
+            gradient_accumulation_steps=2,
+        )
+    )
+
+    summary = run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    metrics = _jsonl(run_dir / "metrics" / "train.jsonl")
+    final = json.loads((run_dir / "summaries" / "final.json").read_text())
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+
+    assert summary.steps == 2
+    assert summary.tokens_seen == 32
+    assert summary.gradient_accumulation_steps == 2
+    assert summary.effective_global_batch_size == 4
+    assert summary.effective_tokens_per_step == 16
+    assert [row["step"] for row in metrics] == [1, 2]
+    assert metrics[0]["token_start"] == 0
+    assert metrics[0]["token_end"] == 16
+    assert metrics[0]["examples"] == 4
+    assert metrics[0]["target_tokens"] == 16
+    assert metrics[0]["token_count"] == 16
+    assert metrics[0]["tokens_seen"] == 16
+    assert metrics[0]["gradient_accumulation_steps"] == 2
+    assert metrics[0]["micro_global_batch_size"] == 2
+    assert metrics[0]["effective_global_batch_size"] == 4
+    assert metrics[0]["micro_tokens_per_step"] == 8
+    assert metrics[0]["effective_tokens_per_step"] == 16
+    assert metrics[-1]["tokens_seen"] == 32
+    assert final["gradient_accumulation_steps"] == 2
+    assert final["effective_global_batch_size"] == 4
+    assert final["effective_tokens_per_step"] == 16
+    assert diagnostics["mesh"]["gradient_accumulation_steps"] == 2
+    assert diagnostics["mesh"]["effective_global_batch_size"] == 4
+    assert diagnostics["compile"]["train"]["expected_batch_shape"] == [2, 2, 4]
+    assert diagnostics["parallelism"]["batch"]["gradient_accumulation_steps"] == 2
+    assert diagnostics["parallelism"]["batch"]["effective_tokens_per_step"] == 16
+
+
+def test_run_training_with_block_remat_completes_and_records_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "remat-loop",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=35,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            gradient_accumulation_steps=2,
+            remat="block",
+        )
+    )
+
+    summary = run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    final = json.loads((run_dir / "summaries" / "final.json").read_text())
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+    metrics = _jsonl(run_dir / "metrics" / "train.jsonl")
+
+    assert summary.steps == 1
+    assert summary.tokens_seen == 16
+    assert summary.model_remat == "block"
+    assert metrics[-1]["gradient_accumulation_steps"] == 2
+    assert final["model_remat"] == "block"
+    assert diagnostics["model"]["remat"] == "block"
+    assert diagnostics["compile"]["train"]["donate_state"] is True
+    assert diagnostics["compile"]["train"]["expected_batch_shape"] == [2, 2, 4]
 
 
 def test_run_training_resumes_four_device_data_axis_checkpoint(
@@ -331,6 +450,38 @@ def test_run_training_records_failure_when_dataset_exhausts(
     assert events[-1]["type"] == "training_failed"
     assert events[-1]["error_type"] == "ContractError"
     assert [row["step"] for row in metrics] == [1, 2]
+    assert not (run_dir / "summaries" / "final.json").exists()
+
+
+def test_run_training_fails_when_dataset_exhausts_inside_accumulation_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "exhaust-accum",
+        shard_token_groups=(tuple(range(0, 20)),),
+        train_tokens=12,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            gradient_accumulation_steps=2,
+        )
+    )
+
+    with pytest.raises(ContractError, match="prepared train split ended"):
+        run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    events = _jsonl(run_dir / "events.jsonl")
+    assert events[-1]["type"] == "training_failed"
+    assert events[-1]["error_type"] == "ContractError"
+    assert not (run_dir / "metrics" / "train.jsonl").exists()
     assert not (run_dir / "summaries" / "final.json").exists()
 
 
@@ -725,9 +876,11 @@ def test_run_training_retains_latest_and_best_checkpoint_paths(
     ("change", "match"),
     [
         ({"hidden_size": 16}, r"compatibility\.model\.hidden_size"),
+        ({"remat": "block"}, r"compatibility\.model\.remat"),
         ({"weight_decay": 0.2}, r"compatibility\.optimizer\.weight_decay"),
         ({"seq_len": 2}, r"compatibility\.training\.seq_len"),
         ({"global_batch_size": 1}, r"compatibility\.training\.global_batch_size"),
+        ({"gradient_accumulation_steps": 2}, r"compatibility\.training\.gradient_accumulation_steps"),
         ({"axis_sizes": (2,)}, r"compatibility\.mesh\.axis_sizes"),
         ({"seed": 9}, r"compatibility\.seed"),
     ],
@@ -1018,12 +1171,14 @@ def _training_config(
     checkpoint_every_steps: int = 10,
     seed: int = 7,
     hidden_size: int = 8,
+    remat: str = "none",
     weight_decay: float = 0.0,
     schedule_name: str = "constant",
     total_steps: int | None = None,
     tokenizer_id: str = "toy-tokenizer",
     seq_len: int = 4,
     global_batch_size: int = 2,
+    gradient_accumulation_steps: int = 1,
     axis_sizes: tuple[int, ...] = (1,),
     validation_manifest: Path | str | None = None,
     eval_every_steps: int | None = None,
@@ -1067,6 +1222,7 @@ num_heads = 2
 n_kv_heads = 1
 max_seq_len = 4
 compute_dtype = "float32"
+remat = "{remat}"
 
 [optimizer]
 name = "adamw"
@@ -1085,6 +1241,7 @@ tokenizer_id = "{tokenizer_id}"
 [training]
 seq_len = {seq_len}
 global_batch_size = {global_batch_size}
+gradient_accumulation_steps = {gradient_accumulation_steps}
 target_tokens = {target_tokens}
 log_every_steps = {log_every_steps}
 checkpoint_every_steps = {checkpoint_every_steps}

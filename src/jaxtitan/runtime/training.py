@@ -10,12 +10,14 @@ from typing import Any
 import jax
 import numpy as np
 
+from jaxtitan.batch import Batch
 from jaxtitan.config import load_config
-from jaxtitan.data import PreparedDataService
+from jaxtitan.data import BatchProvenance, PreparedDataService
 from jaxtitan.errors import ContractError
 from jaxtitan.mesh import (
     build_mesh_context,
     build_sharding_plan,
+    place_accumulated_batch,
     place_batch,
     place_replicated,
     require_single_process_runtime,
@@ -74,9 +76,14 @@ class RunSummary:
     execution_mode: str | None = None
     metrics_scope: str | None = None
     artifact_writer: str | None = None
+    model_remat: str | None = None
     data_axis_size: int | None = None
     global_batch_size: int | None = None
     per_device_batch_size: int | None = None
+    gradient_accumulation_steps: int | None = None
+    effective_global_batch_size: int | None = None
+    micro_tokens_per_step: int | None = None
+    effective_tokens_per_step: int | None = None
     selected_device_count: int | None = None
     global_device_count: int | None = None
     process_count: int | None = None
@@ -112,6 +119,8 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
                 "execution_mode": EXECUTION_MODE,
                 "metrics_scope": METRICS_SCOPE,
                 "artifact_writer": ARTIFACT_WRITER,
+                "model_remat": spec.model.remat,
+                "gradient_accumulation_steps": spec.training.gradient_accumulation_steps,
             }
         )
         summary = _run_training_initialized(spec, writer, resume=resume)
@@ -131,7 +140,11 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
                 "execution_mode": summary.execution_mode,
                 "metrics_scope": summary.metrics_scope,
                 "artifact_writer": summary.artifact_writer,
+                "model_remat": summary.model_remat,
                 "data_axis_size": summary.data_axis_size,
+                "gradient_accumulation_steps": summary.gradient_accumulation_steps,
+                "effective_global_batch_size": summary.effective_global_batch_size,
+                "effective_tokens_per_step": summary.effective_tokens_per_step,
                 "per_device_batch_size": summary.per_device_batch_size,
                 "selected_device_count": summary.selected_device_count,
             }
@@ -174,9 +187,27 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
     optimizer = build_optimizer(runtime_spec.optimizer, model.state, model.metadata)
     model_state = place_replicated(model.state, sharding)
     train_state = initialize_train_state(model_state, optimizer.transform, seed=runtime_spec.seed)
-    train_step = make_train_step(model.graph, optimizer, sharding=sharding, state_template=train_state)
+    expected_train_shape = (
+        runtime_spec.training.gradient_accumulation_steps,
+        runtime_spec.training.global_batch_size,
+        runtime_spec.training.seq_len,
+    )
+    expected_eval_shape = (runtime_spec.training.global_batch_size, runtime_spec.training.seq_len)
+    train_step = make_train_step(
+        model.graph,
+        optimizer,
+        sharding=sharding,
+        state_template=train_state,
+        donate_state=True,
+        expected_batch_shape=expected_train_shape,
+    )
     eval_spec = _validation_eval_spec(runtime_spec)
-    eval_step = None if eval_spec is None else make_eval_step(model.graph, sharding=sharding, state_template=train_state.model)
+    eval_step = None if eval_spec is None else make_eval_step(
+        model.graph,
+        sharding=sharding,
+        state_template=train_state.model,
+        expected_batch_shape=expected_eval_shape,
+    )
     checkpoint_service = LocalOrbaxCheckpointService(runtime_spec.dirs.run_dir)
     checkpoint_index = load_checkpoint_index(runtime_spec.dirs.run_dir)
     checkpoint_service.set_protected_steps(checkpoint_index.protected_steps())
@@ -221,14 +252,18 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
             timer = PhaseTimer()
             with timer.phase("data"):
                 try:
-                    batch, dataset_state, provenance = data.next_batch(dataset_state, repeat=False)
+                    batch, dataset_state, provenance = _next_accumulated_train_batch(
+                        data,
+                        dataset_state,
+                        runtime_spec.training.gradient_accumulation_steps,
+                    )
                 except StopIteration as exc:
                     raise ContractError(
                         "prepared train split ended before training.target_tokens was reached; "
                         f"tokens_seen={_scalar_int(train_state.tokens_seen)} target_tokens={runtime_spec.training.target_tokens}"
                     ) from exc
             with timer.phase("placement"):
-                placed_batch = place_batch(batch, sharding)
+                placed_batch = place_accumulated_batch(batch, sharding)
             with timer.phase("train_dispatch"):
                 train_state, metrics = train_step(train_state, placed_batch)
             metrics_sync_sec = sync_and_time(_train_sync_target(train_state, metrics))
@@ -350,9 +385,14 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
             execution_mode=diagnostic_summary["execution_mode"],
             metrics_scope=diagnostic_summary["metrics_scope"],
             artifact_writer=diagnostic_summary["artifact_writer"],
+            model_remat=runtime_summary["model"]["remat"],
             data_axis_size=mesh_summary["data_axis_size"],
             global_batch_size=mesh_summary["global_batch_size"],
             per_device_batch_size=mesh_summary["per_device_batch_size"],
+            gradient_accumulation_steps=mesh_summary["gradient_accumulation_steps"],
+            effective_global_batch_size=mesh_summary["effective_global_batch_size"],
+            micro_tokens_per_step=mesh_summary["micro_tokens_per_step"],
+            effective_tokens_per_step=mesh_summary["effective_tokens_per_step"],
             selected_device_count=mesh_summary["selected_device_count"],
             global_device_count=jax_summary["global_device_count"],
             process_count=jax_summary["process_count"],
@@ -367,7 +407,11 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
 def _with_runtime_schedule_steps(spec: RunSpec) -> RunSpec:
     schedule = spec.optimizer.schedule
     if schedule.name in {"cosine", "wsd"} and schedule.total_steps is None:
-        batch_tokens = spec.training.global_batch_size * spec.training.seq_len
+        batch_tokens = (
+            spec.training.global_batch_size
+            * spec.training.seq_len
+            * spec.training.gradient_accumulation_steps
+        )
         total_steps = math.ceil(spec.training.target_tokens / batch_tokens)
         schedule = replace(schedule, total_steps=total_steps)
         optimizer = replace(spec.optimizer, schedule=schedule)
@@ -394,6 +438,52 @@ def _build_validation_eval_data(spec: RunSpec) -> PreparedDataService:
         split="val",
         seq_len=spec.training.seq_len,
         batch_size=spec.training.global_batch_size,
+    )
+
+
+def _next_accumulated_train_batch(
+    data: PreparedDataService,
+    dataset_state: DatasetState,
+    accumulation_steps: int,
+) -> tuple[Batch, DatasetState, BatchProvenance]:
+    batches = []
+    provenances = []
+    next_state = dataset_state
+    for _idx in range(accumulation_steps):
+        batch, next_state, provenance = data.next_batch(next_state, repeat=False)
+        batches.append(batch)
+        provenances.append(provenance)
+    return _stack_accumulated_batches(batches), next_state, _combine_provenance(provenances)
+
+
+def _stack_accumulated_batches(batches: list[Batch]) -> Batch:
+    if not batches:
+        raise ContractError("gradient accumulation requires at least one microbatch")
+    return Batch(
+        input_ids=np.stack([batch.input_ids for batch in batches]),
+        target_ids=np.stack([batch.target_ids for batch in batches]),
+        loss_mask=np.stack([batch.loss_mask for batch in batches]),
+        doc_ids=None if batches[0].doc_ids is None else np.stack([batch.doc_ids for batch in batches]),
+    )
+
+
+def _combine_provenance(provenances: list[BatchProvenance]) -> BatchProvenance:
+    if not provenances:
+        raise ContractError("gradient accumulation requires at least one microbatch provenance")
+    first = provenances[0]
+    last = provenances[-1]
+    return BatchProvenance(
+        split=first.split,
+        epoch=first.epoch,
+        token_start=first.token_start,
+        token_end=last.token_end,
+        examples=sum(provenance.examples for provenance in provenances),
+        target_tokens=sum(provenance.target_tokens for provenance in provenances),
+        row_start_offsets=tuple(
+            offset
+            for provenance in provenances
+            for offset in provenance.row_start_offsets
+        ),
     )
 
 
@@ -526,11 +616,21 @@ def _metrics_row(
     if runtime_spec is not None and context is not None:
         data_axis_size = context.data_axis_size
         per_device_batch_size = runtime_spec.training.global_batch_size // data_axis_size
+        micro_tokens_per_step = runtime_spec.training.global_batch_size * runtime_spec.training.seq_len
+        effective_global_batch_size = (
+            runtime_spec.training.global_batch_size
+            * runtime_spec.training.gradient_accumulation_steps
+        )
         row.update(
             {
                 "data_axis_size": data_axis_size,
                 "global_batch_size": runtime_spec.training.global_batch_size,
                 "per_device_batch_size": per_device_batch_size,
+                "gradient_accumulation_steps": runtime_spec.training.gradient_accumulation_steps,
+                "micro_global_batch_size": runtime_spec.training.global_batch_size,
+                "effective_global_batch_size": effective_global_batch_size,
+                "micro_tokens_per_step": micro_tokens_per_step,
+                "effective_tokens_per_step": provenance.target_tokens,
                 "global_target_tokens": provenance.target_tokens,
                 "per_device_target_tokens": provenance.target_tokens // data_axis_size,
             }

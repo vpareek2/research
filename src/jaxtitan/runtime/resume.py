@@ -47,6 +47,7 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
             "precision": spec.training.precision,
             "seq_len": spec.training.seq_len,
             "global_batch_size": spec.training.global_batch_size,
+            "gradient_accumulation_steps": spec.training.gradient_accumulation_steps,
             "eval_every_steps": spec.training.eval_every_steps,
             "grad_clip_norm": spec.training.grad_clip_norm,
         },

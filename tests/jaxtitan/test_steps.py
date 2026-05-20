@@ -91,6 +91,40 @@ def test_eval_step_rejects_bad_batch_shapes_before_compile() -> None:
         eval_step(built.graph, built.state, bad_batch)
 
 
+def test_eval_step_expected_shape_guard_rejects_wrong_batch_shape() -> None:
+    built = build_model(_tiny_spec(), seed=0)
+    step = make_eval_step(built.graph, expected_batch_shape=(4, 4))
+
+    with pytest.raises(ContractError, match="expected compiled shape"):
+        step(built.state, _batch(batch_size=2, seq_len=4, vocab_size=16))
+
+
+def test_eval_step_rejects_bad_batch_dtypes_before_compile() -> None:
+    built = build_model(_tiny_spec(), seed=0)
+    batch = _batch(batch_size=2, seq_len=4, vocab_size=16)
+
+    with pytest.raises(ContractError, match="input_ids must have integer dtype"):
+        eval_step(
+            built.graph,
+            built.state,
+            Batch(
+                input_ids=batch.input_ids.astype(np.float32),
+                target_ids=batch.target_ids,
+                loss_mask=batch.loss_mask,
+            ),
+        )
+    with pytest.raises(ContractError, match="loss_mask must have bool dtype"):
+        eval_step(
+            built.graph,
+            built.state,
+            Batch(
+                input_ids=batch.input_ids,
+                target_ids=batch.target_ids,
+                loss_mask=batch.loss_mask.astype(np.int32),
+            ),
+        )
+
+
 def test_make_eval_step_accepts_host_arrays_and_placed_batch() -> None:
     built = build_model(_tiny_spec(), seed=1)
     step = make_eval_step(built.graph)
@@ -123,7 +157,7 @@ def test_make_eval_step_with_data_axis_sharding_reports_global_metrics() -> None
 
 def test_repeated_compiled_eval_calls_return_stable_shapes_and_dtypes() -> None:
     built = build_model(_tiny_spec(), seed=2)
-    step = make_eval_step(built.graph)
+    step = make_eval_step(built.graph, expected_batch_shape=(2, 4))
 
     first = step(built.state, _batch(batch_size=2, seq_len=4, vocab_size=16))
     second = step(built.state, _batch(batch_size=2, seq_len=4, vocab_size=16, offset=3))

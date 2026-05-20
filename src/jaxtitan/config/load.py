@@ -132,6 +132,7 @@ def _model_section(raw: Mapping[str, Any]) -> TomlModelSection:
         tied_embeddings=_optional_bool(raw, "tied_embeddings", "model", default=False),
         param_dtype=_optional_str(raw, "param_dtype", "model", default="float32"),
         compute_dtype=_optional_str(raw, "compute_dtype", "model", default="bfloat16"),
+        remat=_optional_str(raw, "remat", "model", default="none"),
     )
 
 
@@ -169,6 +170,7 @@ def _training_section(raw: Mapping[str, Any]) -> TomlTrainingSection:
         global_batch_size=_required_int(raw, "global_batch_size", "training"),
         target_tokens=_required_int(raw, "target_tokens", "training"),
         precision=_optional_str(raw, "precision", "training", default="bf16"),
+        gradient_accumulation_steps=int(raw.get("gradient_accumulation_steps", 1)),
         log_every_steps=int(raw.get("log_every_steps", 10)),
         checkpoint_every_steps=int(raw.get("checkpoint_every_steps", 1000)),
         eval_every_steps=_optional_int(raw, "eval_every_steps", "training"),

@@ -9,6 +9,7 @@ from jaxtitan.errors import ContractError
 from jaxtitan.mesh import (
     build_mesh_context,
     build_sharding_plan,
+    place_accumulated_batch,
     place_batch,
     place_replicated,
     replicated_shardings_like,
@@ -79,10 +80,14 @@ def test_sharding_plan_contents() -> None:
     plan = build_sharding_plan(context)
 
     expected_batch = NamedSharding(context.mesh, P("data", None))
+    expected_accumulated_batch = NamedSharding(context.mesh, P(None, "data", None))
     expected_replicated = NamedSharding(context.mesh, P())
     assert plan.batch.input_ids == expected_batch
     assert plan.batch.target_ids == expected_batch
     assert plan.batch.loss_mask == expected_batch
+    assert plan.batch.accumulated_input_ids == expected_accumulated_batch
+    assert plan.batch.accumulated_target_ids == expected_accumulated_batch
+    assert plan.batch.accumulated_loss_mask == expected_accumulated_batch
     assert plan.replicated == expected_replicated
     assert plan.metrics == expected_replicated
     assert plan.kv_cache is None
@@ -123,6 +128,39 @@ def test_place_batch_places_doc_ids_when_present() -> None:
     assert placed.doc_ids is not None
     assert placed.doc_ids.sharding == NamedSharding(context.mesh, P("data"))
     assert {shard.data.shape for shard in placed.doc_ids.addressable_shards} == {(2,)}
+
+
+def test_place_accumulated_batch_shards_batch_axis_over_data_axis() -> None:
+    require_fake_devices()
+    context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
+    plan = build_sharding_plan(context)
+    batch = Batch(
+        input_ids=np.arange(64, dtype=np.int32).reshape(2, 8, 4),
+        target_ids=np.arange(64, 128, dtype=np.int32).reshape(2, 8, 4),
+        loss_mask=np.ones((2, 8, 4), dtype=np.bool_),
+    )
+
+    placed = place_accumulated_batch(batch, plan)
+
+    assert placed.input_ids.sharding == plan.batch.accumulated_input_ids
+    assert placed.target_ids.sharding == plan.batch.accumulated_target_ids
+    assert placed.loss_mask.sharding == plan.batch.accumulated_loss_mask
+    assert placed.doc_ids is None
+    assert {shard.data.shape for shard in placed.input_ids.addressable_shards} == {(2, 2, 4)}
+
+
+def test_place_accumulated_batch_rejects_non_divisible_batch_axis() -> None:
+    require_fake_devices()
+    context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
+    plan = build_sharding_plan(context)
+    batch = Batch(
+        input_ids=np.zeros((2, 6, 4), dtype=np.int32),
+        target_ids=np.zeros((2, 6, 4), dtype=np.int32),
+        loss_mask=np.ones((2, 6, 4), dtype=np.bool_),
+    )
+
+    with pytest.raises(ContractError, match="divisible by data axis size"):
+        place_accumulated_batch(batch, plan)
 
 
 def test_place_batch_rejects_mismatched_leading_dims() -> None:

@@ -13,7 +13,7 @@ from jaxtitan.mesh import ShardingPlan, replicated_shardings_like
 from jaxtitan.models import apply_model
 from jaxtitan.optim import OptimizerBuildResult, OptimizerTransform
 from jaxtitan.state import RngState, TrainState
-from jaxtitan.steps.eval import _validate_batch, causal_lm_loss
+from jaxtitan.steps.eval import causal_lm_loss
 
 
 def initialize_train_state(model_state: Any, optimizer_transform: OptimizerTransform, seed: int) -> TrainState:
@@ -47,6 +47,8 @@ def make_train_step(
     *,
     sharding: ShardingPlan | None = None,
     state_template: TrainState | None = None,
+    donate_state: bool = False,
+    expected_batch_shape: tuple[int, int, int] | None = None,
 ) -> Callable[[TrainState, Batch], tuple[TrainState, StepMetrics]]:
     """Create a compiled train callable bound to a static graph and optimizer."""
 
@@ -58,9 +60,9 @@ def make_train_step(
     if sharding is not None:
         in_shardings = (
             state_sharding,
-            sharding.batch.input_ids,
-            sharding.batch.target_ids,
-            sharding.batch.loss_mask,
+            sharding.batch.accumulated_input_ids,
+            sharding.batch.accumulated_target_ids,
+            sharding.batch.accumulated_loss_mask,
         )
         out_shardings = (
             state_sharding,
@@ -78,12 +80,43 @@ def make_train_step(
         target_ids: Any,
         loss_mask: Any,
     ) -> tuple[TrainState, Any, Any, Any, Any, Any, Any]:
-        def loss_fn(params):
-            logits = apply_model(graph, params, input_ids)
-            loss = causal_lm_loss(logits, target_ids, loss_mask)
-            return loss.loss, (loss.loss_sum, loss.token_count)
+        grad_zero = jax.tree.map(jnp.zeros_like, state.model)
 
-        (_loss, (loss_sum, token_count)), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.model)
+        def microbatch_grad(params: Any, micro_input_ids: Any, micro_target_ids: Any, micro_loss_mask: Any):
+            def loss_sum_fn(loss_params: Any):
+                logits = apply_model(graph, loss_params, micro_input_ids)
+                loss = causal_lm_loss(logits, micro_target_ids, micro_loss_mask)
+                return loss.loss_sum, loss.token_count
+
+            (loss_sum, token_count), grads = jax.value_and_grad(loss_sum_fn, has_aux=True)(params)
+            return loss_sum, token_count, grads
+
+        def accumulate(carry: tuple[Any, Any, Any], micro: tuple[Any, Any, Any]):
+            grad_accum, loss_sum_accum, token_count_accum = carry
+            micro_input_ids, micro_target_ids, micro_loss_mask = micro
+            loss_sum, token_count, grads = microbatch_grad(
+                state.model,
+                micro_input_ids,
+                micro_target_ids,
+                micro_loss_mask,
+            )
+            return (
+                jax.tree.map(lambda total, grad: total + grad, grad_accum, grads),
+                loss_sum_accum + loss_sum,
+                token_count_accum + token_count,
+            ), None
+
+        (grad_sum, loss_sum, token_count), _ = jax.lax.scan(
+            accumulate,
+            (
+                grad_zero,
+                jnp.asarray(0.0, dtype=jnp.float32),
+                jnp.asarray(0, dtype=jnp.int32),
+            ),
+            (input_ids, target_ids, loss_mask),
+        )
+        grad_denominator = jnp.asarray(token_count, dtype=jnp.float32)
+        grads = jax.tree.map(lambda grad: grad / grad_denominator, grad_sum)
         updates, next_opt_state = optimizer.transform.update(grads, state.opt_state, params=state.model)
         next_model = jax.tree.map(lambda param, update: param + update, state.model, updates)
         next_step = state.step + jnp.asarray(1, dtype=state.step.dtype)
@@ -100,10 +133,15 @@ def make_train_step(
         update_norm = _tree_l2_norm(updates)
         return next_state, loss_sum, token_count, lr, grad_norm, param_norm, update_norm
 
-    _compiled = jax.jit(_compiled_impl, in_shardings=in_shardings, out_shardings=out_shardings)
+    _compiled = jax.jit(
+        _compiled_impl,
+        in_shardings=in_shardings,
+        out_shardings=out_shardings,
+        donate_argnums=(0,) if donate_state else (),
+    )
 
     def _train(state: TrainState, batch: Batch) -> tuple[TrainState, StepMetrics]:
-        _validate_batch(batch)
+        _validate_train_batch(batch, expected_batch_shape=expected_batch_shape)
         (
             next_state,
             loss_sum,
@@ -114,9 +152,9 @@ def make_train_step(
             update_norm,
         ) = _compiled(
             state,
-            batch.input_ids,
-            batch.target_ids,
-            batch.loss_mask,
+            _ensure_accumulation_axis(batch.input_ids),
+            _ensure_accumulation_axis(batch.target_ids),
+            _ensure_accumulation_axis(batch.loss_mask),
         )
         metrics = StepMetrics(
             loss_sum=loss_sum,
@@ -132,9 +170,48 @@ def make_train_step(
     return _train
 
 
+def _validate_train_batch(batch: Batch, *, expected_batch_shape: tuple[int, int, int] | None) -> None:
+    input_shape = _shape(batch.input_ids)
+    if len(input_shape) not in {2, 3}:
+        raise ContractError(f"batch.input_ids must have rank 2 or 3, got shape {input_shape}")
+    if _shape(batch.target_ids) != input_shape:
+        raise ContractError(f"batch.target_ids shape {_shape(batch.target_ids)} must equal input_ids shape {input_shape}")
+    if _shape(batch.loss_mask) != input_shape:
+        raise ContractError(f"batch.loss_mask shape {_shape(batch.loss_mask)} must equal input_ids shape {input_shape}")
+    if not _is_integer_dtype(batch.input_ids):
+        raise ContractError(f"batch.input_ids must have integer dtype, got {_dtype(batch.input_ids)}")
+    if not _is_integer_dtype(batch.target_ids):
+        raise ContractError(f"batch.target_ids must have integer dtype, got {_dtype(batch.target_ids)}")
+    if _dtype(batch.loss_mask) != jnp.dtype(jnp.bool_):
+        raise ContractError(f"batch.loss_mask must have bool dtype, got {_dtype(batch.loss_mask)}")
+    normalized_shape = input_shape if len(input_shape) == 3 else (1, *input_shape)
+    if expected_batch_shape is not None and normalized_shape != expected_batch_shape:
+        raise ContractError(
+            f"train batch shape {normalized_shape} must match expected compiled shape {expected_batch_shape}"
+        )
+
+
+def _ensure_accumulation_axis(value: Any) -> Any:
+    if len(_shape(value)) == 2:
+        return jnp.asarray(value)[None, ...]
+    return value
+
+
 def _tree_l2_norm(tree: Any):
     leaves = jax.tree.leaves(tree)
     if not leaves:
         return jnp.asarray(0.0, dtype=jnp.float32)
     total = sum(jnp.sum(jnp.square(jnp.asarray(leaf, dtype=jnp.float32))) for leaf in leaves)
     return jnp.sqrt(total)
+
+
+def _shape(value: Any) -> tuple[int, ...]:
+    return tuple(int(dim) for dim in jnp.shape(value))
+
+
+def _dtype(value: Any) -> Any:
+    return jnp.asarray(value).dtype
+
+
+def _is_integer_dtype(value: Any) -> bool:
+    return bool(jnp.issubdtype(_dtype(value), jnp.integer))

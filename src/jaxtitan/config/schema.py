@@ -27,6 +27,7 @@ class TomlModelSection:
     tied_embeddings: bool = False
     param_dtype: str = "float32"
     compute_dtype: str = "bfloat16"
+    remat: str = "none"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +61,7 @@ class TomlTrainingSection:
     global_batch_size: int
     target_tokens: int
     precision: str = "bf16"
+    gradient_accumulation_steps: int = 1
     log_every_steps: int = 10
     checkpoint_every_steps: int = 1000
     eval_every_steps: int | None = None

@@ -64,6 +64,7 @@ class TrainingSpec:
     global_batch_size: int
     target_tokens: int
     precision: PrecisionName = "bf16"
+    gradient_accumulation_steps: int = 1
     log_every_steps: int = 10
     checkpoint_every_steps: int = 1000
     eval_every_steps: int | None = None
@@ -72,7 +73,14 @@ class TrainingSpec:
     def __post_init__(self) -> None:
         if self.precision not in _PRECISION_NAMES:
             raise ContractError(f"training.precision must be one of {sorted(_PRECISION_NAMES)}, got {self.precision!r}")
-        for field_name in ("seq_len", "global_batch_size", "target_tokens", "log_every_steps", "checkpoint_every_steps"):
+        for field_name in (
+            "seq_len",
+            "global_batch_size",
+            "target_tokens",
+            "gradient_accumulation_steps",
+            "log_every_steps",
+            "checkpoint_every_steps",
+        ):
             value = getattr(self, field_name)
             if value <= 0:
                 raise ContractError(f"training.{field_name} must be positive, got {value}")
