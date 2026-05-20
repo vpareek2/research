@@ -1,6 +1,0 @@
-step: 4500
-prompt:
-Once upon a time
-================================================================================
-sample:
-Once upon a time.A1KA-B-CFb-by-TheThe-TheT-N-In-A�B-B�C-D-TheS-L-2C-BAIM-I-N2-I-A-The-YouTIMAJU-T-RA.B.This1B-IA-P-TA-7F-10-6-Fb-9.O|The(L-P8-N�-R-E-S-CUND-T-ShN�T-DATThe-

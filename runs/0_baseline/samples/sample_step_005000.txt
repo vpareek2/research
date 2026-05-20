@@ -1,6 +1,0 @@
-step: 5000
-prompt:
-Once upon a time
-================================================================================
-sample:
-Once upon a time-1-and-inTheTheVor--and-In-The-TheI-M1-It�-S-1-D2-1--The-d-TheAll-MitsThe-n-f-the-s-a-In-F--M2-1-In-the-we-F-2M.-I-t-s-s-or-M-10-s-theI-we-c-born-S-1-8-f-the-man-tongits-d-t-|1-

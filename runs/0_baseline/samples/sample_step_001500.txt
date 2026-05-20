@@ -1,6 +1,0 @@
-step: 1500
-prompt:
-Once upon a time
-================================================================================
-sample:
-Once upon a timeA|GWC-TheIn�-TExF�InInWhat"WeI�TAsPWhatYearAllSAS�TheWe�CLTheICThisThe|-TheHowSIAVTheBUCBII"TheAAThe"DI|CInBinTheMyTheUUMTheTheSAthSAHowICTheWeVin-TIthTheth-TheThethMy|TheItt|ThethTheBThe"I�tsthTheI�TheonI-Thek-ABI

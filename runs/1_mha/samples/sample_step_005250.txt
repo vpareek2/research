@@ -1,9 +1,0 @@
-step: 5250
-prompt:
-Once upon a time
-================================================================================
-sample:
-Once upon a timeI�Most of-TI.
-TheKM�I’B. I�E-The “F-We’You-Why- The-I-We’There”We’The-The.I’V"A-We’We’by2T.’The.’You’It is-A’B.
-- TheIH(On-TH.00’M.
-I’WhyWe’It’We’He’I’T’N’L

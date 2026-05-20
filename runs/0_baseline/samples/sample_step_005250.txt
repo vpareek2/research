@@ -1,7 +1,0 @@
-step: 5250
-prompt:
-Once upon a time
-================================================================================
-sample:
-Once upon a time-P.4-ForThis.
-TheInM�There--4-What|All-TheIn-F-In-1-M.-in--A--D-This-In-We--|-6-com.||N--The-n-7-2The United�HowThe United-The,|The same--A-and-n-we-2-G-m--N--4|-p-p-8-7-p-p.I-2-8-p-d-p-free-l

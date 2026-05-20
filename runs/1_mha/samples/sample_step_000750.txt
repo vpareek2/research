@@ -1,7 +1,0 @@
-step: 750
-prompt:
-Once upon a time
-================================================================================
-sample:
-Once upon a time-|WithWhenTheN--|F--SR�A--TheK|-The1|I
-It�MyC-FIThe--RHowI-T|I-WeTheTheTheThe-Free|-The-ThisTheI--GI-For|T-For--IThe-VTheD�I--TheWith-BCTheThe-TheTheTheI-�A-IF--BINAB-B|-B-� yourIB� my-|The|-B--IFor

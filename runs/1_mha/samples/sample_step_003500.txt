@@ -1,6 +1,0 @@
-step: 3500
-prompt:
-Once upon a time
-================================================================================
-sample:
-Once upon a time-5P-AIThe-If4LThe-TheTheSTheBBHTheA-It-I-One-7-7K-HThe�ITheTheMHTheCKIN-I-TheIDMTheTheC(-I-7-2-The-I-1NII-2-2-2I-KKIn-K-5-19-A-TheKK-IWeThe-This-D2MWhatI7-TheTheWhen-A-The7TD-The-The--L2

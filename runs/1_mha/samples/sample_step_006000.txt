@@ -1,8 +1,0 @@
-step: 6000
-prompt:
-Once upon a time
-================================================================================
-sample:
-Once upon a time—by”-The VEzot-I.- I’Muse your own. We’t “I’d’S.’I’You’We’And”—I’The’What’It is a’N.”“I’S.”I know””””
-My‘I’Be,“N’The
-“We’s”.”—the“I’m’I’

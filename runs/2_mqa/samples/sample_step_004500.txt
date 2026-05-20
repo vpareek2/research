@@ -1,8 +1,0 @@
-step: 4500
-prompt:
-Once upon a time
-================================================================================
-sample:
-Once upon a time.
-IKA-6I10:The Best ForgThe Best-20TIMN-In-A�I’�IIDYThe R-LALLICIDIAIMCIMC.
-IIAPAPARASURNTIMAJU.�ISAP.M. I1I�II”-TATU.IA-10-I-MACHIWO10TRAGONI�WADI-I-I,.The-NIT-TUE. I�TIDLATAYK

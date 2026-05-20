@@ -1,6 +1,0 @@
-step: 3250
-prompt:
-Once upon a time
-================================================================================
-sample:
-Once upon a time|1SA|This5TheTheTheI-I1|8CATheThe4TheDateAM3HTheTheInWeDate|I9ATheWeA2ATheAD5We1Day5A5A11AsThereAllI-1-11--D5D9A1-ThisTheTheDate-BTheRK-M18OTheM51HATDateV-N5-6M3-19-11|F4In-|P1Date|3-7ThisDate-The11The9F8|TheK

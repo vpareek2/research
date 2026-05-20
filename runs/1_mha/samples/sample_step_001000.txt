@@ -1,6 +1,0 @@
-step: 1000
-prompt:
-Once upon a time
-================================================================================
-sample:
-Once upon a time-TheThisFThePInThe-ByTheTheTheTheTheTheP-ForWeAsTheIInTheTheIInTheTheTheTheFATheTheIt-The•PWithTF-When-When-TheABy-InTheIn-This-TheBlack-A--�TheF--TheFStaronStarLAofMyThe-Two-TheTheA-TheVal--This1-With--IntheThisThe-DI-FThe�-TheMTheInTwoTheD�--�WhatFOverWhen-TheStarThe

@@ -1,6 +1,0 @@
-step: 1750
-prompt:
-Once upon a time
-================================================================================
-sample:
-Once upon a timeAH-TheTheTheFAsAfterI-Pro-OurBTheDThe-MCo-ItBPInTheChTheFTheTheCo|ITheItcoTheco-TheWhenItI|The LifeWeIIAIWeWeFAsTheIFIfTheBTheDCWe|CocoThe-CA-ThecoPLifeThesCoThisCo-The LifeAsTheFamilyThiscHealthWhenTheNewcoV-ThecAFamilyPItTRCoWeon-TrKHByTRSForMLBCoPFor--The
