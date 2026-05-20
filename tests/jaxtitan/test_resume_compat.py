@@ -12,11 +12,11 @@ from jaxtitan.runtime.resume import (
     validate_resume_metadata,
 )
 from jaxtitan.runtime.training import _with_runtime_schedule_steps
-from jaxtitan.state import DatasetState, HostState
+from jaxtitan.state import DataPipelineState, HostState
 
 
 def test_resume_fingerprint_is_stable_for_identical_specs(tmp_path: Path, prepared_dataset_factory) -> None:
-    manifest = prepared_dataset_factory("stable")
+    manifest = _manifest(prepared_dataset_factory, "stable")
     first = _runtime_spec(tmp_path, manifest)
     second = _runtime_spec(tmp_path, manifest)
 
@@ -24,7 +24,7 @@ def test_resume_fingerprint_is_stable_for_identical_specs(tmp_path: Path, prepar
 
 
 def test_resume_fingerprint_ignores_safe_runtime_controls(tmp_path: Path, prepared_dataset_factory) -> None:
-    manifest = prepared_dataset_factory("controls")
+    manifest = _manifest(prepared_dataset_factory, "controls")
     first = _runtime_spec(tmp_path, manifest, target_tokens=128, log_every_steps=1, checkpoint_every_steps=10)
     second = _runtime_spec(tmp_path, manifest, target_tokens=256, log_every_steps=5, checkpoint_every_steps=20)
 
@@ -43,7 +43,6 @@ def test_resume_fingerprint_ignores_safe_runtime_controls(tmp_path: Path, prepar
         {"seq_len": 2},
         {"global_batch_size": 1},
         {"gradient_accumulation_steps": 2},
-        {"tokenizer_id": "other-tokenizer"},
     ],
 )
 def test_resume_fingerprint_changes_for_unsafe_fields(
@@ -51,16 +50,30 @@ def test_resume_fingerprint_changes_for_unsafe_fields(
     prepared_dataset_factory,
     kwargs: dict,
 ) -> None:
-    manifest = prepared_dataset_factory("unsafe")
+    manifest = _manifest(prepared_dataset_factory, "unsafe")
     base = _runtime_spec(tmp_path, manifest)
     changed = _runtime_spec(tmp_path, manifest, **kwargs)
 
     assert build_resume_compat(base).runtime_fingerprint != build_resume_compat(changed).runtime_fingerprint
 
 
+def test_resume_fingerprint_changes_for_tokenizer_identity(tmp_path: Path, prepared_dataset_factory) -> None:
+    first_manifest = _manifest(prepared_dataset_factory, "tokenizer-first")
+    second_manifest = prepared_dataset_factory(
+        "tokenizer-second",
+        tokenizer_id="other-tokenizer",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    base = _runtime_spec(tmp_path, first_manifest)
+    changed = _runtime_spec(tmp_path, second_manifest, tokenizer_id="other-tokenizer")
+
+    assert build_resume_compat(base).runtime_fingerprint != build_resume_compat(changed).runtime_fingerprint
+
+
 def test_resume_fingerprint_changes_for_data_manifest_hash(tmp_path: Path, prepared_dataset_factory) -> None:
-    first_manifest = prepared_dataset_factory("first")
-    second_manifest = prepared_dataset_factory("second", shard_token_groups=(tuple(range(10, 18)),))
+    first_manifest = _manifest(prepared_dataset_factory, "first")
+    second_manifest = prepared_dataset_factory("second", shard_token_groups=(tuple(range(10, 40)),), train_tokens=25)
     first = _runtime_spec(tmp_path, first_manifest)
     second = _runtime_spec(tmp_path, second_manifest)
 
@@ -68,7 +81,7 @@ def test_resume_fingerprint_changes_for_data_manifest_hash(tmp_path: Path, prepa
 
 
 def test_resume_metadata_contains_compatibility_payload(tmp_path: Path, prepared_dataset_factory) -> None:
-    manifest = prepared_dataset_factory("metadata")
+    manifest = _manifest(prepared_dataset_factory, "metadata")
     spec = _runtime_spec(tmp_path, manifest)
     metadata = checkpoint_metadata(
         spec,
@@ -91,7 +104,7 @@ def test_resume_metadata_contains_compatibility_payload(tmp_path: Path, prepared
 
 
 def test_resume_metadata_rejects_malformed_version(tmp_path: Path, prepared_dataset_factory) -> None:
-    manifest = prepared_dataset_factory("bad-version")
+    manifest = _manifest(prepared_dataset_factory, "bad-version")
     spec = _runtime_spec(tmp_path, manifest)
     metadata = checkpoint_metadata(spec, {"step": 1, "tokens_seen": 128, "loss": 1.0}, reason="interval")
     metadata["schema_version"] = 0
@@ -101,7 +114,7 @@ def test_resume_metadata_rejects_malformed_version(tmp_path: Path, prepared_data
 
 
 def test_resume_metadata_names_mismatched_field(tmp_path: Path, prepared_dataset_factory) -> None:
-    manifest = prepared_dataset_factory("mismatch")
+    manifest = _manifest(prepared_dataset_factory, "mismatch")
     checkpoint_spec = _runtime_spec(tmp_path, manifest)
     current_spec = _runtime_spec(tmp_path, manifest, hidden_size=16)
     metadata = checkpoint_metadata(checkpoint_spec, {"step": 1, "tokens_seen": 128, "loss": 1.0}, reason="interval")
@@ -111,10 +124,10 @@ def test_resume_metadata_names_mismatched_field(tmp_path: Path, prepared_dataset
 
 
 def test_resume_restore_rejects_counter_mismatch(tmp_path: Path, prepared_dataset_factory) -> None:
-    manifest = prepared_dataset_factory("counter-mismatch")
+    manifest = _manifest(prepared_dataset_factory, "counter-mismatch")
     spec = _runtime_spec(tmp_path, manifest)
     metadata = checkpoint_metadata(spec, {"step": 3, "tokens_seen": 24, "loss": 1.0}, reason="interval")
-    dataset_state = DatasetState(shard_index=0, token_offset=24, epoch=0, shuffle_state=None)
+    dataset_state = _dataset_state(token_offset=24, next_record_index=6)
     restored = SimpleNamespace(
         metadata=metadata,
         step=3,
@@ -131,7 +144,7 @@ def test_auto_cosine_total_steps_changes_fingerprint_when_target_changes(
     tmp_path: Path,
     prepared_dataset_factory,
 ) -> None:
-    manifest = prepared_dataset_factory("cosine-auto")
+    manifest = _manifest(prepared_dataset_factory, "cosine-auto")
     first = _runtime_spec(tmp_path, manifest, schedule_name="cosine", total_steps=None, target_tokens=128)
     second = _runtime_spec(tmp_path, manifest, schedule_name="cosine", total_steps=None, target_tokens=256)
 
@@ -141,7 +154,7 @@ def test_auto_cosine_total_steps_changes_fingerprint_when_target_changes(
 
 
 def test_explicit_cosine_total_steps_allows_target_change(tmp_path: Path, prepared_dataset_factory) -> None:
-    manifest = prepared_dataset_factory("cosine-explicit")
+    manifest = _manifest(prepared_dataset_factory, "cosine-explicit")
     first = _runtime_spec(tmp_path, manifest, schedule_name="cosine", total_steps=32, target_tokens=128)
     second = _runtime_spec(tmp_path, manifest, schedule_name="cosine", total_steps=32, target_tokens=256)
 
@@ -152,6 +165,10 @@ def _runtime_spec(tmp_path: Path, train_manifest: Path, **kwargs):
     config_path = tmp_path / f"resume-{len(list(tmp_path.glob('resume-*.toml')))}.toml"
     config_path.write_text(_config_text(train_manifest, **kwargs))
     return _with_runtime_schedule_steps(load_config(config_path))
+
+
+def _manifest(prepared_dataset_factory, name: str) -> Path:
+    return prepared_dataset_factory(name, shard_token_groups=(tuple(range(0, 30)),), train_tokens=25)
 
 
 def _config_text(
@@ -218,3 +235,27 @@ checkpoint_every_steps = {checkpoint_every_steps}
 axis_names = ["data"]
 axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 """
+
+
+def _dataset_state(*, token_offset: int, next_record_index: int) -> DataPipelineState:
+    return DataPipelineState(
+        schema_version=1,
+        backend="grain",
+        backend_version="0.2.16",
+        split="train",
+        order="sequential",
+        worker_count=0,
+        prefetch=False,
+        manifest_path="data/train/manifest.json",
+        manifest_sha256="hash",
+        tokenizer_id="toy-tokenizer",
+        seq_len=4,
+        batch_size=2,
+        num_records=100,
+        next_record_index=next_record_index,
+        token_offset=token_offset,
+        epoch=0,
+        sampler_summary="sampler",
+        source_summary="source",
+        grain_state={"version": 2, "last_seen_indices": {"0": next_record_index - 1}},
+    )

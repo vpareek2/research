@@ -16,7 +16,7 @@ from jaxtitan.specs import (
     ScheduleSpec,
     TrainingSpec,
 )
-from jaxtitan.state import DatasetState, HostState, RngState, TrainState
+from jaxtitan.state import DataPipelineState, HostState, RngState, TrainState
 
 
 def test_run_spec_is_constructible_and_frozen() -> None:
@@ -67,7 +67,7 @@ def test_contracts_reject_invalid_shapes() -> None:
 def test_state_and_metrics_contracts_are_constructible() -> None:
     rng = RngState(train="train-key", data="data-key", eval="eval-key", sample="sample-key")
     train_state = TrainState(step=0, tokens_seen=0, model={"params": {}}, opt_state={}, rng=rng)
-    dataset_state = DatasetState(shard_index=0, token_offset=0, epoch=0)
+    dataset_state = _data_pipeline_state()
     host_state = HostState(dataset=dataset_state, last_checkpoint_step=0, wallclock_start_ns=123, run_id="smoke")
 
     assert train_state.rng.train == "train-key"
@@ -79,10 +79,34 @@ def test_state_and_metrics_contracts_are_constructible() -> None:
 def test_device_state_is_pytree_and_host_state_is_not() -> None:
     rng = RngState(train=1, data=2, eval=3, sample=4)
     train_state = TrainState(step=0, tokens_seen=0, model={"weight": 5}, opt_state={"momentum": 6}, rng=rng)
-    dataset_state = DatasetState(shard_index=0, token_offset=0, epoch=0)
+    dataset_state = _data_pipeline_state()
     host_state = HostState(dataset=dataset_state, last_checkpoint_step=0, wallclock_start_ns=123, run_id="smoke")
 
     assert jax.tree.leaves(rng) == [1, 2, 3, 4]
     assert jax.tree.leaves(train_state) == [0, 0, 5, 6, 1, 2, 3, 4]
     assert jax.tree.leaves(dataset_state) == [dataset_state]
     assert jax.tree.leaves(host_state) == [host_state]
+
+
+def _data_pipeline_state() -> DataPipelineState:
+    return DataPipelineState(
+        schema_version=1,
+        backend="grain",
+        backend_version="0.2.16",
+        split="train",
+        order="sequential",
+        worker_count=0,
+        prefetch=False,
+        manifest_path=Path("data/train/manifest.json"),
+        manifest_sha256="hash",
+        tokenizer_id="tok",
+        seq_len=64,
+        batch_size=2,
+        num_records=10,
+        next_record_index=0,
+        token_offset=0,
+        epoch=0,
+        sampler_summary="sampler",
+        source_summary="source",
+        grain_state={"version": 2},
+    )

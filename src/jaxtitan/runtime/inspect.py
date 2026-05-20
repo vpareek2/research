@@ -91,6 +91,13 @@ def format_run_inspection(inspection: RunInspection) -> str:
                 f"artifacts={parallelism['artifact_writer']} data_axis={mesh['data_axis_size']} "
                 f"global_batch={batch['global_batch_size']} per_device_batch={batch['per_device_batch_size']}"
             )
+        data_pipeline = diagnostics.get("data_pipeline")
+        if data_pipeline is not None:
+            lines.append(
+                "data pipeline: "
+                f"backend={data_pipeline['backend']} version={data_pipeline['backend_version']} "
+                f"order={data_pipeline['order']} workers={data_pipeline['worker_count']}"
+            )
     latest = payload["latest_checkpoint"]
     best = payload["best_checkpoint"]
     lines.append(f"latest checkpoint: {_format_checkpoint_ref(latest)}")
@@ -154,12 +161,15 @@ def _diagnostics_summary(raw: Mapping[str, Any] | None) -> dict[str, Any] | None
     jax_info = raw.get("jax")
     parallelism = raw.get("parallelism")
     sharding = raw.get("sharding")
+    data_pipeline = raw.get("data_pipeline")
     if not isinstance(performance, Mapping) or not isinstance(jax_info, Mapping):
         raise ContractError("runtime diagnostics must include performance and jax objects")
     if parallelism is not None and not isinstance(parallelism, Mapping):
         raise ContractError("runtime diagnostics parallelism must be an object")
     if sharding is not None and not isinstance(sharding, Mapping):
         raise ContractError("runtime diagnostics sharding must be an object")
+    if data_pipeline is not None and not isinstance(data_pipeline, Mapping):
+        raise ContractError("runtime diagnostics data_pipeline must be an object")
     return {
         "path": "diagnostics/runtime.json",
         "jax_backend": jax_info.get("backend"),
@@ -172,6 +182,7 @@ def _diagnostics_summary(raw: Mapping[str, Any] | None) -> dict[str, Any] | None
         "peak_flops_total": performance.get("peak_flops_total"),
         "parallelism": None if parallelism is None else _parallelism_summary(parallelism),
         "sharding": sharding,
+        "data_pipeline": None if data_pipeline is None else _data_pipeline_summary(data_pipeline),
     }
 
 
@@ -186,6 +197,23 @@ def _parallelism_summary(raw: Mapping[str, Any]) -> dict[str, Any]:
         "mesh": raw.get("mesh"),
         "batch": raw.get("batch"),
         "host_artifacts": raw.get("host_artifacts"),
+    }
+
+
+def _data_pipeline_summary(raw: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "backend": raw.get("backend"),
+        "backend_version": raw.get("backend_version"),
+        "state_schema_version": raw.get("state_schema_version"),
+        "split": raw.get("split"),
+        "order": raw.get("order"),
+        "worker_count": raw.get("worker_count"),
+        "prefetch": raw.get("prefetch"),
+        "batch_size": raw.get("batch_size"),
+        "seq_len": raw.get("seq_len"),
+        "num_records": raw.get("num_records"),
+        "manifest_sha256": raw.get("manifest_sha256"),
+        "tokenizer_id": raw.get("tokenizer_id"),
     }
 
 

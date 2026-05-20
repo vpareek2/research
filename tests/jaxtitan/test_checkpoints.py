@@ -9,7 +9,7 @@ from jaxtitan.optim import build_optimizer
 from jaxtitan.services import LocalOrbaxCheckpointService
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
-from jaxtitan.state import DatasetState, HostState
+from jaxtitan.state import DataPipelineState, HostState
 from jaxtitan.steps import initialize_train_state, make_train_step
 
 
@@ -17,7 +17,7 @@ def test_orbax_checkpoint_restores_train_dataset_host_and_metadata(tmp_path) -> 
     built = build_model(_tiny_spec(), seed=0)
     optimizer = _optimizer(built.state, built.metadata)
     train_state = _advanced_state(built, optimizer)
-    dataset_state = DatasetState(shard_index=1, token_offset=8, epoch=0, shuffle_state=None)
+    dataset_state = _dataset_state(token_offset=8, next_record_index=2)
     host_state = HostState(dataset=dataset_state, last_checkpoint_step=1, wallclock_start_ns=123, run_id="smoke")
     service = LocalOrbaxCheckpointService(tmp_path / "run", max_to_keep=2)
 
@@ -54,7 +54,7 @@ def test_multiple_saves_keep_only_max_to_keep_checkpoints(tmp_path) -> None:
     service = LocalOrbaxCheckpointService(tmp_path / "run", max_to_keep=2)
 
     for step in (1, 2, 3):
-        dataset_state = DatasetState(shard_index=0, token_offset=step * 8, epoch=0, shuffle_state=None)
+        dataset_state = _dataset_state(token_offset=step * 8, next_record_index=step * 2)
         host_state = HostState(dataset=dataset_state, last_checkpoint_step=step, wallclock_start_ns=123, run_id="smoke")
         train_state = train_state.replace(step=jnp.asarray(step, dtype=jnp.int32))
         service.save(step, train_state, dataset_state, host_state, {"step": step})
@@ -73,7 +73,7 @@ def test_protected_checkpoint_survives_max_to_keep_cleanup(tmp_path) -> None:
     for step in (1, 2, 3):
         if step == 3:
             service.set_protected_steps({1})
-        dataset_state = DatasetState(shard_index=0, token_offset=step * 8, epoch=0, shuffle_state=None)
+        dataset_state = _dataset_state(token_offset=step * 8, next_record_index=step * 2)
         host_state = HostState(dataset=dataset_state, last_checkpoint_step=step, wallclock_start_ns=123, run_id="smoke")
         train_state = train_state.replace(step=jnp.asarray(step, dtype=jnp.int32))
         service.save(step, train_state, dataset_state, host_state, {"step": step})
@@ -100,9 +100,9 @@ def test_checkpoint_save_requires_matching_host_dataset(tmp_path) -> None:
     built = build_model(_tiny_spec(), seed=0)
     optimizer = _optimizer(built.state, built.metadata)
     train_state = initialize_train_state(built.state, optimizer.transform, seed=1)
-    dataset_state = DatasetState(shard_index=0, token_offset=8, epoch=0, shuffle_state=None)
+    dataset_state = _dataset_state(token_offset=8, next_record_index=2)
     host_state = HostState(
-        dataset=DatasetState(shard_index=0, token_offset=0, epoch=0, shuffle_state=None),
+        dataset=_dataset_state(token_offset=0, next_record_index=0),
         last_checkpoint_step=1,
         wallclock_start_ns=123,
         run_id="smoke",
@@ -119,7 +119,7 @@ def test_restored_train_state_can_continue_one_train_step(tmp_path) -> None:
     built = build_model(_tiny_spec(), seed=0)
     optimizer = _optimizer(built.state, built.metadata)
     train_state = _advanced_state(built, optimizer)
-    dataset_state = DatasetState(shard_index=0, token_offset=8, epoch=0, shuffle_state=None)
+    dataset_state = _dataset_state(token_offset=8, next_record_index=2)
     host_state = HostState(dataset=dataset_state, last_checkpoint_step=1, wallclock_start_ns=123, run_id="smoke")
     service = LocalOrbaxCheckpointService(tmp_path / "run", max_to_keep=2)
     service.save(1, train_state, dataset_state, host_state, {"step": 1})
@@ -167,6 +167,30 @@ def _batch(*, offset: int = 0) -> Batch:
     input_ids = (jnp.arange(8, dtype=jnp.int32).reshape(2, 4) + offset) % 16
     target_ids = (input_ids + 1) % 16
     return Batch(input_ids=input_ids, target_ids=target_ids, loss_mask=jnp.ones((2, 4), dtype=jnp.bool_))
+
+
+def _dataset_state(*, token_offset: int, next_record_index: int) -> DataPipelineState:
+    return DataPipelineState(
+        schema_version=1,
+        backend="grain",
+        backend_version="0.2.16",
+        split="train",
+        order="sequential",
+        worker_count=0,
+        prefetch=False,
+        manifest_path="data/train/manifest.json",
+        manifest_sha256="hash",
+        tokenizer_id="toy-tokenizer",
+        seq_len=4,
+        batch_size=2,
+        num_records=100,
+        next_record_index=next_record_index,
+        token_offset=token_offset,
+        epoch=0,
+        sampler_summary="sampler",
+        source_summary="source",
+        grain_state={"version": 2, "last_seen_indices": {"0": next_record_index - 1}},
+    )
 
 
 def _trees_equal(left, right) -> bool:

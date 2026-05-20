@@ -10,7 +10,7 @@ from typing import Any
 import jax
 import numpy as np
 
-from jaxtitan.data import dataset_manifest_sha256
+from jaxtitan.data import data_pipeline_compat_payload, dataset_manifest_sha256
 from jaxtitan.errors import ContractError
 from jaxtitan.services import CheckpointRestore
 from jaxtitan.specs.run import RunSpec
@@ -42,6 +42,16 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
             "validation_manifest": None
             if spec.data.validation_manifest is None
             else spec.data.validation_manifest.as_posix(),
+            "validation_manifest_sha256": None
+            if spec.data.validation_manifest is None
+            else dataset_manifest_sha256(spec.data.validation_manifest),
+            "training_pipeline": data_pipeline_compat_payload(
+                spec.data.train_manifest,
+                tokenizer_id=spec.data.tokenizer_id,
+                split="train",
+                seq_len=spec.training.seq_len,
+                batch_size=spec.training.global_batch_size,
+            ),
         },
         "training": {
             "precision": spec.training.precision,
@@ -109,7 +119,7 @@ def validate_resume_metadata(metadata: Mapping[str, Any], current_spec: RunSpec)
     if stored_fingerprint != expected_fingerprint:
         raise ContractError("resume metadata runtime_fingerprint does not match compatibility payload")
     if stored_fingerprint != current.runtime_fingerprint:
-        mismatch = _first_mismatch(stored_payload, current.payload)
+        mismatch = _preferred_mismatch(stored_payload, current.payload)
         raise ContractError(f"resume compatibility mismatch at {mismatch}")
 
     checkpoint = _require_mapping(metadata.get("checkpoint"), "checkpoint")
@@ -199,6 +209,13 @@ def _first_mismatch(left: Any, right: Any, path: str = "compatibility") -> str:
             return f"{path}.length"
         return ""
     return "" if left == right else path
+
+
+def _preferred_mismatch(left: Mapping[str, Any], right: Mapping[str, Any]) -> str:
+    for key in ("seed", "model", "optimizer", "mesh", "training", "data"):
+        if left.get(key) != right.get(key):
+            return _first_mismatch(left.get(key), right.get(key), f"compatibility.{key}")
+    return _first_mismatch(left, right)
 
 
 def _hash(value: Any) -> str:

@@ -11,7 +11,6 @@ import jax
 import numpy as np
 
 from jaxtitan.config import load_config
-from jaxtitan.data import PreparedDataService
 from jaxtitan.errors import ContractError
 from jaxtitan.mesh import (
     build_mesh_context,
@@ -33,6 +32,7 @@ from jaxtitan.runtime.diagnostics import (
     sync_and_time,
 )
 from jaxtitan.runtime.training import (
+    _build_train_data_pipeline,
     _build_validation_eval_data,
     _metrics_row,
     _next_accumulated_train_batch,
@@ -61,13 +61,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
     if runtime_spec.dirs.run_dir.exists():
         raise ContractError(f"run directory already exists: {runtime_spec.dirs.run_dir}")
 
-    train_data = PreparedDataService.from_manifest(
-        runtime_spec.data.train_manifest,
-        tokenizer_id=runtime_spec.data.tokenizer_id,
-        split="train",
-        seq_len=runtime_spec.training.seq_len,
-        batch_size=runtime_spec.training.global_batch_size,
-    )
+    train_data = _build_train_data_pipeline(runtime_spec)
     train_dataset_state = train_data.initial_state()
     train_batch, _next_dataset_state, train_provenance = _next_accumulated_train_batch(
         train_data,
@@ -78,7 +72,13 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
     context = build_mesh_context(runtime_spec.mesh)
     sharding = build_sharding_plan(context)
     model = build_model(runtime_spec.model, seed=runtime_spec.seed)
-    runtime_diagnostics = build_runtime_diagnostics(runtime_spec, context, model.metadata, sharding=sharding)
+    runtime_diagnostics = build_runtime_diagnostics(
+        runtime_spec,
+        context,
+        model.metadata,
+        sharding=sharding,
+        data_pipeline=train_data.describe(),
+    )
     optimizer = build_optimizer(runtime_spec.optimizer, model.state, model.metadata)
     model_state = place_replicated(model.state, sharding)
     train_state = initialize_train_state(model_state, optimizer.transform, seed=runtime_spec.seed)
@@ -121,37 +121,41 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
     eval_report = None
     if eval_spec is not None:
         eval_data = _build_validation_eval_data(runtime_spec)
-        eval_step = make_eval_step(
-            model.graph,
-            sharding=sharding,
-            state_template=next_train_state.model,
-            expected_batch_shape=expected_eval_shape,
-        )
-        eval_row = _validation_eval_row(
-            eval_spec,
-            eval_data,
-            eval_step,
-            sharding,
-            next_train_state,
-            {"step": 0, "tokens_seen": 0},
-        )
-        eval_report = {
-            "name": eval_spec.name,
-            "every_steps": eval_spec.every_steps,
-            "num_batches": eval_spec.num_batches,
-            "manifest": (
-                runtime_spec.data.validation_manifest
-                if runtime_spec.data.validation_manifest is not None
-                else runtime_spec.data.train_manifest
-            ),
-            "split": "val",
-            "token_start": eval_row["token_start"],
-            "token_end": eval_row["token_end"],
-            "examples": eval_row["examples"],
-            "target_tokens": eval_row["target_tokens"],
-            "loss": eval_row["loss"],
-            "compile": "passed",
-        }
+        try:
+            eval_step = make_eval_step(
+                model.graph,
+                sharding=sharding,
+                state_template=next_train_state.model,
+                expected_batch_shape=expected_eval_shape,
+            )
+            eval_row = _validation_eval_row(
+                eval_spec,
+                eval_data,
+                eval_step,
+                sharding,
+                next_train_state,
+                {"step": 0, "tokens_seen": 0},
+            )
+            eval_report = {
+                "name": eval_spec.name,
+                "every_steps": eval_spec.every_steps,
+                "num_batches": eval_spec.num_batches,
+                "manifest": (
+                    runtime_spec.data.validation_manifest
+                    if runtime_spec.data.validation_manifest is not None
+                    else runtime_spec.data.train_manifest
+                ),
+                "split": "val",
+                "pipeline": eval_data.describe(),
+                "token_start": eval_row["token_start"],
+                "token_end": eval_row["token_end"],
+                "examples": eval_row["examples"],
+                "target_tokens": eval_row["target_tokens"],
+                "loss": eval_row["loss"],
+                "compile": "passed",
+            }
+        finally:
+            eval_data.close()
 
     micro_tokens = runtime_spec.training.global_batch_size * runtime_spec.training.seq_len
     batch_tokens = micro_tokens * runtime_spec.training.gradient_accumulation_steps
@@ -183,6 +187,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
             "train_split_start": train_data.split_start,
             "train_split_end": train_data.split_end,
             "train_split_tokens": train_data.split_end - train_data.split_start,
+            "pipeline": train_data.describe(),
             "first_batch": {
                 "token_start": train_provenance.token_start,
                 "token_end": train_provenance.token_end,
@@ -246,7 +251,9 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
             },
         },
     }
-    return PreflightReport(payload=_normalize(report))
+    payload = _normalize(report)
+    train_data.close()
+    return PreflightReport(payload=payload)
 
 
 def preflight_report_to_json(report: PreflightReport) -> str:
@@ -296,7 +303,8 @@ def format_preflight_report(report: PreflightReport) -> str:
         (
             "train data: "
             f"manifest={data['train_manifest']} tokens={data['train_split_tokens']} "
-            f"first_batch={data['first_batch']['target_tokens']}"
+            f"first_batch={data['first_batch']['target_tokens']} "
+            f"pipeline={data['pipeline']['backend']} order={data['pipeline']['order']}"
         ),
         (
             "model: "

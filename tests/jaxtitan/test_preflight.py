@@ -34,6 +34,9 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert payload["run_id"] == "loop"
     assert payload["run_dir"] == "runs/loop"
     assert payload["data"]["train_split_tokens"] == 25
+    assert payload["data"]["pipeline"]["backend"] == "grain"
+    assert payload["data"]["pipeline"]["order"] == "sequential"
+    assert payload["data"]["pipeline"]["worker_count"] == 0
     assert payload["data"]["first_batch"]["target_tokens"] == 8
     assert payload["devices"]["selected_device_count"] == 1
     assert payload["mesh"]["axis_names"] == ["data"]
@@ -48,6 +51,8 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert payload["eval"]["num_batches"] == 2
     assert payload["eval"]["compile"] == "passed"
     assert payload["diagnostics"]["run_id"] == "loop"
+    assert payload["diagnostics"]["data_pipeline"]["backend"] == "grain"
+    assert payload["diagnostics"]["packages"]["grain"]
     assert payload["diagnostics"]["model"]["remat"] == "none"
     assert payload["diagnostics"]["jax"]["backend"]
     assert payload["compile"]["train"]["donate_state"] is True
@@ -75,6 +80,7 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert "mode=replicated_data_parallel" in text
     assert "devices:" in text
     assert "runtime:" in text
+    assert "pipeline=grain" in text
     assert "compile=passed" in text
     assert "compile contract:" in text
     assert "donate_train=True" in text

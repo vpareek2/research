@@ -12,7 +12,16 @@ import numpy as np
 
 from jaxtitan.batch import Batch
 from jaxtitan.config import load_config
-from jaxtitan.data import BatchProvenance, PreparedDataService
+from jaxtitan.data import (
+    DATA_PIPELINE_BACKEND,
+    DATA_PIPELINE_ORDER,
+    DATA_PIPELINE_STATE_SCHEMA_VERSION,
+    DATA_PIPELINE_WORKER_COUNT,
+    BatchProvenance,
+    DataPipelineState,
+    PreparedTokenGrainPipeline,
+    TrainingDataPipeline,
+)
 from jaxtitan.errors import ContractError
 from jaxtitan.mesh import (
     build_mesh_context,
@@ -42,7 +51,7 @@ from jaxtitan.runtime.resume import checkpoint_metadata, validate_resume_compat,
 from jaxtitan.services import LocalArtifactWriter, LocalOrbaxCheckpointService, initialize_run
 from jaxtitan.specs.eval import EvalSpec
 from jaxtitan.specs.run import RunSpec
-from jaxtitan.state import DatasetState, HostState, TrainState
+from jaxtitan.state import HostState, TrainState
 from jaxtitan.steps import initialize_train_state, make_eval_step, make_train_step
 
 
@@ -89,6 +98,11 @@ class RunSummary:
     process_count: int | None = None
     process_index: int | None = None
     single_process: bool | None = None
+    data_pipeline_backend: str | None = None
+    data_pipeline_version: str | None = None
+    data_pipeline_order: str | None = None
+    data_pipeline_worker_count: int | None = None
+    data_pipeline_state_schema_version: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +135,9 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
                 "artifact_writer": ARTIFACT_WRITER,
                 "model_remat": spec.model.remat,
                 "gradient_accumulation_steps": spec.training.gradient_accumulation_steps,
+                "data_pipeline_backend": DATA_PIPELINE_BACKEND,
+                "data_pipeline_order": DATA_PIPELINE_ORDER,
+                "data_pipeline_worker_count": DATA_PIPELINE_WORKER_COUNT,
             }
         )
         summary = _run_training_initialized(spec, writer, resume=resume)
@@ -147,6 +164,9 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
                 "effective_tokens_per_step": summary.effective_tokens_per_step,
                 "per_device_batch_size": summary.per_device_batch_size,
                 "selected_device_count": summary.selected_device_count,
+                "data_pipeline_backend": summary.data_pipeline_backend,
+                "data_pipeline_order": summary.data_pipeline_order,
+                "data_pipeline_worker_count": summary.data_pipeline_worker_count,
             }
         )
         writer.write_summary(asdict(summary))
@@ -165,13 +185,7 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
 def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, resume: bool) -> RunSummary:
     run_started_at = time.perf_counter()
     runtime_spec = _with_runtime_schedule_steps(spec)
-    data = PreparedDataService.from_manifest(
-        runtime_spec.data.train_manifest,
-        tokenizer_id=runtime_spec.data.tokenizer_id,
-        split="train",
-        seq_len=runtime_spec.training.seq_len,
-        batch_size=runtime_spec.training.global_batch_size,
-    )
+    data = _build_train_data_pipeline(runtime_spec)
     dataset_state = data.initial_state()
     host_state = HostState(
         dataset=dataset_state,
@@ -182,7 +196,13 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
     context = build_mesh_context(runtime_spec.mesh)
     sharding = build_sharding_plan(context)
     model = build_model(runtime_spec.model, seed=runtime_spec.seed)
-    runtime_diagnostics = build_runtime_diagnostics(runtime_spec, context, model.metadata, sharding=sharding)
+    runtime_diagnostics = build_runtime_diagnostics(
+        runtime_spec,
+        context,
+        model.metadata,
+        sharding=sharding,
+        data_pipeline=data.describe(),
+    )
     writer.write_runtime_diagnostics(runtime_diagnostics.payload)
     optimizer = build_optimizer(runtime_spec.optimizer, model.state, model.metadata)
     model_state = place_replicated(model.state, sharding)
@@ -240,6 +260,8 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
                     "step": _scalar_int(train_state.step),
                     "tokens_seen": _scalar_int(train_state.tokens_seen),
                     "dataset_token_offset": dataset_state.token_offset,
+                    "data_pipeline_backend": dataset_state.backend,
+                    "data_pipeline_order": dataset_state.order,
                 }
             )
 
@@ -357,6 +379,7 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
         runtime_summary = runtime_diagnostics.payload
         mesh_summary = runtime_summary["mesh"]
         jax_summary = runtime_summary["jax"]
+        data_pipeline_summary = runtime_summary["data_pipeline"]
 
         summary = RunSummary(
             run_id=runtime_spec.run_id,
@@ -398,9 +421,15 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
             process_count=jax_summary["process_count"],
             process_index=jax_summary["process_index"],
             single_process=jax_summary["process_count"] == 1,
+            data_pipeline_backend=data_pipeline_summary["backend"],
+            data_pipeline_version=data_pipeline_summary["backend_version"],
+            data_pipeline_order=data_pipeline_summary["order"],
+            data_pipeline_worker_count=data_pipeline_summary["worker_count"],
+            data_pipeline_state_schema_version=data_pipeline_summary["state_schema_version"],
         )
         return summary
     finally:
+        data.close()
         checkpoint_service.close()
 
 
@@ -430,9 +459,19 @@ def _validation_eval_spec(spec: RunSpec) -> EvalSpec | None:
     return eval_spec
 
 
-def _build_validation_eval_data(spec: RunSpec) -> PreparedDataService:
+def _build_train_data_pipeline(spec: RunSpec) -> PreparedTokenGrainPipeline:
+    return PreparedTokenGrainPipeline.from_manifest(
+        spec.data.train_manifest,
+        tokenizer_id=spec.data.tokenizer_id,
+        split="train",
+        seq_len=spec.training.seq_len,
+        batch_size=spec.training.global_batch_size,
+    )
+
+
+def _build_validation_eval_data(spec: RunSpec) -> PreparedTokenGrainPipeline:
     manifest = spec.data.validation_manifest if spec.data.validation_manifest is not None else spec.data.train_manifest
-    return PreparedDataService.from_manifest(
+    return PreparedTokenGrainPipeline.from_manifest(
         manifest,
         tokenizer_id=spec.data.tokenizer_id,
         split="val",
@@ -442,17 +481,18 @@ def _build_validation_eval_data(spec: RunSpec) -> PreparedDataService:
 
 
 def _next_accumulated_train_batch(
-    data: PreparedDataService,
-    dataset_state: DatasetState,
+    data: TrainingDataPipeline,
+    dataset_state: DataPipelineState,
     accumulation_steps: int,
-) -> tuple[Batch, DatasetState, BatchProvenance]:
+) -> tuple[Batch, DataPipelineState, BatchProvenance]:
     batches = []
     provenances = []
     next_state = dataset_state
     for _idx in range(accumulation_steps):
-        batch, next_state, provenance = data.next_batch(next_state, repeat=False)
-        batches.append(batch)
-        provenances.append(provenance)
+        result = data.next_batch(next_state)
+        batches.append(result.batch)
+        provenances.append(result.provenance)
+        next_state = result.state
     return _stack_accumulated_batches(batches), next_state, _combine_provenance(provenances)
 
 
@@ -508,6 +548,7 @@ def run_validation_eval(
             "num_batches": eval_spec.num_batches,
         }
     )
+    data: PreparedTokenGrainPipeline | None = None
     try:
         data = _build_validation_eval_data(spec)
         row = _validation_eval_row(eval_spec, data, eval_step, sharding, train_state, train_row)
@@ -539,11 +580,14 @@ def run_validation_eval(
             }
         )
         raise
+    finally:
+        if data is not None:
+            data.close()
 
 
 def _validation_eval_row(
     eval_spec: EvalSpec,
-    data: PreparedDataService,
+    data: TrainingDataPipeline,
     eval_step: Any,
     sharding: Any,
     train_state: TrainState,
@@ -558,11 +602,14 @@ def _validation_eval_row(
     target_tokens = 0
     for _idx in range(eval_spec.num_batches):
         try:
-            batch, dataset_state, provenance = data.next_batch(dataset_state, repeat=False)
+            result = data.next_batch(dataset_state)
         except StopIteration as exc:
             raise ContractError(
                 f"validation split ended before eval.num_batches={eval_spec.num_batches} completed"
             ) from exc
+        batch = result.batch
+        dataset_state = result.state
+        provenance = result.provenance
         metrics = eval_step(train_state.model, place_batch(batch, sharding))
         loss_sum += _scalar_float(metrics.loss_sum)
         token_count += _scalar_int(metrics.token_count)
@@ -643,7 +690,7 @@ def _save_checkpoint(
     writer: LocalArtifactWriter,
     spec: RunSpec,
     train_state: TrainState,
-    dataset_state: DatasetState,
+    dataset_state: DataPipelineState,
     host_state: HostState,
     checkpoint_index: CheckpointIndex,
     row: dict[str, Any],
@@ -689,6 +736,8 @@ def _save_checkpoint(
             "checkpoint_path": checkpoint_path,
             "reason": reason,
             "checkpoint_sec": checkpoint_sec,
+            "data_pipeline_backend": dataset_state.backend,
+            "data_pipeline_order": dataset_state.order,
         }
     )
     return next_host_state, next_index

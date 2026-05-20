@@ -139,6 +139,7 @@ def build_runtime_diagnostics(
     metadata: tuple[ParamMetadata, ...],
     *,
     sharding: Any | None = None,
+    data_pipeline: Mapping[str, Any] | None = None,
 ) -> RuntimeDiagnostics:
     """Build the canonical runtime diagnostics payload for a run/preflight."""
 
@@ -165,6 +166,7 @@ def build_runtime_diagnostics(
             "flax": _package_version("flax"),
             "optax": _package_version("optax"),
             "orbax_checkpoint": _package_version("orbax-checkpoint"),
+            "grain": _package_version("grain"),
         },
         "jax": {
             "backend": jax.default_backend(),
@@ -215,6 +217,7 @@ def build_runtime_diagnostics(
         "compile": compile_contract_summary(spec, sharding),
         "parallelism": parallelism_summary(spec, context),
         "sharding": None if sharding is None else sharding_policy_summary(sharding),
+        "data_pipeline": data_pipeline,
         "device_telemetry": sample_device_telemetry(context.devices),
     }
     return RuntimeDiagnostics(payload=_normalize(payload))

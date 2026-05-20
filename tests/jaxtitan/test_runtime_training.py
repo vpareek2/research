@@ -67,6 +67,9 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert events[1]["artifact_writer"] == "single_host"
     assert events[1]["model_remat"] == "none"
     assert events[1]["gradient_accumulation_steps"] == 1
+    assert events[1]["data_pipeline_backend"] == "grain"
+    assert events[1]["data_pipeline_order"] == "sequential"
+    assert events[1]["data_pipeline_worker_count"] == 0
     assert [row["step"] for row in metrics] == [1, 2]
     assert metrics[-1]["tokens_seen"] == 16
     assert metrics[-1]["token_count"] == 8
@@ -119,6 +122,10 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert final["effective_global_batch_size"] == 2
     assert final["micro_tokens_per_step"] == 8
     assert final["effective_tokens_per_step"] == 8
+    assert final["data_pipeline_backend"] == "grain"
+    assert final["data_pipeline_order"] == "sequential"
+    assert final["data_pipeline_worker_count"] == 0
+    assert final["data_pipeline_state_schema_version"] == 1
     assert final["latest_checkpoint_path"] == "checkpoints/000002"
     assert final["best_eval_step"] is None
     assert final["best_eval_loss"] is None
@@ -148,7 +155,12 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert events[-1]["effective_tokens_per_step"] == 8
     assert diagnostics["jax"]["backend"]
     assert diagnostics["packages"]["jaxtitan"]
+    assert diagnostics["packages"]["grain"]
     assert diagnostics["model"]["remat"] == "none"
+    assert diagnostics["data_pipeline"]["backend"] == "grain"
+    assert diagnostics["data_pipeline"]["order"] == "sequential"
+    assert diagnostics["data_pipeline"]["worker_count"] == 0
+    assert diagnostics["data_pipeline"]["state_schema_version"] == 1
     assert diagnostics["parallelism"]["execution_mode"] == "replicated_data_parallel"
     assert diagnostics["parallelism"]["metrics_scope"] == "global"
     assert diagnostics["parallelism"]["artifact_writer"] == "single_host"

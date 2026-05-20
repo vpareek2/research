@@ -1,6 +1,7 @@
 """Explicit dynamic state contracts."""
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from flax import struct
@@ -31,20 +32,39 @@ class TrainState:
 
 
 @dataclass(frozen=True, slots=True)
-class DatasetState:
-    """Checkpointable prepared-token cursor state."""
+class DataPipelineState:
+    """Host-checkpointable state for the canonical training data pipeline."""
 
-    shard_index: int
+    schema_version: int
+    backend: str
+    backend_version: str | None
+    split: str
+    order: str
+    worker_count: int
+    prefetch: bool
+    manifest_path: Path
+    manifest_sha256: str
+    tokenizer_id: str
+    seq_len: int
+    batch_size: int
+    num_records: int
+    next_record_index: int
     token_offset: int
     epoch: int
-    shuffle_state: int | None = None
+    sampler_summary: str
+    source_summary: str
+    grain_state: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "manifest_path", Path(self.manifest_path))
+        object.__setattr__(self, "grain_state", dict(self.grain_state))
 
 
 @dataclass(frozen=True, slots=True)
 class HostState:
     """Host-only state that should not be passed through JAX transforms."""
 
-    dataset: DatasetState
+    dataset: DataPipelineState
     last_checkpoint_step: int
     wallclock_start_ns: int
     run_id: str

@@ -1,12 +1,13 @@
 """Orbax-backed local checkpoint service."""
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from jaxtitan.data.pipeline import data_pipeline_state_from_mapping, data_pipeline_state_to_dict
 from jaxtitan.errors import ContractError
-from jaxtitan.state import DatasetState, HostState, TrainState
+from jaxtitan.state import DataPipelineState, HostState, TrainState
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,7 +15,7 @@ class CheckpointRestore:
     """Restored checkpoint payload."""
 
     train_state: TrainState
-    dataset_state: DatasetState
+    dataset_state: DataPipelineState
     host_state: HostState
     metadata: dict[str, Any]
     step: int
@@ -28,7 +29,7 @@ class CheckpointService(Protocol):
         self,
         step: int,
         train_state: TrainState,
-        dataset_state: DatasetState,
+        dataset_state: DataPipelineState,
         host_state: HostState,
         metadata: Mapping[str, Any],
     ) -> None: ...
@@ -76,7 +77,7 @@ class LocalOrbaxCheckpointService:
         self,
         step: int,
         train_state: TrainState,
-        dataset_state: DatasetState,
+        dataset_state: DataPipelineState,
         host_state: HostState,
         metadata: Mapping[str, Any],
     ) -> None:
@@ -177,21 +178,21 @@ class LocalOrbaxCheckpointService:
         return int(step) in self._protected_steps
 
 
-def _dataset_to_dict(state: DatasetState) -> dict[str, Any]:
-    return asdict(state)
+def _dataset_to_dict(state: DataPipelineState) -> dict[str, Any]:
+    return data_pipeline_state_to_dict(state)
 
 
 def _host_to_dict(state: HostState) -> dict[str, Any]:
-    return asdict(state)
+    return {
+        "dataset": _dataset_to_dict(state.dataset),
+        "last_checkpoint_step": state.last_checkpoint_step,
+        "wallclock_start_ns": state.wallclock_start_ns,
+        "run_id": state.run_id,
+    }
 
 
-def _dataset_from_mapping(raw: Mapping[str, Any]) -> DatasetState:
-    return DatasetState(
-        shard_index=_required_int(raw, "shard_index", "dataset"),
-        token_offset=_required_int(raw, "token_offset", "dataset"),
-        epoch=_required_int(raw, "epoch", "dataset"),
-        shuffle_state=_optional_int(raw, "shuffle_state", "dataset"),
-    )
+def _dataset_from_mapping(raw: Mapping[str, Any]) -> DataPipelineState:
+    return data_pipeline_state_from_mapping(raw)
 
 
 def _host_from_mapping(raw: Mapping[str, Any]) -> HostState:
@@ -214,15 +215,6 @@ def _required_int(raw: Mapping[str, Any], key: str, name: str) -> int:
     value = raw.get(key)
     if not isinstance(value, int):
         raise ContractError(f"checkpoint {name}.{key} must be an integer")
-    return value
-
-
-def _optional_int(raw: Mapping[str, Any], key: str, name: str) -> int | None:
-    value = raw.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, int):
-        raise ContractError(f"checkpoint {name}.{key} must be an integer or null")
     return value
 
 
