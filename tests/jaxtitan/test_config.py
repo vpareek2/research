@@ -64,6 +64,11 @@ def test_load_config_resolves_minimal_toml(tmp_path: Path) -> None:
     assert spec.model.remat == "none"
     assert spec.optimizer.schedule.peak_lr == 0.001
     assert spec.data.train_manifest == Path("data/train/manifest.json")
+    assert spec.data.order == "sequential"
+    assert spec.data.shuffle_seed is None
+    assert spec.data.worker_count == 0
+    assert spec.data.worker_buffer_size == 1
+    assert spec.data.prefetch is False
     assert spec.training.target_tokens == 128
     assert spec.training.gradient_accumulation_steps == 1
     assert spec.mesh.axis_names == ("data",)
@@ -141,6 +146,51 @@ def test_load_config_accepts_gradient_accumulation_steps(tmp_path: Path) -> None
     assert spec.training.gradient_accumulation_steps == 4
 
 
+def test_load_config_accepts_data_loader_policy(tmp_path: Path) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace(
+            'tokenizer_id = "toy-tokenizer"',
+            "\n".join(
+                [
+                    'tokenizer_id = "toy-tokenizer"',
+                    'order = "shuffle"',
+                    "shuffle_seed = 123",
+                    "worker_count = 2",
+                    "worker_buffer_size = 3",
+                    "prefetch = true",
+                ]
+            ),
+        )
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.data.order == "shuffle"
+    assert spec.data.shuffle_seed == 123
+    assert spec.data.worker_count == 2
+    assert spec.data.worker_buffer_size == 3
+    assert spec.data.prefetch is True
+
+
+@pytest.mark.parametrize(
+    ("replacement", "match"),
+    [
+        ('order = "rsdb"', "data.order"),
+        ('order = "shuffle"', "shuffle_seed"),
+        ('order = "sequential"\nshuffle_seed = 1', "shuffle_seed"),
+        ('worker_count = -1', "worker_count"),
+        ('worker_buffer_size = 0', "worker_buffer_size"),
+    ],
+)
+def test_load_config_rejects_invalid_data_loader_policy(tmp_path: Path, replacement: str, match: str) -> None:
+    config_path = tmp_path / "bad.toml"
+    config_path.write_text(MINIMAL_CONFIG.replace('tokenizer_id = "toy-tokenizer"', f'tokenizer_id = "toy-tokenizer"\n{replacement}'))
+
+    with pytest.raises(ConfigError, match=match):
+        load_config(config_path)
+
+
 def test_load_config_rejects_cross_spec_mismatch(tmp_path: Path) -> None:
     config_path = tmp_path / "bad.toml"
     config_path.write_text(MINIMAL_CONFIG.replace("max_seq_len = 64", "max_seq_len = 32"))
@@ -159,6 +209,8 @@ def test_run_spec_json_and_hashes_are_stable(tmp_path: Path) -> None:
 
     assert decoded["run_id"] == "smoke"
     assert decoded["data"]["train_manifest"] == "data/train/manifest.json"
+    assert decoded["data"]["order"] == "sequential"
+    assert decoded["data"]["worker_buffer_size"] == 1
     assert resolved_json == run_spec_to_json(spec)
     assert resolved_config_sha256(spec) == sha256(resolved_json.encode("utf-8")).hexdigest()
     assert source_config_sha256(config_path) == sha256(MINIMAL_CONFIG.encode("utf-8")).hexdigest()

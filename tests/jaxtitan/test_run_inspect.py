@@ -41,11 +41,15 @@ def test_inspect_run_reports_summary_checkpoints_and_recent_metrics(
     assert payload["diagnostics"]["parallelism"]["batch"]["global_batch_size"] == 2
     assert payload["diagnostics"]["parallelism"]["batch"]["per_device_batch_size"] == 2
     assert payload["diagnostics"]["sharding"]["batch"]["input_ids"]["partition_spec"] == "PartitionSpec('data', None)"
+    assert payload["diagnostics"]["data_pipeline"]["backend"] == "grain"
+    assert payload["diagnostics"]["data_pipeline"]["order"] == "sequential"
+    assert payload["diagnostics"]["data_pipeline"]["worker_buffer_size"] == 1
     assert payload["recent_train_metrics"][-1]["step"] == 2
     assert payload["recent_eval_metrics"][-1]["eval_name"] == "validation"
     assert "run: loop" in text
     assert "runtime:" in text
     assert "parallelism:" in text
+    assert "data pipeline:" in text
     assert "mode=replicated_data_parallel" in text
     assert "artifacts=single_host" in text
     assert "best checkpoint:" in text

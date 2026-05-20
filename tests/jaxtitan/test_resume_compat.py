@@ -43,6 +43,10 @@ def test_resume_fingerprint_ignores_safe_runtime_controls(tmp_path: Path, prepar
         {"seq_len": 2},
         {"global_batch_size": 1},
         {"gradient_accumulation_steps": 2},
+        {"data_order": "shuffle", "shuffle_seed": 123},
+        {"worker_count": 1},
+        {"worker_buffer_size": 2},
+        {"prefetch": True},
     ],
 )
 def test_resume_fingerprint_changes_for_unsafe_fields(
@@ -189,8 +193,14 @@ def _config_text(
     log_every_steps: int = 1,
     checkpoint_every_steps: int = 10,
     axis_sizes: tuple[int, ...] = (1,),
+    data_order: str = "sequential",
+    shuffle_seed: int | None = None,
+    worker_count: int = 0,
+    worker_buffer_size: int = 1,
+    prefetch: bool = False,
 ) -> str:
     total_steps_line = "" if total_steps is None else f"total_steps = {total_steps}\n"
+    shuffle_seed_line = "" if shuffle_seed is None else f"shuffle_seed = {shuffle_seed}\n"
     return f"""
 [run]
 id = "smoke"
@@ -221,6 +231,10 @@ peak_lr = 0.001
 [data]
 train_manifest = "{train_manifest.as_posix()}"
 tokenizer_id = "{tokenizer_id}"
+order = "{data_order}"
+{shuffle_seed_line}worker_count = {worker_count}
+worker_buffer_size = {worker_buffer_size}
+prefetch = {str(prefetch).lower()}
 
 [training]
 seq_len = {seq_len}
@@ -239,12 +253,14 @@ axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 
 def _dataset_state(*, token_offset: int, next_record_index: int) -> DataPipelineState:
     return DataPipelineState(
-        schema_version=1,
+        schema_version=2,
         backend="grain",
         backend_version="0.2.16",
         split="train",
         order="sequential",
+        shuffle_seed=None,
         worker_count=0,
+        worker_buffer_size=1,
         prefetch=False,
         manifest_path="data/train/manifest.json",
         manifest_sha256="hash",

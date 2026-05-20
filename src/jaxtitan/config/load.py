@@ -161,6 +161,11 @@ def _data_section(raw: Mapping[str, Any]) -> TomlDataSection:
         train_manifest=Path(_required_str(raw, "train_manifest", "data")),
         tokenizer_id=_optional_str(raw, "tokenizer_id", "data", default=None),
         validation_manifest=_optional_path(raw, "validation_manifest", "data"),
+        order=_optional_str(raw, "order", "data", default="sequential"),
+        shuffle_seed=_optional_int(raw, "shuffle_seed", "data"),
+        worker_count=_optional_int_with_default(raw, "worker_count", "data", default=0),
+        worker_buffer_size=_optional_int_with_default(raw, "worker_buffer_size", "data", default=1),
+        prefetch=_optional_bool(raw, "prefetch", "data", default=False),
     )
 
 
@@ -234,7 +239,14 @@ def _optional_int(raw: Mapping[str, Any], key: str, section: str) -> int | None:
     value = raw.get(key)
     if value is None:
         return None
-    if not isinstance(value, int):
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ConfigError(f"{section}.{key} must be an integer")
+    return value
+
+
+def _optional_int_with_default(raw: Mapping[str, Any], key: str, section: str, *, default: int) -> int:
+    value = raw.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool):
         raise ConfigError(f"{section}.{key} must be an integer")
     return value
 

@@ -14,9 +14,6 @@ from jaxtitan.batch import Batch
 from jaxtitan.config import load_config
 from jaxtitan.data import (
     DATA_PIPELINE_BACKEND,
-    DATA_PIPELINE_ORDER,
-    DATA_PIPELINE_STATE_SCHEMA_VERSION,
-    DATA_PIPELINE_WORKER_COUNT,
     BatchProvenance,
     DataPipelineState,
     PreparedTokenGrainPipeline,
@@ -101,7 +98,10 @@ class RunSummary:
     data_pipeline_backend: str | None = None
     data_pipeline_version: str | None = None
     data_pipeline_order: str | None = None
+    data_pipeline_shuffle_seed: int | None = None
     data_pipeline_worker_count: int | None = None
+    data_pipeline_worker_buffer_size: int | None = None
+    data_pipeline_prefetch: bool | None = None
     data_pipeline_state_schema_version: int | None = None
 
 
@@ -136,8 +136,11 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
                 "model_remat": spec.model.remat,
                 "gradient_accumulation_steps": spec.training.gradient_accumulation_steps,
                 "data_pipeline_backend": DATA_PIPELINE_BACKEND,
-                "data_pipeline_order": DATA_PIPELINE_ORDER,
-                "data_pipeline_worker_count": DATA_PIPELINE_WORKER_COUNT,
+                "data_pipeline_order": spec.data.order,
+                "data_pipeline_shuffle_seed": spec.data.shuffle_seed,
+                "data_pipeline_worker_count": spec.data.worker_count,
+                "data_pipeline_worker_buffer_size": spec.data.worker_buffer_size,
+                "data_pipeline_prefetch": spec.data.prefetch,
             }
         )
         summary = _run_training_initialized(spec, writer, resume=resume)
@@ -166,7 +169,10 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
                 "selected_device_count": summary.selected_device_count,
                 "data_pipeline_backend": summary.data_pipeline_backend,
                 "data_pipeline_order": summary.data_pipeline_order,
+                "data_pipeline_shuffle_seed": summary.data_pipeline_shuffle_seed,
                 "data_pipeline_worker_count": summary.data_pipeline_worker_count,
+                "data_pipeline_worker_buffer_size": summary.data_pipeline_worker_buffer_size,
+                "data_pipeline_prefetch": summary.data_pipeline_prefetch,
             }
         )
         writer.write_summary(asdict(summary))
@@ -260,10 +266,11 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
                     "step": _scalar_int(train_state.step),
                     "tokens_seen": _scalar_int(train_state.tokens_seen),
                     "dataset_token_offset": dataset_state.token_offset,
-                    "data_pipeline_backend": dataset_state.backend,
-                    "data_pipeline_order": dataset_state.order,
-                }
-            )
+                "data_pipeline_backend": dataset_state.backend,
+                "data_pipeline_order": dataset_state.order,
+                "data_pipeline_shuffle_seed": dataset_state.shuffle_seed,
+            }
+        )
 
         last_row: dict[str, Any] | None = None
         last_eval: EvalRunResult | None = None
@@ -424,7 +431,10 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
             data_pipeline_backend=data_pipeline_summary["backend"],
             data_pipeline_version=data_pipeline_summary["backend_version"],
             data_pipeline_order=data_pipeline_summary["order"],
+            data_pipeline_shuffle_seed=data_pipeline_summary["shuffle_seed"],
             data_pipeline_worker_count=data_pipeline_summary["worker_count"],
+            data_pipeline_worker_buffer_size=data_pipeline_summary["worker_buffer_size"],
+            data_pipeline_prefetch=data_pipeline_summary["prefetch"],
             data_pipeline_state_schema_version=data_pipeline_summary["state_schema_version"],
         )
         return summary
@@ -466,6 +476,11 @@ def _build_train_data_pipeline(spec: RunSpec) -> PreparedTokenGrainPipeline:
         split="train",
         seq_len=spec.training.seq_len,
         batch_size=spec.training.global_batch_size,
+        order=spec.data.order,
+        shuffle_seed=spec.data.shuffle_seed,
+        worker_count=spec.data.worker_count,
+        worker_buffer_size=spec.data.worker_buffer_size,
+        prefetch=spec.data.prefetch,
     )
 
 
@@ -477,6 +492,11 @@ def _build_validation_eval_data(spec: RunSpec) -> PreparedTokenGrainPipeline:
         split="val",
         seq_len=spec.training.seq_len,
         batch_size=spec.training.global_batch_size,
+        order="sequential",
+        shuffle_seed=None,
+        worker_count=spec.data.worker_count,
+        worker_buffer_size=spec.data.worker_buffer_size,
+        prefetch=spec.data.prefetch,
     )
 
 
@@ -511,12 +531,11 @@ def _combine_provenance(provenances: list[BatchProvenance]) -> BatchProvenance:
     if not provenances:
         raise ContractError("gradient accumulation requires at least one microbatch provenance")
     first = provenances[0]
-    last = provenances[-1]
     return BatchProvenance(
         split=first.split,
         epoch=first.epoch,
-        token_start=first.token_start,
-        token_end=last.token_end,
+        token_start=min(provenance.token_start for provenance in provenances),
+        token_end=max(provenance.token_end for provenance in provenances),
         examples=sum(provenance.examples for provenance in provenances),
         target_tokens=sum(provenance.target_tokens for provenance in provenances),
         row_start_offsets=tuple(
@@ -680,6 +699,11 @@ def _metrics_row(
                 "effective_tokens_per_step": provenance.target_tokens,
                 "global_target_tokens": provenance.target_tokens,
                 "per_device_target_tokens": provenance.target_tokens // data_axis_size,
+                "data_pipeline_backend": DATA_PIPELINE_BACKEND,
+                "data_order": runtime_spec.data.order,
+                "data_worker_count": runtime_spec.data.worker_count,
+                "data_prefetch": runtime_spec.data.prefetch,
+                "data_worker_buffer_size": runtime_spec.data.worker_buffer_size,
             }
         )
     return row
@@ -738,6 +762,7 @@ def _save_checkpoint(
             "checkpoint_sec": checkpoint_sec,
             "data_pipeline_backend": dataset_state.backend,
             "data_pipeline_order": dataset_state.order,
+            "data_pipeline_shuffle_seed": dataset_state.shuffle_seed,
         }
     )
     return next_host_state, next_index

@@ -36,7 +36,10 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert payload["data"]["train_split_tokens"] == 25
     assert payload["data"]["pipeline"]["backend"] == "grain"
     assert payload["data"]["pipeline"]["order"] == "sequential"
+    assert payload["data"]["pipeline"]["shuffle_seed"] is None
     assert payload["data"]["pipeline"]["worker_count"] == 0
+    assert payload["data"]["pipeline"]["worker_buffer_size"] == 1
+    assert payload["data"]["pipeline"]["prefetch"] is False
     assert payload["data"]["first_batch"]["target_tokens"] == 8
     assert payload["devices"]["selected_device_count"] == 1
     assert payload["mesh"]["axis_names"] == ["data"]
@@ -52,6 +55,7 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert payload["eval"]["compile"] == "passed"
     assert payload["diagnostics"]["run_id"] == "loop"
     assert payload["diagnostics"]["data_pipeline"]["backend"] == "grain"
+    assert payload["diagnostics"]["data_pipeline"]["worker_buffer_size"] == 1
     assert payload["diagnostics"]["packages"]["grain"]
     assert payload["diagnostics"]["model"]["remat"] == "none"
     assert payload["diagnostics"]["jax"]["backend"]
@@ -158,6 +162,34 @@ def test_run_preflight_reports_gradient_accumulation(
     assert payload["observed_sharding"]["first_train_batch"]["input_ids"]["global_shape"] == [2, 2, 4]
     assert "grad_accum=2" in text
     assert "effective_batch=4" in text
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_reports_shuffle_loader_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("shuffle", shard_token_groups=(tuple(range(0, 60)),), train_tokens=40)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            data_order="shuffle",
+            shuffle_seed=123,
+            worker_buffer_size=2,
+            prefetch=True,
+        )
+    )
+
+    payload = run_preflight(config_path).payload
+
+    assert payload["data"]["pipeline"]["order"] == "shuffle"
+    assert payload["data"]["pipeline"]["shuffle_seed"] == 123
+    assert payload["data"]["pipeline"]["worker_buffer_size"] == 2
+    assert payload["data"]["pipeline"]["prefetch"] is True
+    assert payload["diagnostics"]["data_pipeline"] == payload["data"]["pipeline"]
     assert not (tmp_path / "runs" / "loop").exists()
 
 
@@ -374,7 +406,13 @@ def _preflight_config(
     eval_num_batches: int = 1,
     eval_name: str = "validation",
     second_eval: bool = False,
+    data_order: str = "sequential",
+    shuffle_seed: int | None = None,
+    worker_count: int = 0,
+    worker_buffer_size: int = 1,
+    prefetch: bool = False,
 ) -> str:
+    shuffle_seed_line = "" if shuffle_seed is None else f"shuffle_seed = {shuffle_seed}\n"
     eval_block = ""
     if eval_every_steps is not None:
         eval_block = f"""
@@ -420,6 +458,10 @@ peak_lr = 0.001
 [data]
 train_manifest = "{train_manifest.as_posix()}"
 tokenizer_id = "{tokenizer_id}"
+order = "{data_order}"
+{shuffle_seed_line}worker_count = {worker_count}
+worker_buffer_size = {worker_buffer_size}
+prefetch = {str(prefetch).lower()}
 
 [training]
 seq_len = 4

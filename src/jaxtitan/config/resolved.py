@@ -72,6 +72,11 @@ def _data_spec(raw: Mapping[str, Any]) -> DataSpec:
         train_manifest=Path(_required_str(raw, "train_manifest", "data")),
         tokenizer_id=_optional_str(raw, "tokenizer_id", "data"),
         validation_manifest=None if validation_manifest is None else Path(_required_str(raw, "validation_manifest", "data")),
+        order=str(raw.get("order", "sequential")),
+        shuffle_seed=_optional_int(raw, "shuffle_seed", "data"),
+        worker_count=_optional_int_with_default(raw, "worker_count", "data", default=0),
+        worker_buffer_size=_optional_int_with_default(raw, "worker_buffer_size", "data", default=1),
+        prefetch=_optional_bool(raw, "prefetch", "data", default=False),
     )
 
 
@@ -136,3 +141,26 @@ def _optional_float(raw: Mapping[str, Any], key: str, name: str) -> float | None
     if not isinstance(value, int | float):
         raise ConfigError(f"{name}.{key} must be numeric or null")
     return float(value)
+
+
+def _optional_int(raw: Mapping[str, Any], key: str, name: str) -> int | None:
+    value = raw.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ConfigError(f"{name}.{key} must be an integer or null")
+    return value
+
+
+def _optional_int_with_default(raw: Mapping[str, Any], key: str, name: str, *, default: int) -> int:
+    value = raw.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ConfigError(f"{name}.{key} must be an integer")
+    return value
+
+
+def _optional_bool(raw: Mapping[str, Any], key: str, name: str, *, default: bool) -> bool:
+    value = raw.get(key, default)
+    if not isinstance(value, bool):
+        raise ConfigError(f"{name}.{key} must be a boolean")
+    return value

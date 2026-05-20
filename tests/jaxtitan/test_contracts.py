@@ -90,12 +90,14 @@ def test_device_state_is_pytree_and_host_state_is_not() -> None:
 
 def _data_pipeline_state() -> DataPipelineState:
     return DataPipelineState(
-        schema_version=1,
+        schema_version=2,
         backend="grain",
         backend_version="0.2.16",
         split="train",
         order="sequential",
+        shuffle_seed=None,
         worker_count=0,
+        worker_buffer_size=1,
         prefetch=False,
         manifest_path=Path("data/train/manifest.json"),
         manifest_sha256="hash",

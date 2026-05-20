@@ -171,12 +171,14 @@ def _batch(*, offset: int = 0) -> Batch:
 
 def _dataset_state(*, token_offset: int, next_record_index: int) -> DataPipelineState:
     return DataPipelineState(
-        schema_version=1,
+        schema_version=2,
         backend="grain",
         backend_version="0.2.16",
         split="train",
         order="sequential",
+        shuffle_seed=None,
         worker_count=0,
+        worker_buffer_size=1,
         prefetch=False,
         manifest_path="data/train/manifest.json",
         manifest_sha256="hash",

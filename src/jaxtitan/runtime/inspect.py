@@ -96,7 +96,8 @@ def format_run_inspection(inspection: RunInspection) -> str:
             lines.append(
                 "data pipeline: "
                 f"backend={data_pipeline['backend']} version={data_pipeline['backend_version']} "
-                f"order={data_pipeline['order']} workers={data_pipeline['worker_count']}"
+                f"order={data_pipeline['order']} shuffle_seed={data_pipeline['shuffle_seed']} "
+                f"workers={data_pipeline['worker_count']} prefetch={data_pipeline['prefetch']}"
             )
     latest = payload["latest_checkpoint"]
     best = payload["best_checkpoint"]
@@ -207,7 +208,9 @@ def _data_pipeline_summary(raw: Mapping[str, Any]) -> dict[str, Any]:
         "state_schema_version": raw.get("state_schema_version"),
         "split": raw.get("split"),
         "order": raw.get("order"),
+        "shuffle_seed": raw.get("shuffle_seed"),
         "worker_count": raw.get("worker_count"),
+        "worker_buffer_size": raw.get("worker_buffer_size"),
         "prefetch": raw.get("prefetch"),
         "batch_size": raw.get("batch_size"),
         "seq_len": raw.get("seq_len"),

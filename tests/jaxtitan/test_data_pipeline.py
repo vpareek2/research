@@ -110,6 +110,11 @@ def test_pipeline_sequential_batches_are_fixed_shape_and_shifted(prepared_datase
     np.testing.assert_array_equal(result.batch.target_ids, np.asarray([[1, 2, 3], [4, 5, 6]], dtype=np.int32))
     assert result.batch.loss_mask.all()
     assert result.state.backend == "grain"
+    assert result.state.order == "sequential"
+    assert result.state.shuffle_seed is None
+    assert result.state.worker_count == 0
+    assert result.state.worker_buffer_size == 1
+    assert result.state.prefetch is False
     assert result.state.next_record_index == 2
     assert result.state.token_offset == 6
     assert result.state.epoch == 0
@@ -165,13 +170,20 @@ def test_data_pipeline_state_json_round_trips(prepared_dataset_factory: Callable
     pipeline.close()
 
 
-def test_grain_restore_reproduces_exact_next_batch(prepared_dataset_factory: Callable[..., Path]) -> None:
+@pytest.mark.parametrize("order_kwargs", [{}, {"order": "shuffle", "shuffle_seed": 123}])
+def test_grain_restore_reproduces_exact_next_batch(
+    prepared_dataset_factory: Callable[..., Path],
+    order_kwargs: dict,
+) -> None:
     first_pipeline = _pipeline(prepared_dataset_factory, seq_len=4, batch_size=2)
+    if order_kwargs:
+        first_pipeline.close()
+        first_pipeline = _pipeline(prepared_dataset_factory, seq_len=4, batch_size=2, **order_kwargs)
     state = first_pipeline.initial_state()
     first = first_pipeline.next_batch(state)
     expected_second = first_pipeline.next_batch(first.state)
 
-    restored_pipeline = _pipeline(prepared_dataset_factory, seq_len=4, batch_size=2)
+    restored_pipeline = _pipeline(prepared_dataset_factory, seq_len=4, batch_size=2, **order_kwargs)
     restored_second = restored_pipeline.next_batch(first.state)
 
     np.testing.assert_array_equal(restored_second.batch.input_ids, expected_second.batch.input_ids)
@@ -180,6 +192,31 @@ def test_grain_restore_reproduces_exact_next_batch(prepared_dataset_factory: Cal
     assert restored_second.provenance == expected_second.provenance
     first_pipeline.close()
     restored_pipeline.close()
+
+
+def test_shuffle_order_is_seeded_and_deterministic(prepared_dataset_factory: Callable[..., Path]) -> None:
+    first = _pipeline(prepared_dataset_factory, seq_len=4, batch_size=2, order="shuffle", shuffle_seed=7)
+    second = _pipeline(prepared_dataset_factory, seq_len=4, batch_size=2, order="shuffle", shuffle_seed=7)
+    third = _pipeline(prepared_dataset_factory, seq_len=4, batch_size=2, order="shuffle", shuffle_seed=8)
+
+    first_result = first.next_batch(first.initial_state())
+    second_result = second.next_batch(second.initial_state())
+    third_result = third.next_batch(third.initial_state())
+
+    np.testing.assert_array_equal(first_result.batch.input_ids, second_result.batch.input_ids)
+    assert first_result.provenance.row_start_offsets == second_result.provenance.row_start_offsets
+    assert first_result.provenance.row_start_offsets != (0, 4)
+    assert first_result.provenance.row_start_offsets != third_result.provenance.row_start_offsets
+    first.close()
+    second.close()
+    third.close()
+
+
+def test_pipeline_rejects_invalid_loader_policy(prepared_dataset_factory: Callable[..., Path]) -> None:
+    with pytest.raises(ContractError, match="shuffle_seed"):
+        _pipeline(prepared_dataset_factory, seq_len=4, batch_size=2, order="shuffle")
+    with pytest.raises(ContractError, match="worker_buffer_size"):
+        _pipeline(prepared_dataset_factory, seq_len=4, batch_size=2, worker_buffer_size=0)
 
 
 def test_pipeline_compat_summary_changes_for_identity_fields(prepared_dataset_factory: Callable[..., Path]) -> None:
@@ -201,16 +238,35 @@ def test_pipeline_compat_summary_changes_for_identity_fields(prepared_dataset_fa
     assert data_pipeline_compat_payload(first_manifest, tokenizer_id="toy-tokenizer", split="val", seq_len=4, batch_size=1) != base
     assert data_pipeline_compat_payload(first_manifest, tokenizer_id="toy-tokenizer", split="train", seq_len=3, batch_size=2) != base
     assert data_pipeline_compat_payload(first_manifest, tokenizer_id="toy-tokenizer", split="train", seq_len=4, batch_size=1) != base
+    assert data_pipeline_compat_payload(first_manifest, tokenizer_id="toy-tokenizer", split="train", seq_len=4, batch_size=2, order="shuffle", shuffle_seed=123) != base
+    assert data_pipeline_compat_payload(first_manifest, tokenizer_id="toy-tokenizer", split="train", seq_len=4, batch_size=2, worker_count=1) != base
+    assert data_pipeline_compat_payload(first_manifest, tokenizer_id="toy-tokenizer", split="train", seq_len=4, batch_size=2, worker_buffer_size=2) != base
+    assert data_pipeline_compat_payload(first_manifest, tokenizer_id="toy-tokenizer", split="train", seq_len=4, batch_size=2, prefetch=True) != base
     assert data_pipeline_compat_payload(second_manifest, tokenizer_id="other-tokenizer", split="train", seq_len=4, batch_size=2) != base
 
 
-def _pipeline(prepared_dataset_factory: Callable[..., Path], *, seq_len: int, batch_size: int) -> PreparedTokenGrainPipeline:
+def _pipeline(
+    prepared_dataset_factory: Callable[..., Path],
+    *,
+    seq_len: int,
+    batch_size: int,
+    order: str = "sequential",
+    shuffle_seed: int | None = None,
+    worker_count: int = 0,
+    worker_buffer_size: int = 1,
+    prefetch: bool = False,
+) -> PreparedTokenGrainPipeline:
     return PreparedTokenGrainPipeline.from_manifest(
         _pipeline_manifest(prepared_dataset_factory),
         tokenizer_id="toy-tokenizer",
         split="train",
         seq_len=seq_len,
         batch_size=batch_size,
+        order=order,
+        shuffle_seed=shuffle_seed,
+        worker_count=worker_count,
+        worker_buffer_size=worker_buffer_size,
+        prefetch=prefetch,
     )
 
 

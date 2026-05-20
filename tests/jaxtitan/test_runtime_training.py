@@ -69,7 +69,10 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert events[1]["gradient_accumulation_steps"] == 1
     assert events[1]["data_pipeline_backend"] == "grain"
     assert events[1]["data_pipeline_order"] == "sequential"
+    assert events[1]["data_pipeline_shuffle_seed"] is None
     assert events[1]["data_pipeline_worker_count"] == 0
+    assert events[1]["data_pipeline_worker_buffer_size"] == 1
+    assert events[1]["data_pipeline_prefetch"] is False
     assert [row["step"] for row in metrics] == [1, 2]
     assert metrics[-1]["tokens_seen"] == 16
     assert metrics[-1]["token_count"] == 8
@@ -87,6 +90,11 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert metrics[-1]["execution_mode"] == "replicated_data_parallel"
     assert metrics[-1]["metrics_scope"] == "global"
     assert metrics[-1]["artifact_writer"] == "single_host"
+    assert metrics[-1]["data_pipeline_backend"] == "grain"
+    assert metrics[-1]["data_order"] == "sequential"
+    assert metrics[-1]["data_worker_count"] == 0
+    assert metrics[-1]["data_worker_buffer_size"] == 1
+    assert metrics[-1]["data_prefetch"] is False
     assert metrics[-1]["data_sec"] >= 0.0
     assert metrics[-1]["placement_sec"] >= 0.0
     assert metrics[-1]["train_dispatch_sec"] >= 0.0
@@ -124,8 +132,11 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert final["effective_tokens_per_step"] == 8
     assert final["data_pipeline_backend"] == "grain"
     assert final["data_pipeline_order"] == "sequential"
+    assert final["data_pipeline_shuffle_seed"] is None
     assert final["data_pipeline_worker_count"] == 0
-    assert final["data_pipeline_state_schema_version"] == 1
+    assert final["data_pipeline_worker_buffer_size"] == 1
+    assert final["data_pipeline_prefetch"] is False
+    assert final["data_pipeline_state_schema_version"] == 2
     assert final["latest_checkpoint_path"] == "checkpoints/000002"
     assert final["best_eval_step"] is None
     assert final["best_eval_loss"] is None
@@ -159,8 +170,11 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert diagnostics["model"]["remat"] == "none"
     assert diagnostics["data_pipeline"]["backend"] == "grain"
     assert diagnostics["data_pipeline"]["order"] == "sequential"
+    assert diagnostics["data_pipeline"]["shuffle_seed"] is None
     assert diagnostics["data_pipeline"]["worker_count"] == 0
-    assert diagnostics["data_pipeline"]["state_schema_version"] == 1
+    assert diagnostics["data_pipeline"]["worker_buffer_size"] == 1
+    assert diagnostics["data_pipeline"]["prefetch"] is False
+    assert diagnostics["data_pipeline"]["state_schema_version"] == 2
     assert diagnostics["parallelism"]["execution_mode"] == "replicated_data_parallel"
     assert diagnostics["parallelism"]["metrics_scope"] == "global"
     assert diagnostics["parallelism"]["artifact_writer"] == "single_host"
@@ -286,6 +300,48 @@ def test_run_training_with_gradient_accumulation_records_effective_batch(
     assert diagnostics["compile"]["train"]["expected_batch_shape"] == [2, 2, 4]
     assert diagnostics["parallelism"]["batch"]["gradient_accumulation_steps"] == 2
     assert diagnostics["parallelism"]["batch"]["effective_tokens_per_step"] == 16
+
+
+def test_run_training_with_shuffle_records_loader_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "shuffle-loop",
+        shard_token_groups=(tuple(range(0, 80)),),
+        train_tokens=60,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            data_order="shuffle",
+            shuffle_seed=123,
+            prefetch=True,
+        )
+    )
+
+    summary = run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    metrics = _jsonl(run_dir / "metrics" / "train.jsonl")
+    final = json.loads((run_dir / "summaries" / "final.json").read_text())
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+
+    assert summary.steps == 2
+    assert metrics[-1]["data_order"] == "shuffle"
+    assert metrics[-1]["data_prefetch"] is True
+    assert metrics[-1]["data_pipeline_backend"] == "grain"
+    assert diagnostics["data_pipeline"]["order"] == "shuffle"
+    assert diagnostics["data_pipeline"]["shuffle_seed"] == 123
+    assert diagnostics["data_pipeline"]["prefetch"] is True
+    assert final["data_pipeline_order"] == "shuffle"
+    assert final["data_pipeline_shuffle_seed"] == 123
+    assert final["data_pipeline_prefetch"] is True
 
 
 def test_run_training_with_block_remat_completes_and_records_policy(
@@ -895,6 +951,10 @@ def test_run_training_retains_latest_and_best_checkpoint_paths(
         ({"gradient_accumulation_steps": 2}, r"compatibility\.training\.gradient_accumulation_steps"),
         ({"axis_sizes": (2,)}, r"compatibility\.mesh\.axis_sizes"),
         ({"seed": 9}, r"compatibility\.seed"),
+        ({"data_order": "shuffle", "shuffle_seed": 1}, r"compatibility\.data\.training_pipeline\.order"),
+        ({"worker_count": 1}, r"compatibility\.data\.training_pipeline\.worker_count"),
+        ({"worker_buffer_size": 2}, r"compatibility\.data\.training_pipeline\.worker_buffer_size"),
+        ({"prefetch": True}, r"compatibility\.data\.training_pipeline\.prefetch"),
     ],
 )
 def test_run_training_resume_rejects_unsafe_config_changes(
@@ -1197,11 +1257,17 @@ def _training_config(
     eval_num_batches: int = 1,
     eval_name: str = "validation",
     second_eval: bool = False,
+    data_order: str = "sequential",
+    shuffle_seed: int | None = None,
+    worker_count: int = 0,
+    worker_buffer_size: int = 1,
+    prefetch: bool = False,
 ) -> str:
     total_steps_line = "" if total_steps is None else f"total_steps = {total_steps}\n"
     validation_manifest_line = (
         "" if validation_manifest is None else f'validation_manifest = "{Path(validation_manifest).as_posix()}"\n'
     )
+    shuffle_seed_line = "" if shuffle_seed is None else f"shuffle_seed = {shuffle_seed}\n"
     eval_block = ""
     if eval_every_steps is not None:
         eval_block = f"""
@@ -1249,6 +1315,10 @@ peak_lr = 0.001
 train_manifest = "{Path(train_manifest).as_posix()}"
 tokenizer_id = "{tokenizer_id}"
 {validation_manifest_line}
+order = "{data_order}"
+{shuffle_seed_line}worker_count = {worker_count}
+worker_buffer_size = {worker_buffer_size}
+prefetch = {str(prefetch).lower()}
 
 [training]
 seq_len = {seq_len}

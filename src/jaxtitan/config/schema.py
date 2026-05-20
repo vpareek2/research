@@ -53,6 +53,11 @@ class TomlDataSection:
     train_manifest: Path
     tokenizer_id: str | None = None
     validation_manifest: Path | None = None
+    order: str = "sequential"
+    shuffle_seed: int | None = None
+    worker_count: int = 0
+    worker_buffer_size: int = 1
+    prefetch: bool = False
 
 
 @dataclass(frozen=True, slots=True)

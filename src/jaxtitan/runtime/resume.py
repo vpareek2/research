@@ -51,6 +51,11 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
                 split="train",
                 seq_len=spec.training.seq_len,
                 batch_size=spec.training.global_batch_size,
+                order=spec.data.order,
+                shuffle_seed=spec.data.shuffle_seed,
+                worker_count=spec.data.worker_count,
+                worker_buffer_size=spec.data.worker_buffer_size,
+                prefetch=spec.data.prefetch,
             ),
         },
         "training": {

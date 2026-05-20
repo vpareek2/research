@@ -18,11 +18,12 @@ from jaxtitan.state import DataPipelineState
 
 SplitName = Literal["train", "val"]
 
-DATA_PIPELINE_STATE_SCHEMA_VERSION = 1
+DATA_PIPELINE_STATE_SCHEMA_VERSION = 2
 DATA_PIPELINE_BACKEND = "grain"
-DATA_PIPELINE_ORDER = "sequential"
-DATA_PIPELINE_WORKER_COUNT = 0
-DATA_PIPELINE_PREFETCH = False
+DATA_PIPELINE_DEFAULT_ORDER = "sequential"
+DATA_PIPELINE_DEFAULT_WORKER_COUNT = 0
+DATA_PIPELINE_DEFAULT_WORKER_BUFFER_SIZE = 1
+DATA_PIPELINE_DEFAULT_PREFETCH = False
 DATA_PIPELINE_NUM_EPOCHS = 1
 DATA_PIPELINE_DROP_REMAINDER = True
 PREPARED_TOKEN_SOURCE_SCHEMA_VERSION = 1
@@ -140,9 +141,21 @@ class PreparedTokenGrainPipeline:
         *,
         source: PreparedTokenDataSource,
         batch_size: int,
+        order: str = DATA_PIPELINE_DEFAULT_ORDER,
+        shuffle_seed: int | None = None,
+        worker_count: int = DATA_PIPELINE_DEFAULT_WORKER_COUNT,
+        worker_buffer_size: int = DATA_PIPELINE_DEFAULT_WORKER_BUFFER_SIZE,
+        prefetch: bool = DATA_PIPELINE_DEFAULT_PREFETCH,
     ) -> None:
         if batch_size <= 0:
             raise ContractError(f"batch_size must be positive, got {batch_size}")
+        _validate_loader_policy(
+            order=order,
+            shuffle_seed=shuffle_seed,
+            worker_count=worker_count,
+            worker_buffer_size=worker_buffer_size,
+            prefetch=prefetch,
+        )
         if len(source) < batch_size:
             required = batch_size * source.seq_len + 1
             raise ContractError(
@@ -150,6 +163,11 @@ class PreparedTokenGrainPipeline:
             )
         self.source = source
         self.batch_size = int(batch_size)
+        self.order = order
+        self.shuffle_seed = shuffle_seed
+        self.worker_count = int(worker_count)
+        self.worker_buffer_size = int(worker_buffer_size)
+        self.prefetch = bool(prefetch)
         self.split = source.split
         self.seq_len = source.seq_len
         self.split_start = source.split_start
@@ -163,9 +181,9 @@ class PreparedTokenGrainPipeline:
         self.sampler = grain.IndexSampler(
             num_records=len(source),
             shard_options=grain.NoSharding(),
-            shuffle=False,
+            shuffle=order == "shuffle",
             num_epochs=DATA_PIPELINE_NUM_EPOCHS,
-            seed=None,
+            seed=shuffle_seed,
         )
         self.sampler_summary = repr(self.sampler)
         self.source_summary = repr(source)
@@ -173,8 +191,8 @@ class PreparedTokenGrainPipeline:
             data_source=source,
             sampler=self.sampler,
             operations=[grain.Batch(batch_size=self.batch_size, drop_remainder=DATA_PIPELINE_DROP_REMAINDER)],
-            worker_count=DATA_PIPELINE_WORKER_COUNT,
-            worker_buffer_size=1,
+            worker_count=self.worker_count,
+            worker_buffer_size=self.worker_buffer_size,
             shard_options=grain.NoSharding(),
         )
         self._iterator: Any | None = None
@@ -189,6 +207,11 @@ class PreparedTokenGrainPipeline:
         split: SplitName,
         seq_len: int,
         batch_size: int,
+        order: str = DATA_PIPELINE_DEFAULT_ORDER,
+        shuffle_seed: int | None = None,
+        worker_count: int = DATA_PIPELINE_DEFAULT_WORKER_COUNT,
+        worker_buffer_size: int = DATA_PIPELINE_DEFAULT_WORKER_BUFFER_SIZE,
+        prefetch: bool = DATA_PIPELINE_DEFAULT_PREFETCH,
     ) -> "PreparedTokenGrainPipeline":
         source = PreparedTokenDataSource.from_manifest(
             path,
@@ -196,7 +219,15 @@ class PreparedTokenGrainPipeline:
             split=split,
             seq_len=seq_len,
         )
-        return cls(source=source, batch_size=batch_size)
+        return cls(
+            source=source,
+            batch_size=batch_size,
+            order=order,
+            shuffle_seed=shuffle_seed,
+            worker_count=worker_count,
+            worker_buffer_size=worker_buffer_size,
+            prefetch=prefetch,
+        )
 
     def initial_state(self) -> DataPipelineState:
         self._iterator = iter(self.loader)
@@ -245,11 +276,13 @@ class PreparedTokenGrainPipeline:
                 "backend_version": self.backend_version,
                 "state_schema_version": DATA_PIPELINE_STATE_SCHEMA_VERSION,
                 "split": self.split,
-                "order": DATA_PIPELINE_ORDER,
-                "shuffle": False,
+                "order": self.order,
+                "shuffle": self.order == "shuffle",
+                "shuffle_seed": self.shuffle_seed,
                 "num_epochs": DATA_PIPELINE_NUM_EPOCHS,
-                "worker_count": DATA_PIPELINE_WORKER_COUNT,
-                "prefetch": DATA_PIPELINE_PREFETCH,
+                "worker_count": self.worker_count,
+                "worker_buffer_size": self.worker_buffer_size,
+                "prefetch": self.prefetch,
                 "drop_remainder": DATA_PIPELINE_DROP_REMAINDER,
                 "batch_size": self.batch_size,
                 "seq_len": self.seq_len,
@@ -299,8 +332,8 @@ class PreparedTokenGrainPipeline:
             BatchProvenance(
                 split=self.split,
                 epoch=epoch,
-                token_start=row_starts[0],
-                token_end=row_ends[-1],
+                token_start=min(row_starts),
+                token_end=max(row_ends),
                 examples=self.batch_size,
                 target_tokens=self.batch_size * self.seq_len,
                 row_start_offsets=row_starts,
@@ -320,9 +353,11 @@ class PreparedTokenGrainPipeline:
             backend=DATA_PIPELINE_BACKEND,
             backend_version=self.backend_version,
             split=self.split,
-            order=DATA_PIPELINE_ORDER,
-            worker_count=DATA_PIPELINE_WORKER_COUNT,
-            prefetch=DATA_PIPELINE_PREFETCH,
+            order=self.order,
+            shuffle_seed=self.shuffle_seed,
+            worker_count=self.worker_count,
+            worker_buffer_size=self.worker_buffer_size,
+            prefetch=self.prefetch,
             manifest_path=self.manifest_path,
             manifest_sha256=self.manifest_sha256,
             tokenizer_id=self.tokenizer_id,
@@ -350,7 +385,9 @@ class PreparedTokenGrainPipeline:
             ("backend_version", state.backend_version, expected.backend_version),
             ("split", state.split, expected.split),
             ("order", state.order, expected.order),
+            ("shuffle_seed", state.shuffle_seed, expected.shuffle_seed),
             ("worker_count", state.worker_count, expected.worker_count),
+            ("worker_buffer_size", state.worker_buffer_size, expected.worker_buffer_size),
             ("prefetch", state.prefetch, expected.prefetch),
             ("manifest_path", state.manifest_path, expected.manifest_path),
             ("manifest_sha256", state.manifest_sha256, expected.manifest_sha256),
@@ -385,6 +422,11 @@ def data_pipeline_compat_payload(
     split: SplitName,
     seq_len: int,
     batch_size: int,
+    order: str = DATA_PIPELINE_DEFAULT_ORDER,
+    shuffle_seed: int | None = None,
+    worker_count: int = DATA_PIPELINE_DEFAULT_WORKER_COUNT,
+    worker_buffer_size: int = DATA_PIPELINE_DEFAULT_WORKER_BUFFER_SIZE,
+    prefetch: bool = DATA_PIPELINE_DEFAULT_PREFETCH,
 ) -> dict[str, Any]:
     """Return the canonical compatibility payload for a Grain data pipeline."""
 
@@ -394,6 +436,11 @@ def data_pipeline_compat_payload(
         split=split,
         seq_len=seq_len,
         batch_size=batch_size,
+        order=order,
+        shuffle_seed=shuffle_seed,
+        worker_count=worker_count,
+        worker_buffer_size=worker_buffer_size,
+        prefetch=prefetch,
     )
     try:
         return pipeline.describe()
@@ -419,7 +466,9 @@ def data_pipeline_state_from_mapping(raw: Mapping[str, Any]) -> DataPipelineStat
         backend_version=_optional_str(raw, "backend_version", "data pipeline state"),
         split=_required_str(raw, "split", "data pipeline state"),
         order=_required_str(raw, "order", "data pipeline state"),
+        shuffle_seed=_optional_int(raw, "shuffle_seed", "data pipeline state"),
         worker_count=_required_int(raw, "worker_count", "data pipeline state"),
+        worker_buffer_size=_required_int(raw, "worker_buffer_size", "data pipeline state"),
         prefetch=_required_bool(raw, "prefetch", "data pipeline state"),
         manifest_path=Path(_required_str(raw, "manifest_path", "data pipeline state")),
         manifest_sha256=_required_str(raw, "manifest_sha256", "data pipeline state"),
@@ -487,6 +536,15 @@ def _required_bool(raw: Mapping[str, Any], key: str, name: str) -> bool:
     return value
 
 
+def _optional_int(raw: Mapping[str, Any], key: str, name: str) -> int | None:
+    value = raw.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ContractError(f"{name}.{key} must be an integer or null")
+    return value
+
+
 def _required_str(raw: Mapping[str, Any], key: str, name: str) -> str:
     value = raw.get(key)
     if not isinstance(value, str) or not value:
@@ -501,6 +559,30 @@ def _optional_str(raw: Mapping[str, Any], key: str, name: str) -> str | None:
     if not isinstance(value, str) or not value:
         raise ContractError(f"{name}.{key} must be a non-empty string or null")
     return value
+
+
+def _validate_loader_policy(
+    *,
+    order: str,
+    shuffle_seed: int | None,
+    worker_count: int,
+    worker_buffer_size: int,
+    prefetch: bool,
+) -> None:
+    if order not in {"sequential", "shuffle"}:
+        raise ContractError(f"data pipeline order must be 'sequential' or 'shuffle', got {order!r}")
+    if order == "shuffle" and shuffle_seed is None:
+        raise ContractError("data pipeline shuffle_seed is required when order='shuffle'")
+    if order == "sequential" and shuffle_seed is not None:
+        raise ContractError("data pipeline shuffle_seed must be null when order='sequential'")
+    if shuffle_seed is not None and shuffle_seed < 0:
+        raise ContractError(f"data pipeline shuffle_seed must be non-negative, got {shuffle_seed}")
+    if worker_count < 0:
+        raise ContractError(f"data pipeline worker_count must be non-negative, got {worker_count}")
+    if worker_buffer_size <= 0:
+        raise ContractError(f"data pipeline worker_buffer_size must be positive, got {worker_buffer_size}")
+    if not isinstance(prefetch, bool):
+        raise ContractError("data pipeline prefetch must be boolean")
 
 
 def _normalize(value: Any) -> Any:

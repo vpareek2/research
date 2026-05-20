@@ -40,7 +40,9 @@ class DataPipelineState:
     backend_version: str | None
     split: str
     order: str
+    shuffle_seed: int | None
     worker_count: int
+    worker_buffer_size: int
     prefetch: bool
     manifest_path: Path
     manifest_sha256: str
