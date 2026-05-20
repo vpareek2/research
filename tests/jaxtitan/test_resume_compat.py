@@ -84,6 +84,33 @@ def test_resume_fingerprint_changes_for_data_manifest_hash(tmp_path: Path, prepa
     assert build_resume_compat(first).runtime_fingerprint != build_resume_compat(second).runtime_fingerprint
 
 
+def test_resume_fingerprint_changes_for_document_buffer_policy(tmp_path: Path, prepared_dataset_factory) -> None:
+    manifest = prepared_dataset_factory(
+        "document-buffer",
+        shard_token_groups=(tuple(range(0, 80)),),
+        train_tokens=48,
+        document_offsets=(0, 3, 6, 9, 12, 20, 32, 48, 80),
+    )
+    base = _runtime_spec(
+        tmp_path,
+        manifest,
+        data_order="document_buffer",
+        shuffle_seed=123,
+        document_buffer_size=3,
+        document_refill_size=2,
+    )
+    changed = _runtime_spec(
+        tmp_path,
+        manifest,
+        data_order="document_buffer",
+        shuffle_seed=123,
+        document_buffer_size=4,
+        document_refill_size=2,
+    )
+
+    assert build_resume_compat(base).runtime_fingerprint != build_resume_compat(changed).runtime_fingerprint
+
+
 def test_resume_metadata_contains_compatibility_payload(tmp_path: Path, prepared_dataset_factory) -> None:
     manifest = _manifest(prepared_dataset_factory, "metadata")
     spec = _runtime_spec(tmp_path, manifest)
@@ -198,9 +225,13 @@ def _config_text(
     worker_count: int = 0,
     worker_buffer_size: int = 1,
     prefetch: bool = False,
+    document_buffer_size: int | None = None,
+    document_refill_size: int | None = None,
 ) -> str:
     total_steps_line = "" if total_steps is None else f"total_steps = {total_steps}\n"
     shuffle_seed_line = "" if shuffle_seed is None else f"shuffle_seed = {shuffle_seed}\n"
+    document_buffer_size_line = "" if document_buffer_size is None else f"document_buffer_size = {document_buffer_size}\n"
+    document_refill_size_line = "" if document_refill_size is None else f"document_refill_size = {document_refill_size}\n"
     return f"""
 [run]
 id = "smoke"
@@ -235,6 +266,7 @@ order = "{data_order}"
 {shuffle_seed_line}worker_count = {worker_count}
 worker_buffer_size = {worker_buffer_size}
 prefetch = {str(prefetch).lower()}
+{document_buffer_size_line}{document_refill_size_line}
 
 [training]
 seq_len = {seq_len}

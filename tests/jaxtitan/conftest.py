@@ -64,6 +64,7 @@ def write_prepared_dataset(
     tokenizer_id: str = TOKENIZER_ID,
     shard_token_groups: Sequence[Sequence[int]] | None = None,
     train_tokens: int | None = None,
+    document_offsets: Sequence[int] | None = None,
 ) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     token_bytes = root / "token_bytes.bin"
@@ -97,7 +98,7 @@ def write_prepared_dataset(
     val_tokens = num_tokens - train_tokens
 
     manifest = {
-        "schema_version": 2,
+        "schema_version": 1,
         "kind": "training_tokens",
         "dtype": "uint32",
         "tokenizer": {"name": tokenizer_id, "append_eot": True, "eot_token": 0},
@@ -118,6 +119,16 @@ def write_prepared_dataset(
         },
         "shards": shards,
     }
+    if document_offsets is not None:
+        document_offsets_path = root / "document_offsets.u64"
+        document_offsets_path.write_bytes(struct.pack(f"<{len(document_offsets)}Q", *document_offsets))
+        manifest["documents"] = {"count": len(document_offsets) - 1}
+        manifest["files"]["document_offsets"] = {
+            "path": "document_offsets.u64",
+            "sha256": _sha256(document_offsets_path),
+            "bytes": document_offsets_path.stat().st_size,
+            "dtype": "uint64",
+        }
     manifest_path = root / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
     return manifest_path

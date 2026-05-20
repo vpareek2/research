@@ -477,6 +477,8 @@ def training_diagnostics_summary(
             "steady_train_tokens_per_sec": _mean_number(row.get("train_tokens_per_sec") for row in steady_rows),
             "avg_mfu": _mean_number(row.get("mfu") for row in rows),
             "final_mfu": _optional_number(final.get("mfu")),
+            "avg_batch_het": _mean_number(row.get("batch_het") for row in rows),
+            "final_batch_het": _optional_number(final.get("batch_het")),
             "device_kind": performance["device_kind"],
             "device_count": performance["device_count"],
             "runtime_diagnostics_path": "diagnostics/runtime.json",

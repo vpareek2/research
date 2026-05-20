@@ -1,6 +1,7 @@
 """Grain-backed prepared-token training data pipeline."""
 
-from collections.abc import Mapping
+import bisect
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
 import json
 from importlib import metadata as importlib_metadata
@@ -26,7 +27,8 @@ DATA_PIPELINE_DEFAULT_WORKER_BUFFER_SIZE = 1
 DATA_PIPELINE_DEFAULT_PREFETCH = False
 DATA_PIPELINE_NUM_EPOCHS = 1
 DATA_PIPELINE_DROP_REMAINDER = True
-PREPARED_TOKEN_SOURCE_SCHEMA_VERSION = 1
+DATA_PIPELINE_DEFAULT_DOCUMENT_BUFFER_SIZE = 8
+DATA_PIPELINE_DEFAULT_DOCUMENT_REFILL_SIZE = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +42,7 @@ class BatchProvenance:
     examples: int
     target_tokens: int
     row_start_offsets: tuple[int, ...]
+    row_doc_ids: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +86,9 @@ class PreparedTokenDataSource(grain.RandomAccessDataSource):
         self.num_records = max(0, (self.split_tokens - 1) // self.seq_len)
         self.manifest_sha256 = manifest.manifest_sha256
         self.tokenizer_id = manifest.tokenizer_id
+        self.document_offsets = _open_document_offsets(manifest)
+        self.document_aware = self.document_offsets is not None
+        self.document_count = None if manifest.documents is None else manifest.documents.count
         self.source_summary = _source_summary(self)
 
     @classmethod
@@ -111,7 +117,7 @@ class PreparedTokenDataSource(grain.RandomAccessDataSource):
         tokens = read_token_range(self.manifest, token_start, token_start + self.seq_len + 1)
         input_ids = np.asarray(tokens[:-1], dtype=np.int32)
         target_ids = np.asarray(tokens[1:], dtype=np.int32)
-        return {
+        record = {
             "input_ids": input_ids,
             "target_ids": target_ids,
             "loss_mask": np.ones((self.seq_len,), dtype=np.bool_),
@@ -119,15 +125,19 @@ class PreparedTokenDataSource(grain.RandomAccessDataSource):
             "token_end": np.asarray(token_start + self.seq_len, dtype=np.int64),
             "record_key": np.asarray(record_key, dtype=np.int64),
         }
+        if self.document_offsets is not None:
+            record["doc_id"] = np.asarray(_document_id_for_token(self.document_offsets, token_start), dtype=np.int32)
+        return record
 
     def __repr__(self) -> str:
         return (
             "PreparedTokenDataSource("
-            f"schema_version={PREPARED_TOKEN_SOURCE_SCHEMA_VERSION}, "
             f"manifest_sha256='{self.manifest_sha256}', "
             f"split='{self.split}', "
             f"seq_len={self.seq_len}, "
             f"tokenizer_id='{self.tokenizer_id}', "
+            f"document_aware={self.document_aware}, "
+            f"document_count={self.document_count}, "
             f"records={self.num_records}"
             ")"
         )
@@ -293,6 +303,12 @@ class PreparedTokenGrainPipeline:
                 "split_start": self.split_start,
                 "split_end": self.split_end,
                 "split_tokens": self.split_tokens,
+                "document_aware": self.source.document_aware,
+                "document_count": self.source.document_count,
+                "document_offsets_path": None
+                if self.manifest.documents is None
+                else self.manifest.documents.path.as_posix(),
+                "document_offsets_sha256": None if self.manifest.documents is None else self.manifest.documents.sha256,
                 "source_summary": self.source_summary,
                 "sampler_summary": self.sampler_summary,
             }
@@ -327,8 +343,16 @@ class PreparedTokenGrainPipeline:
             )
         if len(row_starts) != self.batch_size or len(row_ends) != self.batch_size:
             raise ContractError("Grain batch provenance does not match batch size")
+        raw_doc_ids = raw.get("doc_id")
+        if self.source.document_aware and raw_doc_ids is None:
+            raise ContractError("document-aware Grain batch must include doc_ids")
+        if not self.source.document_aware and raw_doc_ids is not None:
+            raise ContractError("token-only Grain batch must not include doc_ids")
+        doc_ids = None if raw_doc_ids is None else np.asarray(raw_doc_ids, dtype=np.int32)
+        if doc_ids is not None and doc_ids.shape != (self.batch_size,):
+            raise ContractError(f"Grain batch doc_ids shape={doc_ids.shape} expected={(self.batch_size,)}")
         return (
-            Batch(input_ids=input_ids, target_ids=target_ids, loss_mask=loss_mask),
+            Batch(input_ids=input_ids, target_ids=target_ids, loss_mask=loss_mask, doc_ids=doc_ids),
             BatchProvenance(
                 split=self.split,
                 epoch=epoch,
@@ -337,6 +361,7 @@ class PreparedTokenGrainPipeline:
                 examples=self.batch_size,
                 target_tokens=self.batch_size * self.seq_len,
                 row_start_offsets=row_starts,
+                row_doc_ids=None if doc_ids is None else tuple(int(value) for value in doc_ids.tolist()),
             ),
         )
 
@@ -415,6 +440,361 @@ class PreparedTokenGrainPipeline:
             raise ContractError("Grain prepared-token pipeline supports only epoch=0 in this slice")
 
 
+class PreparedTokenDocumentBufferPipeline:
+    """Deterministic document-buffer packer for prepared-token LM batches."""
+
+    def __init__(
+        self,
+        *,
+        manifest: PreparedDatasetManifest,
+        split: SplitName,
+        seq_len: int,
+        batch_size: int,
+        shuffle_seed: int,
+        document_buffer_size: int,
+        document_refill_size: int,
+    ) -> None:
+        if manifest.documents is None:
+            raise ContractError("data.order='document_buffer' requires prepared manifest document offsets")
+        if seq_len <= 0:
+            raise ContractError(f"seq_len must be positive, got {seq_len}")
+        if batch_size <= 0:
+            raise ContractError(f"batch_size must be positive, got {batch_size}")
+        if document_buffer_size <= 0:
+            raise ContractError(f"document_buffer_size must be positive, got {document_buffer_size}")
+        if document_refill_size <= 0:
+            raise ContractError(f"document_refill_size must be positive, got {document_refill_size}")
+        if split not in {"train", "val"}:
+            raise ContractError(f"split must be 'train' or 'val', got {split!r}")
+        token_split = manifest.train if split == "train" else manifest.val
+        self.manifest = manifest
+        self.split = split
+        self.seq_len = int(seq_len)
+        self.batch_size = int(batch_size)
+        self.shuffle_seed = int(shuffle_seed)
+        self.document_buffer_size = int(document_buffer_size)
+        self.document_refill_size = int(document_refill_size)
+        self.split_start = int(token_split.start)
+        self.split_end = int(token_split.end)
+        self.split_tokens = int(token_split.tokens)
+        self.manifest_path = manifest.manifest_path
+        self.manifest_sha256 = manifest.manifest_sha256
+        self.tokenizer_id = manifest.tokenizer_id
+        self.backend_version = grain_version()
+        self.document_offsets = _open_document_offsets(manifest)
+        self.document_spans = _document_spans(self.document_offsets, self.split_start, self.split_end)
+        self.document_ids = tuple(self.document_spans)
+        self.document_count = manifest.documents.count
+        self.num_records = max(0, self.split_tokens // (self.seq_len + 1))
+        if len(self.document_ids) < 1:
+            raise ContractError(f"{split} split has no document spans")
+        if self.num_records < self.batch_size:
+            required = self.batch_size * (self.seq_len + 1)
+            raise ContractError(
+                f"{split} split has {self.split_tokens} tokens, but one document-buffer batch requires at least {required}"
+            )
+        self.source_summary = repr(self)
+        self.sampler_summary = (
+            "DocumentBufferSampler("
+            f"seed={self.shuffle_seed}, buffer_size={self.document_buffer_size}, "
+            f"refill_size={self.document_refill_size}, documents={len(self.document_ids)}"
+            ")"
+        )
+
+    @classmethod
+    def from_manifest(
+        cls,
+        path: str | Path,
+        *,
+        tokenizer_id: str | None,
+        split: SplitName,
+        seq_len: int,
+        batch_size: int,
+        shuffle_seed: int,
+        document_buffer_size: int,
+        document_refill_size: int,
+    ) -> "PreparedTokenDocumentBufferPipeline":
+        manifest = validate_dataset_manifest(path, tokenizer_id=tokenizer_id)
+        return cls(
+            manifest=manifest,
+            split=split,
+            seq_len=seq_len,
+            batch_size=batch_size,
+            shuffle_seed=shuffle_seed,
+            document_buffer_size=document_buffer_size,
+            document_refill_size=document_refill_size,
+        )
+
+    def initial_state(self) -> DataPipelineState:
+        rng = np.random.default_rng(self.shuffle_seed)
+        document_order = [int(value) for value in rng.permutation(np.asarray(self.document_ids, dtype=np.int64)).tolist()]
+        backend_state = {
+            "rng_state": _normalize(rng.bit_generator.state),
+            "document_order": document_order,
+            "replacement_cursor": 0,
+            "refill_queue": [],
+            "active": [],
+        }
+        backend_state = self._fill_active(backend_state)
+        return self._state_from_components(
+            backend_state=backend_state,
+            next_record_index=0,
+            token_offset=self.split_start,
+            epoch=0,
+        )
+
+    def next_batch(self, state: DataPipelineState) -> PipelineBatch:
+        self._validate_state(state)
+        backend_state = _copy_backend_state(state.grain_state)
+        rng = np.random.default_rng()
+        rng.bit_generator.state = backend_state["rng_state"]
+        records = []
+        for _idx in range(self.batch_size):
+            try:
+                records.append(self._next_record(backend_state, rng))
+            except StopIteration as exc:
+                raise StopIteration(f"not enough document-buffer tokens left in {self.split} split for one full batch") from exc
+        backend_state["rng_state"] = _normalize(rng.bit_generator.state)
+        input_ids = np.stack([record["input_ids"] for record in records])
+        target_ids = np.stack([record["target_ids"] for record in records])
+        loss_mask = np.stack([record["loss_mask"] for record in records])
+        doc_ids = np.asarray([record["doc_id"] for record in records], dtype=np.int32)
+        next_record_index = state.next_record_index + self.batch_size
+        next_state = self._state_from_components(
+            backend_state=backend_state,
+            next_record_index=next_record_index,
+            token_offset=self.split_start + next_record_index * self.seq_len,
+            epoch=state.epoch,
+        )
+        row_starts = tuple(int(record["token_start"]) for record in records)
+        row_ends = tuple(int(record["token_end"]) for record in records)
+        return PipelineBatch(
+            batch=Batch(input_ids=input_ids, target_ids=target_ids, loss_mask=loss_mask, doc_ids=doc_ids),
+            state=next_state,
+            provenance=BatchProvenance(
+                split=self.split,
+                epoch=state.epoch,
+                token_start=min(row_starts),
+                token_end=max(row_ends),
+                examples=self.batch_size,
+                target_tokens=self.batch_size * self.seq_len,
+                row_start_offsets=row_starts,
+                row_doc_ids=tuple(int(value) for value in doc_ids.tolist()),
+            ),
+        )
+
+    def state_to_json(self, state: DataPipelineState) -> dict[str, Any]:
+        self._validate_state(state)
+        return data_pipeline_state_to_dict(state)
+
+    def state_from_json(self, raw: Mapping[str, Any]) -> DataPipelineState:
+        state = data_pipeline_state_from_mapping(raw)
+        self._validate_state(state)
+        return state
+
+    def describe(self) -> dict[str, Any]:
+        return _normalize(
+            {
+                "schema_version": 1,
+                "backend": DATA_PIPELINE_BACKEND,
+                "backend_version": self.backend_version,
+                "state_schema_version": DATA_PIPELINE_STATE_SCHEMA_VERSION,
+                "split": self.split,
+                "order": "document_buffer",
+                "shuffle": True,
+                "shuffle_seed": self.shuffle_seed,
+                "num_epochs": DATA_PIPELINE_NUM_EPOCHS,
+                "worker_count": DATA_PIPELINE_DEFAULT_WORKER_COUNT,
+                "worker_buffer_size": DATA_PIPELINE_DEFAULT_WORKER_BUFFER_SIZE,
+                "prefetch": DATA_PIPELINE_DEFAULT_PREFETCH,
+                "drop_remainder": DATA_PIPELINE_DROP_REMAINDER,
+                "batch_size": self.batch_size,
+                "seq_len": self.seq_len,
+                "num_records": self.num_records,
+                "manifest_path": self.manifest_path,
+                "manifest_sha256": self.manifest_sha256,
+                "tokenizer_id": self.tokenizer_id,
+                "split_start": self.split_start,
+                "split_end": self.split_end,
+                "split_tokens": self.split_tokens,
+                "document_aware": True,
+                "document_count": self.document_count,
+                "document_offsets_path": self.manifest.documents.path.as_posix(),
+                "document_offsets_sha256": self.manifest.documents.sha256,
+                "document_buffer_size": self.document_buffer_size,
+                "document_refill_size": self.document_refill_size,
+                "source_summary": self.source_summary,
+                "sampler_summary": self.sampler_summary,
+            }
+        )
+
+    def close(self) -> None:
+        return None
+
+    def __repr__(self) -> str:
+        return (
+            "PreparedTokenDocumentBufferPipeline("
+            f"manifest_sha256='{self.manifest_sha256}', "
+            f"split='{self.split}', "
+            f"seq_len={self.seq_len}, "
+            f"tokenizer_id='{self.tokenizer_id}', "
+            f"seed={self.shuffle_seed}, "
+            f"buffer_size={self.document_buffer_size}, "
+            f"refill_size={self.document_refill_size}, "
+            f"documents={len(self.document_ids)}"
+            ")"
+        )
+
+    def _next_record(self, backend_state: dict[str, Any], rng: np.random.Generator) -> dict[str, Any]:
+        token_values = []
+        token_doc_ids = []
+        token_offsets = []
+        while len(token_values) < self.seq_len + 1:
+            backend_state = self._fill_active(backend_state)
+            active = backend_state["active"]
+            if not active:
+                raise StopIteration
+            active_idx = int(rng.integers(0, len(active)))
+            cursor = int(active[active_idx]["cursor"])
+            end = int(active[active_idx]["end"])
+            doc_id = int(active[active_idx]["doc_id"])
+            take = min(self.seq_len + 1 - len(token_values), end - cursor)
+            values = read_token_range(self.manifest, cursor, cursor + take)
+            token_values.extend(int(value) for value in values.tolist())
+            token_doc_ids.extend([doc_id] * take)
+            token_offsets.extend(range(cursor, cursor + take))
+            cursor += take
+            if cursor >= end:
+                del active[active_idx]
+            else:
+                active[active_idx] = {"doc_id": doc_id, "cursor": cursor, "end": end}
+        input_ids = np.asarray(token_values[:-1], dtype=np.int32)
+        target_ids = np.asarray(token_values[1:], dtype=np.int32)
+        loss_mask = np.asarray(
+            [token_doc_ids[idx] == token_doc_ids[idx + 1] for idx in range(self.seq_len)],
+            dtype=np.bool_,
+        )
+        return {
+            "input_ids": input_ids,
+            "target_ids": target_ids,
+            "loss_mask": loss_mask,
+            "doc_id": int(token_doc_ids[0]),
+            "token_start": int(token_offsets[0]),
+            "token_end": int(max(token_offsets) + 1),
+        }
+
+    def _fill_active(self, backend_state: dict[str, Any]) -> dict[str, Any]:
+        while len(backend_state["active"]) < min(self.document_buffer_size, len(self.document_ids)):
+            next_doc = self._pop_replacement_doc(backend_state)
+            if next_doc is None:
+                break
+            start, end = self.document_spans[next_doc]
+            backend_state["active"].append({"doc_id": int(next_doc), "cursor": int(start), "end": int(end)})
+        return backend_state
+
+    def _pop_replacement_doc(self, backend_state: dict[str, Any]) -> int | None:
+        if not backend_state["refill_queue"]:
+            cursor = int(backend_state["replacement_cursor"])
+            order = backend_state["document_order"]
+            if cursor >= len(order):
+                return None
+            refill_end = min(cursor + self.document_refill_size, len(order))
+            backend_state["refill_queue"] = [int(value) for value in order[cursor:refill_end]]
+            backend_state["replacement_cursor"] = refill_end
+        return int(backend_state["refill_queue"].pop(0))
+
+    def _state_from_components(
+        self,
+        *,
+        backend_state: Mapping[str, Any],
+        next_record_index: int,
+        token_offset: int,
+        epoch: int,
+    ) -> DataPipelineState:
+        return DataPipelineState(
+            schema_version=DATA_PIPELINE_STATE_SCHEMA_VERSION,
+            backend=DATA_PIPELINE_BACKEND,
+            backend_version=self.backend_version,
+            split=self.split,
+            order="document_buffer",
+            shuffle_seed=self.shuffle_seed,
+            worker_count=DATA_PIPELINE_DEFAULT_WORKER_COUNT,
+            worker_buffer_size=DATA_PIPELINE_DEFAULT_WORKER_BUFFER_SIZE,
+            prefetch=DATA_PIPELINE_DEFAULT_PREFETCH,
+            manifest_path=self.manifest_path,
+            manifest_sha256=self.manifest_sha256,
+            tokenizer_id=self.tokenizer_id,
+            seq_len=self.seq_len,
+            batch_size=self.batch_size,
+            num_records=self.num_records,
+            next_record_index=next_record_index,
+            token_offset=token_offset,
+            epoch=epoch,
+            sampler_summary=self.sampler_summary,
+            source_summary=self.source_summary,
+            grain_state=_normalize(backend_state),
+        )
+
+    def _validate_state(self, state: DataPipelineState) -> None:
+        expected = self._state_from_components(
+            backend_state=state.grain_state,
+            next_record_index=state.next_record_index,
+            token_offset=state.token_offset,
+            epoch=state.epoch,
+        )
+        checks = (
+            ("schema_version", state.schema_version, expected.schema_version),
+            ("backend", state.backend, expected.backend),
+            ("backend_version", state.backend_version, expected.backend_version),
+            ("split", state.split, expected.split),
+            ("order", state.order, expected.order),
+            ("shuffle_seed", state.shuffle_seed, expected.shuffle_seed),
+            ("worker_count", state.worker_count, expected.worker_count),
+            ("worker_buffer_size", state.worker_buffer_size, expected.worker_buffer_size),
+            ("prefetch", state.prefetch, expected.prefetch),
+            ("manifest_path", state.manifest_path, expected.manifest_path),
+            ("manifest_sha256", state.manifest_sha256, expected.manifest_sha256),
+            ("tokenizer_id", state.tokenizer_id, expected.tokenizer_id),
+            ("seq_len", state.seq_len, expected.seq_len),
+            ("batch_size", state.batch_size, expected.batch_size),
+            ("num_records", state.num_records, expected.num_records),
+            ("sampler_summary", state.sampler_summary, expected.sampler_summary),
+            ("source_summary", state.source_summary, expected.source_summary),
+        )
+        for name, actual, wanted in checks:
+            if actual != wanted:
+                raise ContractError(f"data pipeline state {name} mismatch: state={actual!r} pipeline={wanted!r}")
+        if state.next_record_index < 0 or state.next_record_index > self.num_records:
+            raise ContractError(
+                f"data pipeline next_record_index={state.next_record_index} is outside [0, {self.num_records}]"
+            )
+        expected_offset = self.split_start + state.next_record_index * self.seq_len
+        if state.token_offset != expected_offset:
+            raise ContractError(
+                f"data pipeline token_offset={state.token_offset} does not match next_record_index "
+                f"{state.next_record_index} expected_offset={expected_offset}"
+            )
+        if state.epoch != 0:
+            raise ContractError("document-buffer pipeline supports only epoch=0 in this slice")
+        _require_mapping(state.grain_state.get("rng_state"), "data pipeline state.rng_state")
+        _require_int_list(state.grain_state.get("document_order"), "data pipeline state.document_order")
+        _required_int(state.grain_state, "replacement_cursor", "data pipeline state")
+        _require_int_list(state.grain_state.get("refill_queue"), "data pipeline state.refill_queue")
+        active = state.grain_state.get("active")
+        if not isinstance(active, list):
+            raise ContractError("data pipeline state.active must be a list")
+        for idx, item in enumerate(active):
+            active_doc = _require_mapping(item, f"data pipeline state.active[{idx}]")
+            doc_id = _required_int(active_doc, "doc_id", f"data pipeline state.active[{idx}]")
+            cursor = _required_int(active_doc, "cursor", f"data pipeline state.active[{idx}]")
+            end = _required_int(active_doc, "end", f"data pipeline state.active[{idx}]")
+            if doc_id not in self.document_spans:
+                raise ContractError(f"data pipeline active doc_id={doc_id} is not in split documents")
+            start, expected_end = self.document_spans[doc_id]
+            if end != expected_end or not start <= cursor <= end:
+                raise ContractError(f"data pipeline active document cursor is invalid for doc_id={doc_id}")
+
+
 def data_pipeline_compat_payload(
     path: str | Path,
     *,
@@ -427,10 +807,64 @@ def data_pipeline_compat_payload(
     worker_count: int = DATA_PIPELINE_DEFAULT_WORKER_COUNT,
     worker_buffer_size: int = DATA_PIPELINE_DEFAULT_WORKER_BUFFER_SIZE,
     prefetch: bool = DATA_PIPELINE_DEFAULT_PREFETCH,
+    document_buffer_size: int | None = None,
+    document_refill_size: int | None = None,
 ) -> dict[str, Any]:
     """Return the canonical compatibility payload for a Grain data pipeline."""
 
-    pipeline = PreparedTokenGrainPipeline.from_manifest(
+    pipeline = build_prepared_token_pipeline(
+        path,
+        tokenizer_id=tokenizer_id,
+        split=split,
+        seq_len=seq_len,
+        batch_size=batch_size,
+        order=order,
+        shuffle_seed=shuffle_seed,
+        worker_count=worker_count,
+        worker_buffer_size=worker_buffer_size,
+        prefetch=prefetch,
+        document_buffer_size=document_buffer_size,
+        document_refill_size=document_refill_size,
+    )
+    try:
+        return pipeline.describe()
+    finally:
+        pipeline.close()
+
+
+def build_prepared_token_pipeline(
+    path: str | Path,
+    *,
+    tokenizer_id: str | None,
+    split: SplitName,
+    seq_len: int,
+    batch_size: int,
+    order: str = DATA_PIPELINE_DEFAULT_ORDER,
+    shuffle_seed: int | None = None,
+    worker_count: int = DATA_PIPELINE_DEFAULT_WORKER_COUNT,
+    worker_buffer_size: int = DATA_PIPELINE_DEFAULT_WORKER_BUFFER_SIZE,
+    prefetch: bool = DATA_PIPELINE_DEFAULT_PREFETCH,
+    document_buffer_size: int | None = None,
+    document_refill_size: int | None = None,
+) -> TrainingDataPipeline:
+    if order == "document_buffer":
+        if shuffle_seed is None:
+            raise ContractError("data.shuffle_seed is required when data.order='document_buffer'")
+        if worker_count != 0 or worker_buffer_size != 1 or prefetch:
+            raise ContractError(
+                "data.order='document_buffer' requires worker_count=0, worker_buffer_size=1, and prefetch=false"
+            )
+        return PreparedTokenDocumentBufferPipeline.from_manifest(
+            path,
+            tokenizer_id=tokenizer_id,
+            split=split,
+            seq_len=seq_len,
+            batch_size=batch_size,
+            shuffle_seed=shuffle_seed,
+            document_buffer_size=document_buffer_size or DATA_PIPELINE_DEFAULT_DOCUMENT_BUFFER_SIZE,
+            document_refill_size=document_refill_size or DATA_PIPELINE_DEFAULT_DOCUMENT_REFILL_SIZE,
+        )
+    return PreparedTokenGrainPipeline.from_manifest(
         path,
         tokenizer_id=tokenizer_id,
         split=split,
@@ -442,10 +876,6 @@ def data_pipeline_compat_payload(
         worker_buffer_size=worker_buffer_size,
         prefetch=prefetch,
     )
-    try:
-        return pipeline.describe()
-    finally:
-        pipeline.close()
 
 
 def grain_version() -> str | None:
@@ -488,7 +918,6 @@ def data_pipeline_state_from_mapping(raw: Mapping[str, Any]) -> DataPipelineStat
 def _source_summary(source: PreparedTokenDataSource) -> dict[str, Any]:
     return _normalize(
         {
-            "schema_version": PREPARED_TOKEN_SOURCE_SCHEMA_VERSION,
             "manifest_path": source.manifest.manifest_path,
             "manifest_sha256": source.manifest_sha256,
             "tokenizer_id": source.tokenizer_id,
@@ -498,8 +927,36 @@ def _source_summary(source: PreparedTokenDataSource) -> dict[str, Any]:
             "split_end": source.split_end,
             "split_tokens": source.split_tokens,
             "num_records": source.num_records,
+            "document_aware": source.document_aware,
+            "document_count": source.document_count,
+            "document_offsets_path": None if source.manifest.documents is None else source.manifest.documents.path,
+            "document_offsets_sha256": None if source.manifest.documents is None else source.manifest.documents.sha256,
         }
     )
+
+
+def _open_document_offsets(manifest: PreparedDatasetManifest) -> np.memmap | None:
+    if manifest.documents is None:
+        return None
+    return np.memmap(manifest.manifest_path.parent / manifest.documents.path, dtype="<u8", mode="r")
+
+
+def _document_spans(offsets: Sequence[int], split_start: int, split_end: int) -> dict[int, tuple[int, int]]:
+    spans = {}
+    for doc_id in range(len(offsets) - 1):
+        start = max(int(offsets[doc_id]), split_start)
+        end = min(int(offsets[doc_id + 1]), split_end)
+        if start < end:
+            spans[doc_id] = (start, end)
+    return spans
+
+
+def _document_id_for_token(offsets: np.memmap, token_offset: int) -> int:
+    return bisect.bisect_right(offsets, token_offset) - 1
+
+
+def _copy_backend_state(state: Mapping[str, Any]) -> dict[str, Any]:
+    return json.loads(json.dumps(_normalize(state), sort_keys=True))
 
 
 def _decode_grain_state(state: bytes) -> dict[str, Any]:
@@ -519,6 +976,12 @@ def _encode_grain_state(state: Mapping[str, Any]) -> bytes:
 def _require_mapping(value: Any, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ContractError(f"{name} must be a JSON object")
+    return value
+
+
+def _require_int_list(value: Any, name: str) -> list[int]:
+    if not isinstance(value, list) or any(not isinstance(item, int) or isinstance(item, bool) for item in value):
+        raise ContractError(f"{name} must be a list of integers")
     return value
 
 

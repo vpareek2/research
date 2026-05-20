@@ -1,5 +1,6 @@
 """Minimal host-side training loop."""
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 import math
@@ -18,6 +19,7 @@ from jaxtitan.data import (
     DataPipelineState,
     PreparedTokenGrainPipeline,
     TrainingDataPipeline,
+    build_prepared_token_pipeline,
 )
 from jaxtitan.errors import ContractError
 from jaxtitan.mesh import (
@@ -50,6 +52,8 @@ from jaxtitan.specs.eval import EvalSpec
 from jaxtitan.specs.run import RunSpec
 from jaxtitan.state import HostState, TrainState
 from jaxtitan.steps import initialize_train_state, make_eval_step, make_train_step
+
+TrainingProgress = Callable[[str, dict[str, Any]], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +107,14 @@ class RunSummary:
     data_pipeline_worker_buffer_size: int | None = None
     data_pipeline_prefetch: bool | None = None
     data_pipeline_state_schema_version: int | None = None
+    data_document_aware: bool | None = None
+    data_document_count: int | None = None
+    data_document_offsets_path: str | None = None
+    data_document_offsets_sha256: str | None = None
+    data_document_buffer_size: int | None = None
+    data_document_refill_size: int | None = None
+    final_batch_het: float | None = None
+    avg_batch_het: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,10 +124,17 @@ class EvalRunResult:
     row: dict[str, Any]
 
 
-def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary:
+def run_training(
+    config_path: str | Path,
+    *,
+    resume: bool = False,
+    progress: TrainingProgress | None = None,
+) -> RunSummary:
     """Run the minimal local Jaxtitan training path for one TOML config."""
 
     spec = load_config(config_path)
+    if progress is not None:
+        progress("start", {"spec": spec, "resume": resume, "config_path": Path(config_path)})
     require_single_process_runtime()
     validate_runtime_mesh_spec(spec.mesh)
     if resume:
@@ -141,9 +160,11 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
                 "data_pipeline_worker_count": spec.data.worker_count,
                 "data_pipeline_worker_buffer_size": spec.data.worker_buffer_size,
                 "data_pipeline_prefetch": spec.data.prefetch,
+                "data_document_buffer_size": spec.data.document_buffer_size,
+                "data_document_refill_size": spec.data.document_refill_size,
             }
         )
-        summary = _run_training_initialized(spec, writer, resume=resume)
+        summary = _run_training_initialized(spec, writer, resume=resume, progress=progress)
         writer.append_event(
             {
                 **_event("training_completed", spec),
@@ -157,6 +178,8 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
                 "steady_train_tokens_per_sec": summary.steady_train_tokens_per_sec,
                 "final_mfu": summary.final_mfu,
                 "avg_mfu": summary.avg_mfu,
+                "final_batch_het": summary.final_batch_het,
+                "avg_batch_het": summary.avg_batch_het,
                 "execution_mode": summary.execution_mode,
                 "metrics_scope": summary.metrics_scope,
                 "artifact_writer": summary.artifact_writer,
@@ -173,6 +196,8 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
                 "data_pipeline_worker_count": summary.data_pipeline_worker_count,
                 "data_pipeline_worker_buffer_size": summary.data_pipeline_worker_buffer_size,
                 "data_pipeline_prefetch": summary.data_pipeline_prefetch,
+                "data_document_buffer_size": summary.data_document_buffer_size,
+                "data_document_refill_size": summary.data_document_refill_size,
             }
         )
         writer.write_summary(asdict(summary))
@@ -188,7 +213,13 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
         raise
 
 
-def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, resume: bool) -> RunSummary:
+def _run_training_initialized(
+    spec: RunSpec,
+    writer: LocalArtifactWriter,
+    *,
+    resume: bool,
+    progress: TrainingProgress | None,
+) -> RunSummary:
     run_started_at = time.perf_counter()
     runtime_spec = _with_runtime_schedule_steps(spec)
     data = _build_train_data_pipeline(runtime_spec)
@@ -237,6 +268,17 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
     checkpoint_service = LocalOrbaxCheckpointService(runtime_spec.dirs.run_dir)
     checkpoint_index = load_checkpoint_index(runtime_spec.dirs.run_dir)
     checkpoint_service.set_protected_steps(checkpoint_index.protected_steps())
+    if progress is not None:
+        progress(
+            "initialized",
+            {
+                "spec": runtime_spec,
+                "diagnostics": runtime_diagnostics.payload,
+                "optimizer": optimizer.description,
+                "run_dir": runtime_spec.dirs.run_dir,
+                "resume": resume,
+            },
+        )
 
     try:
         if resume:
@@ -266,17 +308,29 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
                     "step": _scalar_int(train_state.step),
                     "tokens_seen": _scalar_int(train_state.tokens_seen),
                     "dataset_token_offset": dataset_state.token_offset,
-                "data_pipeline_backend": dataset_state.backend,
-                "data_pipeline_order": dataset_state.order,
-                "data_pipeline_shuffle_seed": dataset_state.shuffle_seed,
-            }
-        )
+                    "data_pipeline_backend": dataset_state.backend,
+                    "data_pipeline_order": dataset_state.order,
+                    "data_pipeline_shuffle_seed": dataset_state.shuffle_seed,
+                }
+            )
+            if progress is not None:
+                progress(
+                    "resumed",
+                    {
+                        "step": _scalar_int(train_state.step),
+                        "tokens_seen": _scalar_int(train_state.tokens_seen),
+                        "checkpoint_step": restored.step,
+                        "checkpoint_path": restored.path,
+                    },
+                )
 
         last_row: dict[str, Any] | None = None
         last_eval: EvalRunResult | None = None
         last_eval_step = -1
         last_logged_step = -1
         logged_rows: list[dict[str, Any]] = []
+        train_compiled = False
+        eval_compiled = False
         while _scalar_int(train_state.tokens_seen) < runtime_spec.training.target_tokens:
             timer = PhaseTimer()
             with timer.phase("data"):
@@ -293,8 +347,11 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
                     ) from exc
             with timer.phase("placement"):
                 placed_batch = place_accumulated_batch(batch, sharding)
+            if not train_compiled and progress is not None:
+                progress("compile_start", {"phase": "train"})
             with timer.phase("train_dispatch"):
                 train_state, metrics = train_step(train_state, placed_batch)
+            train_compiled = True
             metrics_sync_sec = sync_and_time(_train_sync_target(train_state, metrics))
             timer.add("metrics_sync", metrics_sync_sec)
             base_row = _metrics_row(train_state, metrics, provenance, runtime_spec=runtime_spec, context=context)
@@ -317,9 +374,13 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
                 writer.append_train_metrics(row)
                 logged_rows.append(row)
                 last_logged_step = row["step"]
+                if progress is not None:
+                    progress("train", {"row": row})
             checkpoint_due = row["step"] % runtime_spec.training.checkpoint_every_steps == 0
             eval_due = eval_spec is not None and row["step"] % eval_spec.every_steps == 0
             if eval_due or (eval_spec is not None and checkpoint_due):
+                if not eval_compiled and progress is not None:
+                    progress("compile_start", {"phase": "eval"})
                 last_eval = run_validation_eval(
                     writer,
                     runtime_spec,
@@ -328,8 +389,10 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
                     sharding,
                     train_state,
                     row,
+                    progress=progress,
                 )
                 last_eval_step = row["step"]
+                eval_compiled = True
             if checkpoint_due:
                 host_state, checkpoint_index = _save_checkpoint(
                     checkpoint_service,
@@ -342,6 +405,7 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
                     row,
                     last_eval,
                     reason="interval",
+                    progress=progress,
                 )
 
         if last_row is None:
@@ -349,7 +413,11 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
         if last_logged_step != last_row["step"]:
             writer.append_train_metrics(last_row)
             logged_rows.append(last_row)
+            if progress is not None:
+                progress("train", {"row": last_row})
         if eval_spec is not None and last_eval_step != last_row["step"]:
+            if not eval_compiled and progress is not None:
+                progress("compile_start", {"phase": "eval"})
             last_eval = run_validation_eval(
                 writer,
                 runtime_spec,
@@ -358,8 +426,10 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
                 sharding,
                 train_state,
                 last_row,
+                progress=progress,
             )
             last_eval_step = last_row["step"]
+            eval_compiled = True
         if checkpoint_service.latest_step() != last_row["step"]:
             host_state, checkpoint_index = _save_checkpoint(
                 checkpoint_service,
@@ -372,6 +442,7 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
                 last_row,
                 last_eval,
                 reason="final",
+                progress=progress,
             )
         else:
             writer.write_checkpoint_index(checkpoint_index.to_dict())
@@ -436,7 +507,17 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
             data_pipeline_worker_buffer_size=data_pipeline_summary["worker_buffer_size"],
             data_pipeline_prefetch=data_pipeline_summary["prefetch"],
             data_pipeline_state_schema_version=data_pipeline_summary["state_schema_version"],
+            data_document_aware=data_pipeline_summary["document_aware"],
+            data_document_count=data_pipeline_summary["document_count"],
+            data_document_offsets_path=data_pipeline_summary["document_offsets_path"],
+            data_document_offsets_sha256=data_pipeline_summary["document_offsets_sha256"],
+            data_document_buffer_size=data_pipeline_summary.get("document_buffer_size"),
+            data_document_refill_size=data_pipeline_summary.get("document_refill_size"),
+            final_batch_het=diagnostic_summary["final_batch_het"],
+            avg_batch_het=diagnostic_summary["avg_batch_het"],
         )
+        if progress is not None:
+            progress("completed", {"summary": summary})
         return summary
     finally:
         data.close()
@@ -469,8 +550,8 @@ def _validation_eval_spec(spec: RunSpec) -> EvalSpec | None:
     return eval_spec
 
 
-def _build_train_data_pipeline(spec: RunSpec) -> PreparedTokenGrainPipeline:
-    return PreparedTokenGrainPipeline.from_manifest(
+def _build_train_data_pipeline(spec: RunSpec) -> TrainingDataPipeline:
+    return build_prepared_token_pipeline(
         spec.data.train_manifest,
         tokenizer_id=spec.data.tokenizer_id,
         split="train",
@@ -481,6 +562,8 @@ def _build_train_data_pipeline(spec: RunSpec) -> PreparedTokenGrainPipeline:
         worker_count=spec.data.worker_count,
         worker_buffer_size=spec.data.worker_buffer_size,
         prefetch=spec.data.prefetch,
+        document_buffer_size=spec.data.document_buffer_size,
+        document_refill_size=spec.data.document_refill_size,
     )
 
 
@@ -519,11 +602,14 @@ def _next_accumulated_train_batch(
 def _stack_accumulated_batches(batches: list[Batch]) -> Batch:
     if not batches:
         raise ContractError("gradient accumulation requires at least one microbatch")
+    has_doc_ids = batches[0].doc_ids is not None
+    if any((batch.doc_ids is not None) != has_doc_ids for batch in batches):
+        raise ContractError("gradient accumulation batches must consistently include or omit doc_ids")
     return Batch(
         input_ids=np.stack([batch.input_ids for batch in batches]),
         target_ids=np.stack([batch.target_ids for batch in batches]),
         loss_mask=np.stack([batch.loss_mask for batch in batches]),
-        doc_ids=None if batches[0].doc_ids is None else np.stack([batch.doc_ids for batch in batches]),
+        doc_ids=None if not has_doc_ids else np.stack([batch.doc_ids for batch in batches]),
     )
 
 
@@ -531,6 +617,9 @@ def _combine_provenance(provenances: list[BatchProvenance]) -> BatchProvenance:
     if not provenances:
         raise ContractError("gradient accumulation requires at least one microbatch provenance")
     first = provenances[0]
+    has_doc_ids = first.row_doc_ids is not None
+    if any((provenance.row_doc_ids is not None) != has_doc_ids for provenance in provenances):
+        raise ContractError("gradient accumulation provenance must consistently include or omit document ids")
     return BatchProvenance(
         split=first.split,
         epoch=first.epoch,
@@ -543,6 +632,11 @@ def _combine_provenance(provenances: list[BatchProvenance]) -> BatchProvenance:
             for provenance in provenances
             for offset in provenance.row_start_offsets
         ),
+        row_doc_ids=None if not has_doc_ids else tuple(
+            doc_id
+            for provenance in provenances
+            for doc_id in provenance.row_doc_ids
+        ),
     )
 
 
@@ -554,6 +648,8 @@ def run_validation_eval(
     sharding: Any,
     train_state: TrainState,
     train_row: dict[str, Any],
+    *,
+    progress: TrainingProgress | None = None,
 ) -> EvalRunResult:
     """Run one deterministic validation eval pass from the validation split start."""
 
@@ -573,6 +669,8 @@ def run_validation_eval(
         row = _validation_eval_row(eval_spec, data, eval_step, sharding, train_state, train_row)
         row = enrich_eval_metrics(row, eval_sec=time.perf_counter() - eval_started_at)
         writer.append_eval_metrics(row)
+        if progress is not None:
+            progress("eval", {"row": row})
         writer.append_event(
             {
                 **_event("eval_completed", spec),
@@ -619,6 +717,8 @@ def _validation_eval_row(
     token_end = dataset_state.token_offset
     examples = 0
     target_tokens = 0
+    row_doc_ids: list[int] = []
+    saw_document_ids = False
     for _idx in range(eval_spec.num_batches):
         try:
             result = data.next_batch(dataset_state)
@@ -636,7 +736,10 @@ def _validation_eval_row(
         token_end = provenance.token_end
         examples += provenance.examples
         target_tokens += provenance.target_tokens
-    return {
+        if provenance.row_doc_ids is not None:
+            saw_document_ids = True
+            row_doc_ids.extend(provenance.row_doc_ids)
+    row = {
         "schema_version": 1,
         "step": train_row["step"],
         "tokens_seen": train_row["tokens_seen"],
@@ -650,6 +753,8 @@ def _validation_eval_row(
         "examples": examples,
         "target_tokens": target_tokens,
     }
+    row.update(_document_metric_fields(tuple(row_doc_ids) if saw_document_ids else None))
+    return row
 
 
 def _metrics_row(
@@ -673,12 +778,16 @@ def _metrics_row(
         "grad_norm": _optional_scalar_float(metrics.grad_norm),
         "param_norm": _optional_scalar_float(metrics.param_norm),
         "update_norm": _optional_scalar_float(metrics.update_norm),
+        "microbatch_loss_mean": _optional_scalar_float(metrics.microbatch_loss_mean),
+        "microbatch_loss_max": _optional_scalar_float(metrics.microbatch_loss_max),
+        "batch_het": _optional_scalar_float(metrics.batch_het),
         "epoch": provenance.epoch,
         "token_start": provenance.token_start,
         "token_end": provenance.token_end,
         "examples": provenance.examples,
         "target_tokens": provenance.target_tokens,
     }
+    row.update(_document_metric_fields(provenance.row_doc_ids))
     if runtime_spec is not None and context is not None:
         data_axis_size = context.data_axis_size
         per_device_batch_size = runtime_spec.training.global_batch_size // data_axis_size
@@ -709,6 +818,24 @@ def _metrics_row(
     return row
 
 
+def _document_metric_fields(row_doc_ids: tuple[int, ...] | None) -> dict[str, Any]:
+    if row_doc_ids is None:
+        return {
+            "document_aware": False,
+            "documents_touched": None,
+            "document_min": None,
+            "document_max": None,
+        }
+    if not row_doc_ids:
+        raise ContractError("document-aware provenance must include at least one document id")
+    return {
+        "document_aware": True,
+        "documents_touched": len(set(row_doc_ids)),
+        "document_min": min(row_doc_ids),
+        "document_max": max(row_doc_ids),
+    }
+
+
 def _save_checkpoint(
     checkpoint_service: LocalOrbaxCheckpointService,
     writer: LocalArtifactWriter,
@@ -721,6 +848,7 @@ def _save_checkpoint(
     eval_result: EvalRunResult | None,
     *,
     reason: str,
+    progress: TrainingProgress | None = None,
 ) -> tuple[HostState, CheckpointIndex]:
     checkpoint_started_at = time.perf_counter()
     step = row["step"]
@@ -765,6 +893,18 @@ def _save_checkpoint(
             "data_pipeline_shuffle_seed": dataset_state.shuffle_seed,
         }
     )
+    if progress is not None:
+        progress(
+            "checkpoint",
+            {
+                "step": step,
+                "tokens_seen": row["tokens_seen"],
+                "checkpoint_path": checkpoint_path,
+                "reason": reason,
+                "checkpoint_sec": checkpoint_sec,
+                "eval_loss": None if eval_result is None else eval_result.row["loss"],
+            },
+        )
     return next_host_state, next_index
 
 
@@ -789,7 +929,15 @@ def _train_sync_target(train_state: TrainState, metrics: Any) -> tuple[Any, ...]
         metrics.token_count,
         metrics.lr,
     ]
-    for value in (metrics.grad_norm, metrics.param_norm, metrics.update_norm, metrics.overflow):
+    for value in (
+        metrics.grad_norm,
+        metrics.param_norm,
+        metrics.update_norm,
+        metrics.overflow,
+        metrics.microbatch_loss_mean,
+        metrics.microbatch_loss_max,
+        metrics.batch_het,
+    ):
         if value is not None:
             values.append(value)
     return tuple(values)

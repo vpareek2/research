@@ -60,6 +60,10 @@ def test_train_step_updates_model_optimizer_state_and_metrics() -> None:
     assert metrics.grad_norm.shape == ()
     assert metrics.param_norm.shape == ()
     assert metrics.update_norm.shape == ()
+    assert metrics.microbatch_loss_mean.shape == ()
+    assert metrics.microbatch_loss_max.shape == ()
+    assert metrics.batch_het.shape == ()
+    assert metrics.batch_het == pytest.approx(jnp.asarray(0.0, dtype=jnp.float32))
     assert metrics.overflow is None
     assert math.isfinite(float(jax.device_get(metrics.loss_sum)))
     assert math.isfinite(float(jax.device_get(metrics.grad_norm)))
@@ -227,6 +231,9 @@ def test_repeated_compiled_train_calls_return_stable_shapes_and_dtypes() -> None
     assert first_metrics.grad_norm.shape == second_metrics.grad_norm.shape == ()
     assert first_metrics.param_norm.shape == second_metrics.param_norm.shape == ()
     assert first_metrics.update_norm.shape == second_metrics.update_norm.shape == ()
+    assert first_metrics.microbatch_loss_mean.shape == second_metrics.microbatch_loss_mean.shape == ()
+    assert first_metrics.microbatch_loss_max.shape == second_metrics.microbatch_loss_max.shape == ()
+    assert first_metrics.batch_het.shape == second_metrics.batch_het.shape == ()
     assert first_metrics.loss_sum.dtype == second_metrics.loss_sum.dtype == jnp.float32
     assert first_metrics.lr.dtype == second_metrics.lr.dtype == jnp.float32
     assert first_metrics.token_count.dtype == second_metrics.token_count.dtype
@@ -266,6 +273,9 @@ def test_accumulated_train_step_matches_equivalent_large_batch() -> None:
     assert next_accum.tokens_seen == 16
     assert accum_metrics.token_count == 16
     assert accum_metrics.lr == large_metrics.lr
+    assert accum_metrics.microbatch_loss_max >= accum_metrics.microbatch_loss_mean
+    assert accum_metrics.batch_het == pytest.approx(accum_metrics.microbatch_loss_max - accum_metrics.microbatch_loss_mean)
+    assert large_metrics.batch_het == pytest.approx(jnp.asarray(0.0, dtype=jnp.float32))
     assert np.allclose(np.asarray(jax.device_get(accum_metrics.loss_sum)), np.asarray(jax.device_get(large_metrics.loss_sum)))
     assert _trees_close(next_accum.model, next_large.model)
 
@@ -332,6 +342,8 @@ def test_train_step_with_data_axis_sharding_reports_global_metrics() -> None:
     assert metrics.token_count == 32
     assert metrics.loss_sum.shape == ()
     assert metrics.loss_sum.sharding == plan.metrics
+    assert metrics.batch_het.shape == ()
+    assert metrics.batch_het.sharding == plan.metrics
     assert next_state.step.sharding == plan.replicated
     assert jax.tree.leaves(next_state.model)[0].sharding == plan.replicated
 

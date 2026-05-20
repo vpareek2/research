@@ -72,6 +72,9 @@ def make_train_step(
             sharding.metrics,
             sharding.metrics,
             sharding.metrics,
+            sharding.metrics,
+            sharding.metrics,
+            sharding.metrics,
         )
 
     def _compiled_impl(
@@ -79,7 +82,7 @@ def make_train_step(
         input_ids: Any,
         target_ids: Any,
         loss_mask: Any,
-    ) -> tuple[TrainState, Any, Any, Any, Any, Any, Any]:
+    ) -> tuple[TrainState, Any, Any, Any, Any, Any, Any, Any, Any, Any]:
         grad_zero = jax.tree.map(jnp.zeros_like, state.model)
 
         def microbatch_grad(params: Any, micro_input_ids: Any, micro_target_ids: Any, micro_loss_mask: Any):
@@ -104,9 +107,9 @@ def make_train_step(
                 jax.tree.map(lambda total, grad: total + grad, grad_accum, grads),
                 loss_sum_accum + loss_sum,
                 token_count_accum + token_count,
-            ), None
+            ), (loss_sum, token_count)
 
-        (grad_sum, loss_sum, token_count), _ = jax.lax.scan(
+        (grad_sum, loss_sum, token_count), (micro_loss_sums, micro_token_counts) = jax.lax.scan(
             accumulate,
             (
                 grad_zero,
@@ -131,7 +134,22 @@ def make_train_step(
         grad_norm = _tree_l2_norm(grads)
         param_norm = _tree_l2_norm(next_model)
         update_norm = _tree_l2_norm(updates)
-        return next_state, loss_sum, token_count, lr, grad_norm, param_norm, update_norm
+        micro_losses = micro_loss_sums / micro_token_counts.astype(jnp.float32)
+        microbatch_loss_mean = jnp.mean(micro_losses)
+        microbatch_loss_max = jnp.max(micro_losses)
+        batch_het = microbatch_loss_max - microbatch_loss_mean
+        return (
+            next_state,
+            loss_sum,
+            token_count,
+            lr,
+            grad_norm,
+            param_norm,
+            update_norm,
+            microbatch_loss_mean,
+            microbatch_loss_max,
+            batch_het,
+        )
 
     _compiled = jax.jit(
         _compiled_impl,
@@ -150,6 +168,9 @@ def make_train_step(
             grad_norm,
             param_norm,
             update_norm,
+            microbatch_loss_mean,
+            microbatch_loss_max,
+            batch_het,
         ) = _compiled(
             state,
             _ensure_accumulation_axis(batch.input_ids),
@@ -164,6 +185,9 @@ def make_train_step(
             param_norm=param_norm,
             update_norm=update_norm,
             overflow=None,
+            microbatch_loss_mean=microbatch_loss_mean,
+            microbatch_loss_max=microbatch_loss_max,
+            batch_het=batch_het,
         )
         return next_state, metrics
 

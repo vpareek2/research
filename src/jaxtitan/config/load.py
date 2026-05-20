@@ -166,6 +166,8 @@ def _data_section(raw: Mapping[str, Any]) -> TomlDataSection:
         worker_count=_optional_int_with_default(raw, "worker_count", "data", default=0),
         worker_buffer_size=_optional_int_with_default(raw, "worker_buffer_size", "data", default=1),
         prefetch=_optional_bool(raw, "prefetch", "data", default=False),
+        document_buffer_size=_optional_int(raw, "document_buffer_size", "data"),
+        document_refill_size=_optional_int(raw, "document_refill_size", "data"),
     )
 
 

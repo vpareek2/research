@@ -44,16 +44,57 @@ def test_inspect_run_reports_summary_checkpoints_and_recent_metrics(
     assert payload["diagnostics"]["data_pipeline"]["backend"] == "grain"
     assert payload["diagnostics"]["data_pipeline"]["order"] == "sequential"
     assert payload["diagnostics"]["data_pipeline"]["worker_buffer_size"] == 1
+    assert payload["diagnostics"]["data_pipeline"]["document_aware"] is False
+    assert payload["diagnostics"]["data_pipeline"]["document_count"] is None
     assert payload["recent_train_metrics"][-1]["step"] == 2
     assert payload["recent_eval_metrics"][-1]["eval_name"] == "validation"
     assert "run: loop" in text
     assert "runtime:" in text
     assert "parallelism:" in text
     assert "data pipeline:" in text
+    assert "documents=False" in text
     assert "mode=replicated_data_parallel" in text
     assert "artifacts=single_host" in text
     assert "best checkpoint:" in text
     assert json.loads(run_inspection_to_json(inspection))["run_id"] == "loop"
+
+
+def test_inspect_run_reports_document_pipeline_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "inspect-documents",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=25,
+        document_offsets=(0, 6, 12, 25, 50),
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            data_order="document_buffer",
+            shuffle_seed=123,
+            document_buffer_size=3,
+            document_refill_size=2,
+            target_tokens=12,
+        )
+    )
+    run_training(config_path)
+
+    inspection = inspect_run(tmp_path / "runs" / "loop")
+    payload = inspection.payload
+    text = format_run_inspection(inspection)
+
+    assert payload["diagnostics"]["data_pipeline"]["document_aware"] is True
+    assert payload["diagnostics"]["data_pipeline"]["document_count"] == 4
+    assert payload["diagnostics"]["data_pipeline"]["document_offsets_path"] == "document_offsets.u64"
+    assert payload["diagnostics"]["data_pipeline"]["order"] == "document_buffer"
+    assert payload["diagnostics"]["data_pipeline"]["document_buffer_size"] == 3
+    assert payload["recent_train_metrics"][-1]["document_aware"] is True
+    assert "documents=True count=4" in text
 
 
 def test_inspect_run_missing_required_artifact_fails(
@@ -143,7 +184,18 @@ def test_cli_run_inspect_json_does_not_import_jax(tmp_path: Path) -> None:
     assert "JAX_LOADED False" in result.stdout
 
 
-def _training_config(train_manifest: Path) -> str:
+def _training_config(
+    train_manifest: Path,
+    *,
+    data_order: str = "sequential",
+    shuffle_seed: int | None = None,
+    document_buffer_size: int | None = None,
+    document_refill_size: int | None = None,
+    target_tokens: int = 16,
+) -> str:
+    shuffle_seed_line = "" if shuffle_seed is None else f"shuffle_seed = {shuffle_seed}\n"
+    document_buffer_size_line = "" if document_buffer_size is None else f"document_buffer_size = {document_buffer_size}\n"
+    document_refill_size_line = "" if document_refill_size is None else f"document_refill_size = {document_refill_size}\n"
     return f"""
 [run]
 id = "loop"
@@ -173,11 +225,13 @@ peak_lr = 0.001
 [data]
 train_manifest = "{train_manifest.as_posix()}"
 tokenizer_id = "toy-tokenizer"
+order = "{data_order}"
+{shuffle_seed_line}{document_buffer_size_line}{document_refill_size_line}
 
 [training]
 seq_len = 4
 global_batch_size = 2
-target_tokens = 16
+target_tokens = {target_tokens}
 log_every_steps = 1
 checkpoint_every_steps = 10
 

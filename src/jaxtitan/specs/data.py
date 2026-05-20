@@ -65,6 +65,8 @@ class DataSpec:
     worker_count: int = 0
     worker_buffer_size: int = 1
     prefetch: bool = False
+    document_buffer_size: int | None = None
+    document_refill_size: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "train_manifest", Path(self.train_manifest))
@@ -72,10 +74,12 @@ class DataSpec:
             object.__setattr__(self, "validation_manifest", Path(self.validation_manifest))
         if self.tokenizer_id is not None and not self.tokenizer_id:
             raise ContractError("data.tokenizer_id must be non-empty when provided")
-        if self.order not in {"sequential", "shuffle"}:
-            raise ContractError(f"data.order must be 'sequential' or 'shuffle', got {self.order!r}")
-        if self.order == "shuffle" and self.shuffle_seed is None:
-            raise ContractError("data.shuffle_seed is required when data.order='shuffle'")
+        if self.order not in {"sequential", "shuffle", "document_buffer"}:
+            raise ContractError(
+                f"data.order must be 'sequential', 'shuffle', or 'document_buffer', got {self.order!r}"
+            )
+        if self.order in {"shuffle", "document_buffer"} and self.shuffle_seed is None:
+            raise ContractError(f"data.shuffle_seed is required when data.order={self.order!r}")
         if self.order == "sequential" and self.shuffle_seed is not None:
             raise ContractError("data.shuffle_seed must be null or omitted when data.order='sequential'")
         if self.shuffle_seed is not None and (
@@ -94,3 +98,26 @@ class DataSpec:
             raise ContractError(f"data.worker_count must be non-negative, got {self.worker_count}")
         if self.worker_buffer_size <= 0:
             raise ContractError(f"data.worker_buffer_size must be positive, got {self.worker_buffer_size}")
+        if self.document_buffer_size is not None and (
+            not isinstance(self.document_buffer_size, int)
+            or isinstance(self.document_buffer_size, bool)
+            or self.document_buffer_size <= 0
+        ):
+            raise ContractError("data.document_buffer_size must be a positive integer when provided")
+        if self.document_refill_size is not None and (
+            not isinstance(self.document_refill_size, int)
+            or isinstance(self.document_refill_size, bool)
+            or self.document_refill_size <= 0
+        ):
+            raise ContractError("data.document_refill_size must be a positive integer when provided")
+        if self.order == "document_buffer":
+            if self.document_buffer_size is None:
+                raise ContractError("data.document_buffer_size is required when data.order='document_buffer'")
+            if self.document_refill_size is None:
+                raise ContractError("data.document_refill_size is required when data.order='document_buffer'")
+            if self.worker_count != 0 or self.worker_buffer_size != 1 or self.prefetch:
+                raise ContractError(
+                    "data.order='document_buffer' requires worker_count=0, worker_buffer_size=1, and prefetch=false"
+                )
+        elif self.document_buffer_size is not None or self.document_refill_size is not None:
+            raise ContractError("document buffer settings require data.order='document_buffer'")

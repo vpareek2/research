@@ -63,13 +63,13 @@ class LocalOrbaxCheckpointService:
         import orbax.checkpoint as ocp
 
         self._ocp = ocp
+        self._preservation_policy = _ProtectedLatestPolicy(max_to_keep, self._protected_steps)
         self._manager = ocp.CheckpointManager(
             self.checkpoints_dir.resolve(),
             options=ocp.CheckpointManagerOptions(
-                max_to_keep=max_to_keep,
                 step_format_fixed_length=6,
                 create=True,
-                should_keep_fn=self._should_keep,
+                preservation_policy=self._preservation_policy,
             ),
         )
 
@@ -168,18 +168,35 @@ class LocalOrbaxCheckpointService:
         """Protect specific checkpoint steps from max_to_keep deletion."""
 
         self._protected_steps = set(steps)
+        self._preservation_policy.set_protected_steps(self._protected_steps)
 
     def close(self) -> None:
         """Close the underlying Orbax manager."""
 
         self._manager.close()
 
-    def _should_keep(self, step: int) -> bool:
-        return int(step) in self._protected_steps
-
 
 def _dataset_to_dict(state: DataPipelineState) -> dict[str, Any]:
     return data_pipeline_state_to_dict(state)
+
+
+class _ProtectedLatestPolicy:
+    """Preserve the latest checkpoints plus runtime-selected protected steps."""
+
+    def __init__(self, latest_count: int, protected_steps: set[int]) -> None:
+        self.latest_count = latest_count
+        self.protected_steps = set(protected_steps)
+
+    def set_protected_steps(self, steps: set[int]) -> None:
+        self.protected_steps = set(steps)
+
+    def should_preserve(self, checkpoints: Any, *, context: Any) -> list[bool]:
+        del context
+        latest_start = max(0, len(checkpoints) - self.latest_count)
+        return [
+            idx >= latest_start or int(checkpoint.step) in self.protected_steps
+            for idx, checkpoint in enumerate(checkpoints)
+        ]
 
 
 def _host_to_dict(state: HostState) -> dict[str, Any]:

@@ -82,6 +82,10 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert metrics[-1]["token_end"] == 16
     assert metrics[-1]["examples"] == 2
     assert metrics[-1]["target_tokens"] == 8
+    assert metrics[-1]["document_aware"] is False
+    assert metrics[-1]["documents_touched"] is None
+    assert metrics[-1]["document_min"] is None
+    assert metrics[-1]["document_max"] is None
     assert metrics[-1]["gradient_accumulation_steps"] == 1
     assert metrics[-1]["micro_global_batch_size"] == 2
     assert metrics[-1]["effective_global_batch_size"] == 2
@@ -95,6 +99,9 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert metrics[-1]["data_worker_count"] == 0
     assert metrics[-1]["data_worker_buffer_size"] == 1
     assert metrics[-1]["data_prefetch"] is False
+    assert metrics[-1]["microbatch_loss_mean"] == pytest.approx(metrics[-1]["loss"])
+    assert metrics[-1]["microbatch_loss_max"] == pytest.approx(metrics[-1]["loss"])
+    assert metrics[-1]["batch_het"] == pytest.approx(0.0)
     assert metrics[-1]["data_sec"] >= 0.0
     assert metrics[-1]["placement_sec"] >= 0.0
     assert metrics[-1]["train_dispatch_sec"] >= 0.0
@@ -119,6 +126,8 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert final["final_train_tokens_per_sec"] == pytest.approx(metrics[-1]["train_tokens_per_sec"])
     assert final["steady_train_tokens_per_sec"] == pytest.approx(metrics[-1]["train_tokens_per_sec"])
     assert final["final_mfu"] == metrics[-1]["mfu"]
+    assert final["final_batch_het"] == pytest.approx(metrics[-1]["batch_het"])
+    assert final["avg_batch_het"] == pytest.approx(sum(row["batch_het"] for row in metrics) / len(metrics))
     assert final["device_kind"] == diagnostics["performance"]["device_kind"]
     assert final["device_count"] == diagnostics["performance"]["device_count"]
     assert final["runtime_diagnostics_path"] == "diagnostics/runtime.json"
@@ -137,6 +146,10 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert final["data_pipeline_worker_buffer_size"] == 1
     assert final["data_pipeline_prefetch"] is False
     assert final["data_pipeline_state_schema_version"] == 2
+    assert final["data_document_aware"] is False
+    assert final["data_document_count"] is None
+    assert final["data_document_buffer_size"] is None
+    assert final["data_document_refill_size"] is None
     assert final["latest_checkpoint_path"] == "checkpoints/000002"
     assert final["best_eval_step"] is None
     assert final["best_eval_loss"] is None
@@ -175,6 +188,8 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert diagnostics["data_pipeline"]["worker_buffer_size"] == 1
     assert diagnostics["data_pipeline"]["prefetch"] is False
     assert diagnostics["data_pipeline"]["state_schema_version"] == 2
+    assert diagnostics["data_pipeline"]["document_aware"] is False
+    assert diagnostics["data_pipeline"]["document_count"] is None
     assert diagnostics["parallelism"]["execution_mode"] == "replicated_data_parallel"
     assert diagnostics["parallelism"]["metrics_scope"] == "global"
     assert diagnostics["parallelism"]["artifact_writer"] == "single_host"
@@ -291,6 +306,8 @@ def test_run_training_with_gradient_accumulation_records_effective_batch(
     assert metrics[0]["effective_global_batch_size"] == 4
     assert metrics[0]["micro_tokens_per_step"] == 8
     assert metrics[0]["effective_tokens_per_step"] == 16
+    assert metrics[0]["microbatch_loss_max"] >= metrics[0]["microbatch_loss_mean"]
+    assert metrics[0]["batch_het"] == pytest.approx(metrics[0]["microbatch_loss_max"] - metrics[0]["microbatch_loss_mean"])
     assert metrics[-1]["tokens_seen"] == 32
     assert final["gradient_accumulation_steps"] == 2
     assert final["effective_global_batch_size"] == 4
@@ -342,6 +359,98 @@ def test_run_training_with_shuffle_records_loader_policy(
     assert final["data_pipeline_order"] == "shuffle"
     assert final["data_pipeline_shuffle_seed"] == 123
     assert final["data_pipeline_prefetch"] is True
+
+
+def test_run_training_with_document_buffer_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "document-buffer-loop",
+        shard_token_groups=(tuple(range(0, 80)),),
+        train_tokens=48,
+        document_offsets=(0, 3, 6, 9, 12, 20, 32, 48, 80),
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=12,
+            log_every_steps=1,
+            data_order="document_buffer",
+            shuffle_seed=123,
+            document_buffer_size=3,
+            document_refill_size=2,
+        )
+    )
+
+    summary = run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    metrics = _jsonl(run_dir / "metrics" / "train.jsonl")
+    final = json.loads((run_dir / "summaries" / "final.json").read_text())
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+
+    assert summary.data_pipeline_order == "document_buffer"
+    assert summary.data_document_buffer_size == 3
+    assert summary.data_document_refill_size == 2
+    assert metrics[-1]["data_order"] == "document_buffer"
+    assert metrics[-1]["document_aware"] is True
+    assert metrics[-1]["documents_touched"] >= 1
+    assert metrics[-1]["token_count"] <= metrics[-1]["target_tokens"]
+    assert diagnostics["data_pipeline"]["order"] == "document_buffer"
+    assert diagnostics["data_pipeline"]["document_buffer_size"] == 3
+    assert diagnostics["data_pipeline"]["document_refill_size"] == 2
+    assert final["data_pipeline_order"] == "document_buffer"
+    assert final["data_document_buffer_size"] == 3
+    assert final["data_document_refill_size"] == 2
+    assert final["final_batch_het"] == pytest.approx(metrics[-1]["batch_het"])
+
+
+def test_run_training_records_document_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "documents-loop",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=25,
+        document_offsets=(0, 6, 12, 25, 50),
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_training_config(manifest, target_tokens=16, log_every_steps=1, eval_every_steps=1))
+
+    summary = run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    metrics = _jsonl(run_dir / "metrics" / "train.jsonl")
+    eval_metrics = _jsonl(run_dir / "metrics" / "eval.jsonl")
+    final = json.loads((run_dir / "summaries" / "final.json").read_text())
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+
+    assert summary.data_document_aware is True
+    assert summary.data_document_count == 4
+    assert metrics[0]["document_aware"] is True
+    assert metrics[0]["documents_touched"] == 1
+    assert metrics[0]["document_min"] == 0
+    assert metrics[0]["document_max"] == 0
+    assert metrics[-1]["documents_touched"] == 2
+    assert metrics[-1]["document_min"] == 1
+    assert metrics[-1]["document_max"] == 2
+    assert eval_metrics[-1]["document_aware"] is True
+    assert eval_metrics[-1]["documents_touched"] == 1
+    assert eval_metrics[-1]["document_min"] == 3
+    assert eval_metrics[-1]["document_max"] == 3
+    assert diagnostics["data_pipeline"]["document_aware"] is True
+    assert diagnostics["data_pipeline"]["document_count"] == 4
+    assert diagnostics["data_pipeline"]["document_offsets_path"] == "document_offsets.u64"
+    assert final["data_document_aware"] is True
+    assert final["data_document_count"] == 4
+    assert final["data_document_offsets_path"] == "document_offsets.u64"
 
 
 def test_run_training_with_block_remat_completes_and_records_policy(
@@ -1174,7 +1283,18 @@ def test_cli_run_train_succeeds_for_tiny_run(
     )
 
     assert result.returncode == 0
-    assert result.stdout.strip() == "runs/loop"
+    assert "JAX TITAN TRAINING" in result.stdout
+    assert "step: 0      | compiling train step..." in result.stdout
+    assert "step: 1" in result.stdout
+    assert "loss:" in result.stdout
+    assert "grad_norm:" in result.stdout
+    assert "mfu:" in result.stdout
+    assert "lr:" in result.stdout
+    assert "tps:" in result.stdout
+    assert "total_time:" in result.stdout
+    assert "batch_het=" not in result.stdout
+    assert "docs=" not in result.stdout
+    assert "run_dir | runs/loop" in result.stdout
     assert (tmp_path / "runs" / "loop" / "metrics" / "train.jsonl").is_file()
     assert (tmp_path / "runs" / "loop" / "summaries" / "final.json").is_file()
 
@@ -1214,7 +1334,10 @@ def test_cli_run_train_resume_succeeds(
     metrics = _jsonl(tmp_path / "runs" / "loop" / "metrics" / "train.jsonl")
     assert first.returncode == 0
     assert resumed.returncode == 0
-    assert resumed.stdout.strip() == "runs/loop"
+    assert "JAX TITAN TRAINING" in resumed.stdout
+    assert "resume: true" in resumed.stdout
+    assert "resumed:" in resumed.stdout
+    assert "run_dir | runs/loop" in resumed.stdout
     assert [row["step"] for row in metrics] == [1, 2]
 
 
@@ -1262,12 +1385,16 @@ def _training_config(
     worker_count: int = 0,
     worker_buffer_size: int = 1,
     prefetch: bool = False,
+    document_buffer_size: int | None = None,
+    document_refill_size: int | None = None,
 ) -> str:
     total_steps_line = "" if total_steps is None else f"total_steps = {total_steps}\n"
     validation_manifest_line = (
         "" if validation_manifest is None else f'validation_manifest = "{Path(validation_manifest).as_posix()}"\n'
     )
     shuffle_seed_line = "" if shuffle_seed is None else f"shuffle_seed = {shuffle_seed}\n"
+    document_buffer_size_line = "" if document_buffer_size is None else f"document_buffer_size = {document_buffer_size}\n"
+    document_refill_size_line = "" if document_refill_size is None else f"document_refill_size = {document_refill_size}\n"
     eval_block = ""
     if eval_every_steps is not None:
         eval_block = f"""
@@ -1319,6 +1446,7 @@ order = "{data_order}"
 {shuffle_seed_line}worker_count = {worker_count}
 worker_buffer_size = {worker_buffer_size}
 prefetch = {str(prefetch).lower()}
+{document_buffer_size_line}{document_refill_size_line}
 
 [training]
 seq_len = {seq_len}

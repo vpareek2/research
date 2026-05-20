@@ -20,6 +20,9 @@ class StepMetrics:
     param_norm: ArrayScalar | None = None
     update_norm: ArrayScalar | None = None
     overflow: ArrayScalar | None = None
+    microbatch_loss_mean: ArrayScalar | None = None
+    microbatch_loss_max: ArrayScalar | None = None
+    batch_het: ArrayScalar | None = None
 
 
 @dataclass(frozen=True, slots=True)

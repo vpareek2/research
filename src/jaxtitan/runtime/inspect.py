@@ -97,7 +97,8 @@ def format_run_inspection(inspection: RunInspection) -> str:
                 "data pipeline: "
                 f"backend={data_pipeline['backend']} version={data_pipeline['backend_version']} "
                 f"order={data_pipeline['order']} shuffle_seed={data_pipeline['shuffle_seed']} "
-                f"workers={data_pipeline['worker_count']} prefetch={data_pipeline['prefetch']}"
+                f"workers={data_pipeline['worker_count']} prefetch={data_pipeline['prefetch']} "
+                f"documents={data_pipeline['document_aware']} count={data_pipeline['document_count']}"
             )
     latest = payload["latest_checkpoint"]
     best = payload["best_checkpoint"]
@@ -217,6 +218,12 @@ def _data_pipeline_summary(raw: Mapping[str, Any]) -> dict[str, Any]:
         "num_records": raw.get("num_records"),
         "manifest_sha256": raw.get("manifest_sha256"),
         "tokenizer_id": raw.get("tokenizer_id"),
+        "document_aware": raw.get("document_aware"),
+        "document_count": raw.get("document_count"),
+        "document_offsets_path": raw.get("document_offsets_path"),
+        "document_offsets_sha256": raw.get("document_offsets_sha256"),
+        "document_buffer_size": raw.get("document_buffer_size"),
+        "document_refill_size": raw.get("document_refill_size"),
     }
 
 

@@ -7,9 +7,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from jaxtitan.errors import ContractError
 
 UINT32_BYTES = 4
+UINT64_BYTES = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +40,20 @@ class TokenSplit:
 
 
 @dataclass(frozen=True, slots=True)
+class DocumentTable:
+    """Validated prepared-token document offset metadata."""
+
+    path: Path
+    dtype: str
+    count: int
+    bytes: int
+    sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "path", Path(self.path))
+
+
+@dataclass(frozen=True, slots=True)
 class PreparedDatasetManifest:
     """Validated prepared training-token manifest."""
 
@@ -51,6 +68,7 @@ class PreparedDatasetManifest:
     shards: tuple[TokenShard, ...]
     token_bytes_path: Path
     token_bytes_sha256: str | None
+    documents: DocumentTable | None
     manifest_sha256: str
 
     def __post_init__(self) -> None:
@@ -89,7 +107,8 @@ def validate_dataset_manifest(
     raw = _load_manifest_json(manifest_path)
     data_dir = manifest_path.parent
 
-    _expect(raw.get("schema_version") == 2, "prepared dataset manifest must have schema_version=2")
+    schema_version = _required_int(raw, "schema_version", "manifest")
+    _expect(schema_version > 0, f"prepared dataset manifest schema_version must be positive, got {schema_version}")
     _expect(raw.get("kind") == "training_tokens", f"prepared dataset manifest kind must be training_tokens, got {raw.get('kind')!r}")
     _expect(raw.get("dtype") == "uint32", f"prepared dataset manifest dtype must be uint32, got {raw.get('dtype')!r}")
 
@@ -128,9 +147,17 @@ def validate_dataset_manifest(
         actual_sha = _sha256(token_bytes_path)
         _expect(actual_sha == token_bytes_sha, f"prepared dataset token_bytes checksum mismatch for {token_bytes_path}")
 
+    documents = _validate_documents(
+        data_dir,
+        raw,
+        files,
+        num_tokens=num_tokens,
+        verify_checksums=verify_checksums,
+    )
+
     return PreparedDatasetManifest(
         manifest_path=manifest_path,
-        schema_version=2,
+        schema_version=schema_version,
         kind="training_tokens",
         dtype="uint32",
         tokenizer_id=manifest_tokenizer,
@@ -140,6 +167,7 @@ def validate_dataset_manifest(
         shards=tuple(shards),
         token_bytes_path=Path(token_bytes_rel),
         token_bytes_sha256=token_bytes_sha,
+        documents=documents,
         manifest_sha256=dataset_manifest_sha256(manifest_path),
     )
 
@@ -162,6 +190,10 @@ def dataset_manifest_summary(manifest: PreparedDatasetManifest) -> dict[str, Any
         "val_tokens": manifest.val_tokens,
         "shard_count": manifest.shard_count,
         "token_bytes_path": manifest.token_bytes_path.as_posix(),
+        "document_aware": manifest.documents is not None,
+        "document_count": None if manifest.documents is None else manifest.documents.count,
+        "document_offsets_path": None if manifest.documents is None else manifest.documents.path.as_posix(),
+        "document_offsets_sha256": None if manifest.documents is None else manifest.documents.sha256,
     }
 
 
@@ -253,6 +285,68 @@ def _validate_split(splits: Mapping[str, Any], name: str, num_tokens: int) -> To
     if tokens != end - start:
         raise ContractError(f"prepared dataset split {name} tokens={tokens} does not equal end-start={end - start}")
     return TokenSplit(start=start, end=end, tokens=tokens)
+
+
+def _validate_documents(
+    data_dir: Path,
+    raw: Mapping[str, Any],
+    files: Mapping[str, Any],
+    *,
+    num_tokens: int,
+    verify_checksums: bool,
+) -> DocumentTable | None:
+    has_documents = raw.get("documents") is not None
+    has_offsets = files.get("document_offsets") is not None
+    if not has_documents and not has_offsets:
+        return None
+    _expect(has_documents == has_offsets, "prepared dataset documents metadata requires files.document_offsets")
+
+    documents = _mapping(raw.get("documents"), "documents")
+    count = _required_int(documents, "count", "documents")
+    _expect(count > 0, f"prepared dataset documents.count must be positive, got {count}")
+
+    offset_info = _mapping(files.get("document_offsets"), "files.document_offsets")
+    dtype = _required_str(offset_info, "dtype", "files.document_offsets")
+    _expect(dtype == "uint64", f"prepared dataset document_offsets dtype must be uint64, got {dtype!r}")
+    path_value = _required_str(offset_info, "path", "files.document_offsets")
+    offsets_path = _resolve_relative_file(data_dir, path_value, "document_offsets")
+    declared_bytes = _required_int(offset_info, "bytes", "files.document_offsets")
+    expected_bytes = (count + 1) * UINT64_BYTES
+    actual_bytes = offsets_path.stat().st_size
+    _expect(
+        declared_bytes == actual_bytes,
+        f"prepared dataset document_offsets bytes={declared_bytes} does not match file bytes={actual_bytes}",
+    )
+    _expect(
+        actual_bytes == expected_bytes,
+        f"prepared dataset document_offsets file bytes={actual_bytes} does not match documents.count={count}",
+    )
+
+    offsets = np.memmap(offsets_path, dtype="<u8", mode="r")
+    _expect(int(offsets[0]) == 0, "prepared dataset document_offsets first offset must be 0")
+    _expect(
+        int(offsets[-1]) == num_tokens,
+        f"prepared dataset document_offsets final offset={int(offsets[-1])} must equal num_tokens={num_tokens}",
+    )
+    _expect(
+        bool(np.all(offsets[1:] > offsets[:-1])),
+        "prepared dataset document_offsets must be strictly increasing",
+    )
+
+    expected_sha = offset_info.get("sha256")
+    if expected_sha is not None:
+        _expect(isinstance(expected_sha, str) and bool(expected_sha), "files.document_offsets.sha256 must be non-empty")
+    if verify_checksums and expected_sha:
+        actual_sha = _sha256(offsets_path)
+        _expect(actual_sha == expected_sha, f"prepared dataset document_offsets checksum mismatch for {offsets_path}")
+
+    return DocumentTable(
+        path=Path(path_value),
+        dtype="uint64",
+        count=count,
+        bytes=declared_bytes,
+        sha256=expected_sha,
+    )
 
 
 def _resolve_relative_file(data_dir: Path, path_value: str, label: str) -> Path:

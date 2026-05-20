@@ -151,6 +151,10 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
                 "token_end": eval_row["token_end"],
                 "examples": eval_row["examples"],
                 "target_tokens": eval_row["target_tokens"],
+                "document_aware": eval_row["document_aware"],
+                "documents_touched": eval_row["documents_touched"],
+                "document_min": eval_row["document_min"],
+                "document_max": eval_row["document_max"],
                 "loss": eval_row["loss"],
                 "compile": "passed",
             }
@@ -160,6 +164,13 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
     micro_tokens = runtime_spec.training.global_batch_size * runtime_spec.training.seq_len
     batch_tokens = micro_tokens * runtime_spec.training.gradient_accumulation_steps
     train_state_leaves = jax.tree.leaves(next_train_state)
+    first_train_batch_sharding = {
+        "input_ids": placed_array_summary(placed_train_batch.input_ids),
+        "target_ids": placed_array_summary(placed_train_batch.target_ids),
+        "loss_mask": placed_array_summary(placed_train_batch.loss_mask),
+    }
+    if placed_train_batch.doc_ids is not None:
+        first_train_batch_sharding["doc_ids"] = placed_array_summary(placed_train_batch.doc_ids)
     report = {
         "schema_version": 1,
         "status": "passed",
@@ -193,6 +204,10 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
                 "token_end": train_provenance.token_end,
                 "examples": train_provenance.examples,
                 "target_tokens": train_provenance.target_tokens,
+                "document_aware": train_row["document_aware"],
+                "documents_touched": train_row["documents_touched"],
+                "document_min": train_row["document_min"],
+                "document_max": train_row["document_max"],
             },
         },
         "model": {
@@ -241,11 +256,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
         "parallelism": runtime_diagnostics.payload["parallelism"],
         "sharding": runtime_diagnostics.payload["sharding"],
         "observed_sharding": {
-            "first_train_batch": {
-                "input_ids": placed_array_summary(placed_train_batch.input_ids),
-                "target_ids": placed_array_summary(placed_train_batch.target_ids),
-                "loss_mask": placed_array_summary(placed_train_batch.loss_mask),
-            },
+            "first_train_batch": first_train_batch_sharding,
             "train_state": {
                 "replicated_leaf_count": len(train_state_leaves),
             },
@@ -304,7 +315,8 @@ def format_preflight_report(report: PreflightReport) -> str:
             "train data: "
             f"manifest={data['train_manifest']} tokens={data['train_split_tokens']} "
             f"first_batch={data['first_batch']['target_tokens']} "
-            f"pipeline={data['pipeline']['backend']} order={data['pipeline']['order']}"
+            f"pipeline={data['pipeline']['backend']} order={data['pipeline']['order']} "
+            f"documents={data['pipeline']['document_aware']} count={data['pipeline']['document_count']}"
         ),
         (
             "model: "

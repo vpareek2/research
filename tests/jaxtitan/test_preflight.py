@@ -40,7 +40,11 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert payload["data"]["pipeline"]["worker_count"] == 0
     assert payload["data"]["pipeline"]["worker_buffer_size"] == 1
     assert payload["data"]["pipeline"]["prefetch"] is False
+    assert payload["data"]["pipeline"]["document_aware"] is False
+    assert payload["data"]["pipeline"]["document_count"] is None
     assert payload["data"]["first_batch"]["target_tokens"] == 8
+    assert payload["data"]["first_batch"]["document_aware"] is False
+    assert payload["data"]["first_batch"]["documents_touched"] is None
     assert payload["devices"]["selected_device_count"] == 1
     assert payload["mesh"]["axis_names"] == ["data"]
     assert payload["model"]["parameters"] > 0
@@ -85,9 +89,42 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert "devices:" in text
     assert "runtime:" in text
     assert "pipeline=grain" in text
+    assert "documents=False" in text
     assert "compile=passed" in text
     assert "compile contract:" in text
     assert "donate_train=True" in text
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_reports_document_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "documents",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=25,
+        document_offsets=(0, 6, 12, 25, 50),
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_preflight_config(manifest, eval_every_steps=1, eval_num_batches=1))
+
+    report = run_preflight(config_path)
+    payload = report.payload
+    text = format_preflight_report(report)
+
+    assert payload["data"]["pipeline"]["document_aware"] is True
+    assert payload["data"]["pipeline"]["document_count"] == 4
+    assert payload["data"]["pipeline"]["document_offsets_path"] == "document_offsets.u64"
+    assert payload["data"]["first_batch"]["document_aware"] is True
+    assert payload["data"]["first_batch"]["documents_touched"] == 1
+    assert payload["observed_sharding"]["first_train_batch"]["doc_ids"]["global_shape"] == [1, 2]
+    assert payload["eval"]["document_aware"] is True
+    assert payload["eval"]["documents_touched"] == 1
+    assert payload["diagnostics"]["data_pipeline"]["document_aware"] is True
+    assert "documents=True count=4" in text
     assert not (tmp_path / "runs" / "loop").exists()
 
 
@@ -189,6 +226,40 @@ def test_run_preflight_reports_shuffle_loader_policy(
     assert payload["data"]["pipeline"]["shuffle_seed"] == 123
     assert payload["data"]["pipeline"]["worker_buffer_size"] == 2
     assert payload["data"]["pipeline"]["prefetch"] is True
+    assert payload["diagnostics"]["data_pipeline"] == payload["data"]["pipeline"]
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_reports_document_buffer_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "document-buffer",
+        shard_token_groups=(tuple(range(0, 80)),),
+        train_tokens=48,
+        document_offsets=(0, 3, 6, 9, 12, 20, 32, 48, 80),
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            data_order="document_buffer",
+            shuffle_seed=123,
+            document_buffer_size=3,
+            document_refill_size=2,
+        )
+    )
+
+    payload = run_preflight(config_path).payload
+
+    assert payload["data"]["pipeline"]["order"] == "document_buffer"
+    assert payload["data"]["pipeline"]["document_buffer_size"] == 3
+    assert payload["data"]["pipeline"]["document_refill_size"] == 2
+    assert payload["data"]["first_batch"]["document_aware"] is True
+    assert payload["training"]["first_step_loss"] > 0.0
     assert payload["diagnostics"]["data_pipeline"] == payload["data"]["pipeline"]
     assert not (tmp_path / "runs" / "loop").exists()
 
@@ -411,8 +482,12 @@ def _preflight_config(
     worker_count: int = 0,
     worker_buffer_size: int = 1,
     prefetch: bool = False,
+    document_buffer_size: int | None = None,
+    document_refill_size: int | None = None,
 ) -> str:
     shuffle_seed_line = "" if shuffle_seed is None else f"shuffle_seed = {shuffle_seed}\n"
+    document_buffer_size_line = "" if document_buffer_size is None else f"document_buffer_size = {document_buffer_size}\n"
+    document_refill_size_line = "" if document_refill_size is None else f"document_refill_size = {document_refill_size}\n"
     eval_block = ""
     if eval_every_steps is not None:
         eval_block = f"""
@@ -462,6 +537,7 @@ order = "{data_order}"
 {shuffle_seed_line}worker_count = {worker_count}
 worker_buffer_size = {worker_buffer_size}
 prefetch = {str(prefetch).lower()}
+{document_buffer_size_line}{document_refill_size_line}
 
 [training]
 seq_len = 4

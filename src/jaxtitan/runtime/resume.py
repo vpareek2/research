@@ -56,6 +56,8 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
                 worker_count=spec.data.worker_count,
                 worker_buffer_size=spec.data.worker_buffer_size,
                 prefetch=spec.data.prefetch,
+                document_buffer_size=spec.data.document_buffer_size,
+                document_refill_size=spec.data.document_refill_size,
             ),
         },
         "training": {

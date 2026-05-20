@@ -173,11 +173,44 @@ def test_load_config_accepts_data_loader_policy(tmp_path: Path) -> None:
     assert spec.data.prefetch is True
 
 
+def test_load_config_accepts_document_buffer_policy(tmp_path: Path) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace(
+            'tokenizer_id = "toy-tokenizer"',
+            "\n".join(
+                [
+                    'tokenizer_id = "toy-tokenizer"',
+                    'order = "document_buffer"',
+                    "shuffle_seed = 123",
+                    "document_buffer_size = 4",
+                    "document_refill_size = 2",
+                ]
+            ),
+        )
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.data.order == "document_buffer"
+    assert spec.data.shuffle_seed == 123
+    assert spec.data.document_buffer_size == 4
+    assert spec.data.document_refill_size == 2
+
+
 @pytest.mark.parametrize(
     ("replacement", "match"),
     [
         ('order = "rsdb"', "data.order"),
         ('order = "shuffle"', "shuffle_seed"),
+        ('order = "document_buffer"', "shuffle_seed"),
+        ('order = "document_buffer"\nshuffle_seed = 1', "document_buffer_size"),
+        ('order = "document_buffer"\nshuffle_seed = 1\ndocument_buffer_size = 4', "document_refill_size"),
+        (
+            'order = "document_buffer"\nshuffle_seed = 1\ndocument_buffer_size = 4\ndocument_refill_size = 2\nprefetch = true',
+            "prefetch",
+        ),
+        ('document_buffer_size = 4', "document buffer settings"),
         ('order = "sequential"\nshuffle_seed = 1', "shuffle_seed"),
         ('worker_count = -1', "worker_count"),
         ('worker_buffer_size = 0', "worker_buffer_size"),
@@ -211,6 +244,7 @@ def test_run_spec_json_and_hashes_are_stable(tmp_path: Path) -> None:
     assert decoded["data"]["train_manifest"] == "data/train/manifest.json"
     assert decoded["data"]["order"] == "sequential"
     assert decoded["data"]["worker_buffer_size"] == 1
+    assert decoded["data"]["document_buffer_size"] is None
     assert resolved_json == run_spec_to_json(spec)
     assert resolved_config_sha256(spec) == sha256(resolved_json.encode("utf-8")).hexdigest()
     assert source_config_sha256(config_path) == sha256(MINIMAL_CONFIG.encode("utf-8")).hexdigest()

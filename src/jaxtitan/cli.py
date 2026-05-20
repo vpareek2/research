@@ -2,7 +2,10 @@
 
 import argparse
 from collections.abc import Sequence
+from pathlib import Path
 import sys
+import time
+from typing import Any
 
 from jaxtitan import __version__
 from jaxtitan.config import load_config, run_spec_to_json
@@ -118,8 +121,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "run" and args.run_command == "train":
             from jaxtitan.runtime import run_training
 
-            summary = run_training(args.path, resume=args.resume)
-            print(summary.run_dir)
+            run_training(args.path, resume=args.resume, progress=_training_progress_printer())
             return 0
 
         if args.command == "run" and args.run_command == "inspect":
@@ -172,6 +174,218 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser.print_help()
     return 0
+
+
+def _training_progress_printer():
+    state: dict[str, Any] = {}
+
+    def print_progress(event: str, payload: dict[str, Any]) -> None:
+        if event == "start":
+            spec = payload["spec"]
+            config_path = Path(payload["config_path"])
+            state["started_at"] = time.perf_counter()
+            print("=========================")
+            print("JAX TITAN TRAINING")
+            print("=========================")
+            print(f"run: {spec.run_id}")
+            print(f"config: {config_path.as_posix()}")
+            print(f"resume: {str(payload['resume']).lower()}")
+            print("initializing runtime...")
+            return
+
+        if event == "initialized":
+            spec = payload["spec"]
+            diagnostics = payload["diagnostics"]
+            model = diagnostics["model"]
+            mesh = diagnostics["mesh"]
+            jax_info = diagnostics["jax"]
+            data = diagnostics["data_pipeline"]
+            print("")
+            print("config:")
+            print(
+                "  model   | "
+                f"{spec.model.name}/{spec.model.variant} | params {_format_count(model['parameters'])} | "
+                f"seq {spec.training.seq_len} | dtype {spec.model.compute_dtype}/{spec.model.param_dtype} | "
+                f"remat {spec.model.remat}"
+            )
+            print(
+                "  train   | "
+                f"target {_format_int(spec.training.target_tokens)} | "
+                f"batch {spec.training.global_batch_size} x accum {spec.training.gradient_accumulation_steps} "
+                f"= {mesh['effective_global_batch_size']} | "
+                f"tokens/step {_format_int(mesh['effective_tokens_per_step'])}"
+            )
+            print(
+                "  optim   | "
+                f"{spec.optimizer.name} | schedule {spec.optimizer.schedule.name} | "
+                f"peak_lr {_format_number(spec.optimizer.schedule.peak_lr)}"
+            )
+            print(
+                "  data    | "
+                f"{data['backend']} | order {data['order']} | docs {_format_bool(data['document_aware'])} | "
+                f"records {_format_int(data['num_records'])} | {data['manifest_path']}"
+            )
+            print(
+                "  mesh    | "
+                f"{jax_info['backend']} | devices {jax_info['selected_device_count']} | "
+                f"axes {_format_mesh_axes(mesh)}"
+            )
+            print(f"  run_dir | {payload['run_dir']}")
+            print("-------------------------")
+            return
+
+        if event == "resumed":
+            print(
+                "resumed: "
+                f"checkpoint_step={payload['checkpoint_step']} "
+                f"step={payload['step']} tokens={_format_int(payload['tokens_seen'])} "
+                f"path={payload['checkpoint_path']}"
+            )
+            return
+
+        if event == "compile_start":
+            phase = payload["phase"]
+            if phase == "train":
+                print(f"step: {0:<6} | compiling train step...")
+            else:
+                print(f"{phase}: compiling step...")
+            return
+
+        if event == "train":
+            row = payload["row"]
+            started_at = float(state.get("started_at", time.perf_counter()))
+            total_time = time.perf_counter() - started_at
+            print(
+                f"step: {row['step']:<6} | "
+                f"loss: {_format_metric(row['loss']):>9} | "
+                f"grad_norm: {_format_metric(row.get('grad_norm')):>9} | "
+                f"mfu: {_format_percent(row.get('mfu')):>7} | "
+                f"lr: {_format_number(row['lr']):>9} | "
+                f"tps: {_format_tps(row.get('train_tokens_per_sec')):>9} | "
+                f"total_time: {_format_runtime(total_time):>9}"
+            )
+            return
+
+        if event == "eval":
+            row = payload["row"]
+            print(
+                f"eval step {row['step']}: "
+                f"loss={_format_metric(row['loss'])} "
+                f"tokens={_format_int(row['token_count'])} "
+                f"batches={row['num_batches']} "
+                f"tps={_format_metric(row.get('eval_tokens_per_sec'))} "
+                f"sec={_format_metric(row.get('eval_sec'))}"
+            )
+            return
+
+        if event == "checkpoint":
+            eval_loss = payload.get("eval_loss")
+            eval_part = "" if eval_loss is None else f" eval_loss={_format_metric(eval_loss)}"
+            print(
+                f"checkpoint step {payload['step']}: "
+                f"{payload['checkpoint_path']} reason={payload['reason']} "
+                f"sec={_format_metric(payload['checkpoint_sec'])}{eval_part}"
+            )
+            return
+
+        if event == "completed":
+            summary = payload["summary"]
+            eval_part = "" if summary.final_eval_loss is None else f" final_eval={_format_metric(summary.final_eval_loss)}"
+            print("-------------------------")
+            print(
+                "completed: "
+                f"step={summary.steps} "
+                f"tokens={_format_int(summary.tokens_seen)}/{_format_int(summary.target_tokens)} "
+                f"loss={_format_metric(summary.final_loss)}{eval_part} "
+                f"steady_tps={_format_metric(summary.steady_train_tokens_per_sec)} "
+                f"mfu={_format_percent(summary.final_mfu)}"
+            )
+            print(f"run_dir: {summary.run_dir}")
+
+    return print_progress
+
+
+def _format_int(value: int) -> str:
+    return f"{value:,}"
+
+
+def _format_bool(value: Any) -> str:
+    return "yes" if bool(value) else "no"
+
+
+def _format_mesh_axes(mesh: dict[str, Any]) -> str:
+    return ",".join(
+        f"{name}={size}"
+        for name, size in zip(mesh["axis_names"], mesh["axis_sizes"], strict=True)
+    )
+
+
+def _format_count(value: int | float) -> str:
+    value = float(value)
+    if abs(value) >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.2f}B"
+    if abs(value) >= 1_000_000:
+        return f"{value / 1_000_000:.2f}M"
+    if abs(value) >= 1_000:
+        return f"{value / 1_000:.2f}K"
+    return str(int(value))
+
+
+def _format_metric(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    value = float(value)
+    if value == 0.0:
+        return "0"
+    if abs(value) < 0.001 or abs(value) >= 100_000:
+        return f"{value:.3e}"
+    return f"{value:.4g}"
+
+
+def _format_tps(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    value = float(value)
+    if value == 0.0:
+        return "0"
+    if abs(value) >= 100:
+        return f"{value:,.0f}"
+    if abs(value) >= 10:
+        return f"{value:,.1f}"
+    return f"{value:,.2f}"
+
+
+def _format_number(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    value = float(value)
+    if value == 0.0:
+        return "0"
+    if abs(value) < 0.001 or abs(value) >= 10_000:
+        return f"{value:.3e}"
+    return f"{value:.6g}"
+
+
+def _format_percent(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    return f"{float(value):.2f}%"
+
+
+def _format_seconds(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    return f"{_format_metric(value)}s"
+
+
+def _format_runtime(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, remaining = divmod(int(seconds), 60)
+    if minutes < 60:
+        return f"{minutes}m{remaining:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
 
 
 if __name__ == "__main__":

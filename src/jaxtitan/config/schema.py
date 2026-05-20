@@ -58,6 +58,8 @@ class TomlDataSection:
     worker_count: int = 0
     worker_buffer_size: int = 1
     prefetch: bool = False
+    document_buffer_size: int | None = None
+    document_refill_size: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
