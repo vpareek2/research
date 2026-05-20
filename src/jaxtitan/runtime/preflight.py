@@ -13,13 +13,21 @@ import numpy as np
 from jaxtitan.config import load_config
 from jaxtitan.data import PreparedDataService
 from jaxtitan.errors import ContractError
-from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch, place_replicated
+from jaxtitan.mesh import (
+    build_mesh_context,
+    build_sharding_plan,
+    place_batch,
+    place_replicated,
+    require_single_process_runtime,
+    validate_runtime_mesh_spec,
+)
 from jaxtitan.models import build_model, count_parameters
 from jaxtitan.optim import build_optimizer
 from jaxtitan.runtime.diagnostics import (
     PhaseTimer,
     build_runtime_diagnostics,
     enrich_train_metrics,
+    placed_array_summary,
     sample_device_telemetry,
     sync_and_time,
 )
@@ -46,6 +54,8 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
 
     spec = load_config(config_path)
     runtime_spec = _with_runtime_schedule_steps(spec)
+    require_single_process_runtime()
+    validate_runtime_mesh_spec(runtime_spec.mesh)
     if runtime_spec.dirs.run_dir.exists():
         raise ContractError(f"run directory already exists: {runtime_spec.dirs.run_dir}")
 
@@ -62,11 +72,11 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
     context = build_mesh_context(runtime_spec.mesh)
     sharding = build_sharding_plan(context)
     model = build_model(runtime_spec.model, seed=runtime_spec.seed)
-    runtime_diagnostics = build_runtime_diagnostics(runtime_spec, context, model.metadata)
+    runtime_diagnostics = build_runtime_diagnostics(runtime_spec, context, model.metadata, sharding=sharding)
     optimizer = build_optimizer(runtime_spec.optimizer, model.state, model.metadata)
     model_state = place_replicated(model.state, sharding)
     train_state = initialize_train_state(model_state, optimizer.transform, seed=runtime_spec.seed)
-    train_step = make_train_step(model.graph, optimizer)
+    train_step = make_train_step(model.graph, optimizer, sharding=sharding, state_template=train_state)
 
     timer = PhaseTimer()
     with timer.phase("placement"):
@@ -75,7 +85,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
         next_train_state, train_metrics = train_step(train_state, placed_train_batch)
     timer.add("metrics_sync", sync_and_time(_train_sync_target(next_train_state, train_metrics)))
     train_row = enrich_train_metrics(
-        _metrics_row(next_train_state, train_metrics, train_provenance),
+        _metrics_row(next_train_state, train_metrics, train_provenance, runtime_spec=runtime_spec, context=context),
         timings={
             "data_sec": 0.0,
             "placement_sec": timer.seconds("placement"),
@@ -92,7 +102,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
     eval_report = None
     if eval_spec is not None:
         eval_data = _build_validation_eval_data(runtime_spec)
-        eval_step = make_eval_step(model.graph)
+        eval_step = make_eval_step(model.graph, sharding=sharding, state_template=train_state.model)
         eval_row = _validation_eval_row(
             eval_spec,
             eval_data,
@@ -120,6 +130,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
         }
 
     batch_tokens = runtime_spec.training.global_batch_size * runtime_spec.training.seq_len
+    train_state_leaves = jax.tree.leaves(train_state)
     report = {
         "schema_version": 1,
         "status": "passed",
@@ -129,6 +140,10 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
         "devices": {
             "local_device_count": context.local_device_count,
             "selected_device_count": len(context.devices),
+            "global_device_count": context.global_device_count,
+            "process_count": context.process_count,
+            "process_index": context.process_index,
+            "single_process": context.process_count == 1,
             "platforms": sorted({str(getattr(device, "platform", "unknown")) for device in context.devices}),
             "kinds": sorted({str(getattr(device, "device_kind", "unknown")) for device in context.devices}),
         },
@@ -170,6 +185,9 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
             "global_batch_size": runtime_spec.training.global_batch_size,
             "target_tokens": runtime_spec.training.target_tokens,
             "batch_tokens": batch_tokens,
+            "data_axis_size": context.data_axis_size,
+            "per_device_batch_size": runtime_spec.training.global_batch_size // context.data_axis_size,
+            "per_device_target_tokens": batch_tokens // context.data_axis_size,
             "estimated_steps": math.ceil(runtime_spec.training.target_tokens / batch_tokens),
             "log_every_steps": runtime_spec.training.log_every_steps,
             "checkpoint_every_steps": runtime_spec.training.checkpoint_every_steps,
@@ -180,6 +198,18 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
         },
         "eval": eval_report,
         "diagnostics": runtime_diagnostics.payload,
+        "parallelism": runtime_diagnostics.payload["parallelism"],
+        "sharding": runtime_diagnostics.payload["sharding"],
+        "observed_sharding": {
+            "first_train_batch": {
+                "input_ids": placed_array_summary(placed_train_batch.input_ids),
+                "target_ids": placed_array_summary(placed_train_batch.target_ids),
+                "loss_mask": placed_array_summary(placed_train_batch.loss_mask),
+            },
+            "train_state": {
+                "replicated_leaf_count": len(train_state_leaves),
+            },
+        },
     }
     return PreflightReport(payload=_normalize(report))
 
@@ -201,6 +231,7 @@ def format_preflight_report(report: PreflightReport) -> str:
     model = payload["model"]
     optimizer = payload["optimizer"]
     diagnostics = payload["diagnostics"]
+    parallelism = payload["parallelism"]
     performance = diagnostics["performance"]
     jax_info = diagnostics["jax"]
     lines = [
@@ -210,9 +241,17 @@ def format_preflight_report(report: PreflightReport) -> str:
         (
             "devices: "
             f"selected={devices['selected_device_count']} local={devices['local_device_count']} "
+            f"global={devices['global_device_count']} process_count={devices['process_count']} "
             f"platforms={','.join(devices['platforms'])}"
         ),
         f"mesh: axes={mesh['axis_names']} sizes={mesh['axis_sizes']}",
+        (
+            "parallelism: "
+            f"mode={parallelism['execution_mode']} metrics={parallelism['metrics_scope']} "
+            f"artifacts={parallelism['artifact_writer']} data_axis={parallelism['mesh']['data_axis_size']} "
+            f"global_batch={parallelism['batch']['global_batch_size']} "
+            f"per_device_batch={parallelism['batch']['per_device_batch_size']}"
+        ),
         (
             "runtime: "
             f"backend={jax_info['backend']} device_kind={performance['device_kind']} "
@@ -236,6 +275,7 @@ def format_preflight_report(report: PreflightReport) -> str:
         (
             "training: "
             f"estimated_steps={training['estimated_steps']} batch_tokens={training['batch_tokens']} "
+            f"per_device_batch={training['per_device_batch_size']} "
             f"log_every={training['log_every_steps']} checkpoint_every={training['checkpoint_every_steps']} "
             f"compile={training['compile']}"
         ),

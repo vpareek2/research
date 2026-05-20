@@ -3,11 +3,19 @@ import subprocess
 import sys
 from pathlib import Path
 
+import jax
 import pytest
 
 from jaxtitan.errors import ContractError
 from jaxtitan.runtime import run_training
 from jaxtitan.services import initialize_run
+
+FAKE_DEVICE_COUNT = 4
+
+
+def require_fake_devices() -> None:
+    if jax.local_device_count() < FAKE_DEVICE_COUNT:
+        pytest.skip("JAX was initialized before fake CPU device flags were set")
 
 
 def test_run_training_writes_artifacts_metrics_and_summary(
@@ -54,6 +62,9 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert events[-2]["step"] == 2
     assert events[-2]["reason"] == "final"
     assert events[-2]["checkpoint_sec"] >= 0.0
+    assert events[1]["execution_mode"] == "replicated_data_parallel"
+    assert events[1]["metrics_scope"] == "global"
+    assert events[1]["artifact_writer"] == "single_host"
     assert [row["step"] for row in metrics] == [1, 2]
     assert metrics[-1]["tokens_seen"] == 16
     assert metrics[-1]["token_count"] == 8
@@ -63,6 +74,9 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert metrics[-1]["token_end"] == 16
     assert metrics[-1]["examples"] == 2
     assert metrics[-1]["target_tokens"] == 8
+    assert metrics[-1]["execution_mode"] == "replicated_data_parallel"
+    assert metrics[-1]["metrics_scope"] == "global"
+    assert metrics[-1]["artifact_writer"] == "single_host"
     assert metrics[-1]["data_sec"] >= 0.0
     assert metrics[-1]["placement_sec"] >= 0.0
     assert metrics[-1]["train_dispatch_sec"] >= 0.0
@@ -90,6 +104,9 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert final["device_kind"] == diagnostics["performance"]["device_kind"]
     assert final["device_count"] == diagnostics["performance"]["device_count"]
     assert final["runtime_diagnostics_path"] == "diagnostics/runtime.json"
+    assert final["execution_mode"] == "replicated_data_parallel"
+    assert final["metrics_scope"] == "global"
+    assert final["artifact_writer"] == "single_host"
     assert final["latest_checkpoint_path"] == "checkpoints/000002"
     assert final["best_eval_step"] is None
     assert final["best_eval_loss"] is None
@@ -110,9 +127,117 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     ]
     assert events[-1]["total_wall_sec"] == pytest.approx(final["total_wall_sec"])
     assert events[-1]["final_train_tokens_per_sec"] == pytest.approx(final["final_train_tokens_per_sec"])
+    assert events[-1]["execution_mode"] == "replicated_data_parallel"
+    assert events[-1]["metrics_scope"] == "global"
+    assert events[-1]["artifact_writer"] == "single_host"
     assert diagnostics["jax"]["backend"]
     assert diagnostics["packages"]["jaxtitan"]
+    assert diagnostics["parallelism"]["execution_mode"] == "replicated_data_parallel"
+    assert diagnostics["parallelism"]["metrics_scope"] == "global"
+    assert diagnostics["parallelism"]["artifact_writer"] == "single_host"
+    assert diagnostics["sharding"]["batch"]["input_ids"]["partition_spec"] == "PartitionSpec('data', None)"
+    assert diagnostics["sharding"]["train_state"]["model"]["partition_spec"] == "PartitionSpec()"
     assert (run_dir / "checkpoints" / "000002").is_dir()
+
+
+def test_run_training_with_four_device_data_axis_reports_global_and_per_device_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "dp-loop",
+        shard_token_groups=(tuple(range(0, 80)),),
+        train_tokens=65,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=32,
+            log_every_steps=1,
+            global_batch_size=8,
+            axis_sizes=(4,),
+        )
+    )
+
+    summary = run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    metrics = _jsonl(run_dir / "metrics" / "train.jsonl")
+    final = json.loads((run_dir / "summaries" / "final.json").read_text())
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+
+    assert summary.steps == 1
+    assert summary.tokens_seen == 32
+    assert metrics[-1]["token_count"] == 32
+    assert metrics[-1]["target_tokens"] == 32
+    assert metrics[-1]["data_axis_size"] == 4
+    assert metrics[-1]["global_batch_size"] == 8
+    assert metrics[-1]["per_device_batch_size"] == 2
+    assert metrics[-1]["global_target_tokens"] == 32
+    assert metrics[-1]["per_device_target_tokens"] == 8
+    assert diagnostics["jax"]["single_process"] is True
+    assert diagnostics["mesh"]["data_axis_size"] == 4
+    assert diagnostics["mesh"]["global_batch_size"] == 8
+    assert diagnostics["mesh"]["per_device_batch_size"] == 2
+    assert diagnostics["mesh"]["global_tokens_per_step"] == 32
+    assert diagnostics["mesh"]["per_device_tokens_per_step"] == 8
+    assert diagnostics["mesh"]["selected_device_count"] == 4
+    assert diagnostics["parallelism"]["batch"]["global_batch_size"] == 8
+    assert diagnostics["parallelism"]["batch"]["per_device_batch_size"] == 2
+    assert diagnostics["sharding"]["metrics"]["partition_spec"] == "PartitionSpec()"
+    assert final["data_axis_size"] == 4
+    assert final["global_batch_size"] == 8
+    assert final["per_device_batch_size"] == 2
+    assert final["selected_device_count"] == 4
+    assert final["single_process"] is True
+
+
+def test_run_training_resumes_four_device_data_axis_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "dp-resume",
+        shard_token_groups=(tuple(range(0, 120)),),
+        train_tokens=100,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=32,
+            log_every_steps=1,
+            global_batch_size=8,
+            axis_sizes=(4,),
+        )
+    )
+    run_training(config_path)
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=64,
+            log_every_steps=1,
+            global_batch_size=8,
+            axis_sizes=(4,),
+        )
+    )
+
+    summary = run_training(config_path, resume=True)
+
+    metrics = _jsonl(tmp_path / "runs" / "loop" / "metrics" / "train.jsonl")
+    events = _jsonl(tmp_path / "runs" / "loop" / "events.jsonl")
+    assert summary.steps == 2
+    assert summary.tokens_seen == 64
+    assert [row["step"] for row in metrics] == [1, 2]
+    assert metrics[-1]["data_axis_size"] == 4
+    assert any(event["type"] == "training_resumed" for event in events)
 
 
 def test_run_training_logs_final_row_even_when_not_on_log_interval(
@@ -207,6 +332,23 @@ def test_run_training_records_failure_when_dataset_exhausts(
     assert events[-1]["error_type"] == "ContractError"
     assert [row["step"] for row in metrics] == [1, 2]
     assert not (run_dir / "summaries" / "final.json").exists()
+
+
+def test_run_training_rejects_multi_process_before_creating_run_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("multi-process", shard_token_groups=(tuple(range(0, 30)),), train_tokens=25)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_training_config(manifest, target_tokens=16, log_every_steps=1))
+    monkeypatch.setattr("jaxtitan.mesh.sharding.jax.process_count", lambda: 2)
+
+    with pytest.raises(ContractError, match="exactly one process"):
+        run_training(config_path)
+
+    assert not (tmp_path / "runs" / "loop").exists()
 
 
 def test_run_training_with_validation_eval_writes_eval_metrics_and_summary(

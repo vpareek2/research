@@ -6,7 +6,14 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 
 from jaxtitan.batch import Batch
 from jaxtitan.errors import ContractError
-from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch, place_replicated
+from jaxtitan.mesh import (
+    build_mesh_context,
+    build_sharding_plan,
+    place_batch,
+    place_replicated,
+    replicated_shardings_like,
+    require_single_process_runtime,
+)
 from jaxtitan.specs.mesh import MeshSpec
 
 FAKE_DEVICE_COUNT = 4
@@ -34,7 +41,11 @@ def test_four_device_data_mesh() -> None:
 
     assert context.mesh.devices.shape == (4,)
     assert len(context.devices) == 4
+    assert context.selected_device_count == 4
     assert context.local_device_count >= 4
+    assert context.global_device_count >= 4
+    assert context.process_count == 1
+    assert context.process_index == 0
 
 
 def test_build_mesh_context_rejects_too_many_devices() -> None:
@@ -156,3 +167,23 @@ def test_place_replicated_keeps_full_leaf_shape_on_each_device() -> None:
     assert {shard.data.shape for shard in placed["weight"].addressable_shards} == {(4, 4)}
     assert placed["bias"].sharding == plan.replicated
     assert {shard.data.shape for shard in placed["bias"].addressable_shards} == {(4,)}
+
+
+def test_replicated_shardings_like_matches_tree_structure() -> None:
+    require_fake_devices()
+    context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
+    plan = build_sharding_plan(context)
+    tree = {"weight": jnp.ones((2, 2)), "nested": (jnp.ones((1,)), None)}
+
+    shardings = replicated_shardings_like(tree, plan)
+
+    assert shardings["weight"] == plan.replicated
+    assert shardings["nested"][0] == plan.replicated
+    assert shardings["nested"][1] is None
+
+
+def test_require_single_process_runtime_rejects_multi_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("jaxtitan.mesh.sharding.jax.process_count", lambda: 2)
+
+    with pytest.raises(ContractError, match="exactly one process"):
+        require_single_process_runtime()

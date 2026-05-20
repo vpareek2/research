@@ -7,11 +7,20 @@ import pytest
 
 from jaxtitan.batch import Batch
 from jaxtitan.errors import ContractError
+from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch, place_replicated
 from jaxtitan.models import build_model
 from jaxtitan.optim import build_optimizer
+from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
 from jaxtitan.steps import initialize_train_state, make_train_step, train_step
+
+FAKE_DEVICE_COUNT = 4
+
+
+def require_fake_devices() -> None:
+    if jax.local_device_count() < FAKE_DEVICE_COUNT:
+        pytest.skip("JAX was initialized before fake CPU device flags were set")
 
 
 def test_initialize_train_state_is_seed_deterministic() -> None:
@@ -147,6 +156,59 @@ def test_repeated_compiled_train_calls_return_stable_shapes_and_dtypes() -> None
     assert first_metrics.token_count.dtype == second_metrics.token_count.dtype
 
 
+def test_train_step_with_data_axis_sharding_reports_global_metrics() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
+    plan = build_sharding_plan(context)
+    model_state = place_replicated(built.state, plan)
+    optimizer = _optimizer(model_state, built.metadata)
+    state = initialize_train_state(model_state, optimizer.transform, seed=1)
+    step = make_train_step(built.graph, optimizer, sharding=plan, state_template=state)
+    batch = _batch(batch_size=8, seq_len=4, vocab_size=16)
+
+    next_state, metrics = step(state, place_batch(batch, plan))
+
+    assert next_state.step == 1
+    assert next_state.tokens_seen == 32
+    assert metrics.token_count == 32
+    assert metrics.loss_sum.shape == ()
+    assert metrics.loss_sum.sharding == plan.metrics
+    assert next_state.step.sharding == plan.replicated
+    assert jax.tree.leaves(next_state.model)[0].sharding == plan.replicated
+
+
+def test_data_axis_sharded_train_step_matches_one_device_global_batch() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(), seed=0)
+    batch = _batch(batch_size=8, seq_len=4, vocab_size=16)
+
+    one_context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(1,)))
+    one_plan = build_sharding_plan(one_context)
+    one_model = place_replicated(built.state, one_plan)
+    one_optimizer = _optimizer(one_model, built.metadata)
+    one_state = initialize_train_state(one_model, one_optimizer.transform, seed=1)
+    one_step = make_train_step(built.graph, one_optimizer, sharding=one_plan, state_template=one_state)
+    next_one, metrics_one = one_step(one_state, place_batch(batch, one_plan))
+
+    four_context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
+    four_plan = build_sharding_plan(four_context)
+    four_model = place_replicated(built.state, four_plan)
+    four_optimizer = _optimizer(four_model, built.metadata)
+    four_state = initialize_train_state(four_model, four_optimizer.transform, seed=1)
+    four_step = make_train_step(built.graph, four_optimizer, sharding=four_plan, state_template=four_state)
+    next_four, metrics_four = four_step(four_state, place_batch(batch, four_plan))
+
+    assert _scalar_int(metrics_four.token_count) == _scalar_int(metrics_one.token_count) == 32
+    assert np.allclose(
+        np.asarray(jax.device_get(metrics_four.loss_sum)),
+        np.asarray(jax.device_get(metrics_one.loss_sum)),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert _trees_close(next_four.model, next_one.model)
+
+
 def _optimizer(model_state, metadata, *, schedule: ScheduleSpec | None = None):
     if schedule is None:
         schedule = ScheduleSpec(peak_lr=1e-3)
@@ -194,6 +256,22 @@ def _trees_changed(left, right) -> bool:
         not jnp.array_equal(left_leaf, right_leaf)
         for left_leaf, right_leaf in zip(jax.tree.leaves(left), jax.tree.leaves(right), strict=True)
     )
+
+
+def _trees_close(left, right) -> bool:
+    return all(
+        np.allclose(
+            np.asarray(jax.device_get(left_leaf)),
+            np.asarray(jax.device_get(right_leaf)),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        for left_leaf, right_leaf in zip(jax.tree.leaves(left), jax.tree.leaves(right), strict=True)
+    )
+
+
+def _scalar_int(value) -> int:
+    return int(np.asarray(jax.device_get(value)).item())
 
 
 def _rng_equal(left, right) -> bool:

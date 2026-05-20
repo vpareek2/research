@@ -13,11 +13,21 @@ import numpy as np
 from jaxtitan.config import load_config
 from jaxtitan.data import PreparedDataService
 from jaxtitan.errors import ContractError
-from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch, place_replicated
+from jaxtitan.mesh import (
+    build_mesh_context,
+    build_sharding_plan,
+    place_batch,
+    place_replicated,
+    require_single_process_runtime,
+    validate_runtime_mesh_spec,
+)
 from jaxtitan.models import build_model
 from jaxtitan.optim import build_optimizer
 from jaxtitan.runtime.checkpoint_index import CheckpointIndex, load_checkpoint_index, record_checkpoint
 from jaxtitan.runtime.diagnostics import (
+    ARTIFACT_WRITER,
+    EXECUTION_MODE,
+    METRICS_SCOPE,
     PhaseTimer,
     build_runtime_diagnostics,
     enrich_eval_metrics,
@@ -61,6 +71,17 @@ class RunSummary:
     device_kind: str | None = None
     device_count: int | None = None
     runtime_diagnostics_path: str | None = None
+    execution_mode: str | None = None
+    metrics_scope: str | None = None
+    artifact_writer: str | None = None
+    data_axis_size: int | None = None
+    global_batch_size: int | None = None
+    per_device_batch_size: int | None = None
+    selected_device_count: int | None = None
+    global_device_count: int | None = None
+    process_count: int | None = None
+    process_index: int | None = None
+    single_process: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +95,8 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
     """Run the minimal local Jaxtitan training path for one TOML config."""
 
     spec = load_config(config_path)
+    require_single_process_runtime()
+    validate_runtime_mesh_spec(spec.mesh)
     if resume:
         if not spec.dirs.run_dir.exists():
             raise ContractError(f"cannot resume missing run directory: {spec.dirs.run_dir}")
@@ -82,7 +105,15 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
         manifest = initialize_run(config_path)
         writer = LocalArtifactWriter(manifest.run_dir)
     try:
-        writer.append_event({**_event("training_started", spec), "resume": resume})
+        writer.append_event(
+            {
+                **_event("training_started", spec),
+                "resume": resume,
+                "execution_mode": EXECUTION_MODE,
+                "metrics_scope": METRICS_SCOPE,
+                "artifact_writer": ARTIFACT_WRITER,
+            }
+        )
         summary = _run_training_initialized(spec, writer, resume=resume)
         writer.append_event(
             {
@@ -97,6 +128,12 @@ def run_training(config_path: str | Path, *, resume: bool = False) -> RunSummary
                 "steady_train_tokens_per_sec": summary.steady_train_tokens_per_sec,
                 "final_mfu": summary.final_mfu,
                 "avg_mfu": summary.avg_mfu,
+                "execution_mode": summary.execution_mode,
+                "metrics_scope": summary.metrics_scope,
+                "artifact_writer": summary.artifact_writer,
+                "data_axis_size": summary.data_axis_size,
+                "per_device_batch_size": summary.per_device_batch_size,
+                "selected_device_count": summary.selected_device_count,
             }
         )
         writer.write_summary(asdict(summary))
@@ -132,14 +169,14 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
     context = build_mesh_context(runtime_spec.mesh)
     sharding = build_sharding_plan(context)
     model = build_model(runtime_spec.model, seed=runtime_spec.seed)
-    runtime_diagnostics = build_runtime_diagnostics(runtime_spec, context, model.metadata)
+    runtime_diagnostics = build_runtime_diagnostics(runtime_spec, context, model.metadata, sharding=sharding)
     writer.write_runtime_diagnostics(runtime_diagnostics.payload)
     optimizer = build_optimizer(runtime_spec.optimizer, model.state, model.metadata)
     model_state = place_replicated(model.state, sharding)
     train_state = initialize_train_state(model_state, optimizer.transform, seed=runtime_spec.seed)
-    train_step = make_train_step(model.graph, optimizer)
+    train_step = make_train_step(model.graph, optimizer, sharding=sharding, state_template=train_state)
     eval_spec = _validation_eval_spec(runtime_spec)
-    eval_step = None if eval_spec is None else make_eval_step(model.graph)
+    eval_step = None if eval_spec is None else make_eval_step(model.graph, sharding=sharding, state_template=train_state.model)
     checkpoint_service = LocalOrbaxCheckpointService(runtime_spec.dirs.run_dir)
     checkpoint_index = load_checkpoint_index(runtime_spec.dirs.run_dir)
     checkpoint_service.set_protected_steps(checkpoint_index.protected_steps())
@@ -196,7 +233,7 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
                 train_state, metrics = train_step(train_state, placed_batch)
             metrics_sync_sec = sync_and_time(_train_sync_target(train_state, metrics))
             timer.add("metrics_sync", metrics_sync_sec)
-            base_row = _metrics_row(train_state, metrics, provenance)
+            base_row = _metrics_row(train_state, metrics, provenance, runtime_spec=runtime_spec, context=context)
             row = enrich_train_metrics(
                 base_row,
                 timings={
@@ -282,6 +319,9 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
             total_wall_sec=time.perf_counter() - run_started_at,
             runtime=runtime_diagnostics,
         )
+        runtime_summary = runtime_diagnostics.payload
+        mesh_summary = runtime_summary["mesh"]
+        jax_summary = runtime_summary["jax"]
 
         summary = RunSummary(
             run_id=runtime_spec.run_id,
@@ -307,6 +347,17 @@ def _run_training_initialized(spec: RunSpec, writer: LocalArtifactWriter, *, res
             device_kind=diagnostic_summary["device_kind"],
             device_count=diagnostic_summary["device_count"],
             runtime_diagnostics_path=diagnostic_summary["runtime_diagnostics_path"],
+            execution_mode=diagnostic_summary["execution_mode"],
+            metrics_scope=diagnostic_summary["metrics_scope"],
+            artifact_writer=diagnostic_summary["artifact_writer"],
+            data_axis_size=mesh_summary["data_axis_size"],
+            global_batch_size=mesh_summary["global_batch_size"],
+            per_device_batch_size=mesh_summary["per_device_batch_size"],
+            selected_device_count=mesh_summary["selected_device_count"],
+            global_device_count=jax_summary["global_device_count"],
+            process_count=jax_summary["process_count"],
+            process_index=jax_summary["process_index"],
+            single_process=jax_summary["process_count"] == 1,
         )
         return summary
     finally:
@@ -445,10 +496,17 @@ def _validation_eval_row(
     }
 
 
-def _metrics_row(train_state: TrainState, metrics: Any, provenance: Any) -> dict[str, Any]:
+def _metrics_row(
+    train_state: TrainState,
+    metrics: Any,
+    provenance: Any,
+    *,
+    runtime_spec: RunSpec | None = None,
+    context: Any | None = None,
+) -> dict[str, Any]:
     token_count = _scalar_int(metrics.token_count)
     loss_sum = _scalar_float(metrics.loss_sum)
-    return {
+    row = {
         "schema_version": 1,
         "step": _scalar_int(train_state.step),
         "tokens_seen": _scalar_int(train_state.tokens_seen),
@@ -465,6 +523,19 @@ def _metrics_row(train_state: TrainState, metrics: Any, provenance: Any) -> dict
         "examples": provenance.examples,
         "target_tokens": provenance.target_tokens,
     }
+    if runtime_spec is not None and context is not None:
+        data_axis_size = context.data_axis_size
+        per_device_batch_size = runtime_spec.training.global_batch_size // data_axis_size
+        row.update(
+            {
+                "data_axis_size": data_axis_size,
+                "global_batch_size": runtime_spec.training.global_batch_size,
+                "per_device_batch_size": per_device_batch_size,
+                "global_target_tokens": provenance.target_tokens,
+                "per_device_target_tokens": provenance.target_tokens // data_axis_size,
+            }
+        )
+    return row
 
 
 def _save_checkpoint(

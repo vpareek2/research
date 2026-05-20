@@ -81,6 +81,16 @@ def format_run_inspection(inspection: RunInspection) -> str:
             f"backend={diagnostics['jax_backend']} device={diagnostics['device_kind']} "
             f"devices={diagnostics['device_count']}"
         )
+        parallelism = diagnostics.get("parallelism")
+        if parallelism is not None:
+            batch = parallelism["batch"]
+            mesh = parallelism["mesh"]
+            lines.append(
+                "parallelism: "
+                f"mode={parallelism['execution_mode']} metrics={parallelism['metrics_scope']} "
+                f"artifacts={parallelism['artifact_writer']} data_axis={mesh['data_axis_size']} "
+                f"global_batch={batch['global_batch_size']} per_device_batch={batch['per_device_batch_size']}"
+            )
     latest = payload["latest_checkpoint"]
     best = payload["best_checkpoint"]
     lines.append(f"latest checkpoint: {_format_checkpoint_ref(latest)}")
@@ -142,8 +152,14 @@ def _diagnostics_summary(raw: Mapping[str, Any] | None) -> dict[str, Any] | None
         return None
     performance = raw.get("performance")
     jax_info = raw.get("jax")
+    parallelism = raw.get("parallelism")
+    sharding = raw.get("sharding")
     if not isinstance(performance, Mapping) or not isinstance(jax_info, Mapping):
         raise ContractError("runtime diagnostics must include performance and jax objects")
+    if parallelism is not None and not isinstance(parallelism, Mapping):
+        raise ContractError("runtime diagnostics parallelism must be an object")
+    if sharding is not None and not isinstance(sharding, Mapping):
+        raise ContractError("runtime diagnostics sharding must be an object")
     return {
         "path": "diagnostics/runtime.json",
         "jax_backend": jax_info.get("backend"),
@@ -154,6 +170,22 @@ def _diagnostics_summary(raw: Mapping[str, Any] | None) -> dict[str, Any] | None
         "flops_per_token": performance.get("flops_per_token"),
         "peak_flops_per_device": performance.get("peak_flops_per_device"),
         "peak_flops_total": performance.get("peak_flops_total"),
+        "parallelism": None if parallelism is None else _parallelism_summary(parallelism),
+        "sharding": sharding,
+    }
+
+
+def _parallelism_summary(raw: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "execution_mode": raw.get("execution_mode"),
+        "metrics_scope": raw.get("metrics_scope"),
+        "artifact_writer": raw.get("artifact_writer"),
+        "single_process": raw.get("single_process"),
+        "process": raw.get("process"),
+        "devices": raw.get("devices"),
+        "mesh": raw.get("mesh"),
+        "batch": raw.get("batch"),
+        "host_artifacts": raw.get("host_artifacts"),
     }
 
 

@@ -1,15 +1,29 @@
 import pytest
+import jax
+import numpy as np
 
+from jaxtitan.batch import Batch
+from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch
 from jaxtitan.runtime import diagnostics
 from jaxtitan.runtime.diagnostics import (
     PhaseTimer,
     enrich_train_metrics,
     estimate_flops_per_token,
     peak_flops_for_device,
+    placed_array_summary,
     sample_device_telemetry,
+    sharding_policy_summary,
     training_diagnostics_summary,
 )
+from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
+
+FAKE_DEVICE_COUNT = 4
+
+
+def require_fake_devices() -> None:
+    if jax.local_device_count() < FAKE_DEVICE_COUNT:
+        pytest.skip("JAX was initialized before fake CPU device flags were set")
 
 
 def test_phase_timer_records_named_phases_and_manual_additions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -71,6 +85,9 @@ def test_enrich_train_metrics_reports_timing_throughput_and_mfu() -> None:
     assert enriched["flops_per_sec"] == pytest.approx(2000.0)
     assert enriched["mfu"] == pytest.approx(100.0)
     assert enriched["device_memory_used_bytes"] == 123
+    assert enriched["execution_mode"] == "replicated_data_parallel"
+    assert enriched["metrics_scope"] == "global"
+    assert enriched["artifact_writer"] == "single_host"
 
 
 def test_enrich_train_metrics_keeps_mfu_null_when_peak_flops_unknown() -> None:
@@ -122,6 +139,41 @@ def test_sample_device_telemetry_aggregates_jax_memory_and_nvml() -> None:
     assert telemetry["gpu_temperature_c"] == pytest.approx(61.0)
 
 
+def test_sharding_policy_summary_records_data_parallel_policy() -> None:
+    require_fake_devices()
+    context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
+    plan = build_sharding_plan(context)
+
+    summary = sharding_policy_summary(plan)
+
+    assert summary["batch"]["input_ids"]["partition_spec"] == "PartitionSpec('data', None)"
+    assert summary["batch"]["loss_mask"]["partition_spec"] == "PartitionSpec('data', None)"
+    assert summary["train_state"]["model"]["partition_spec"] == "PartitionSpec()"
+    assert summary["optimizer_state"]["partition_spec"] == "PartitionSpec()"
+    assert summary["metrics"]["partition_spec"] == "PartitionSpec()"
+    assert summary["checkpoint"]["restore_template"]["partition_spec"] == "PartitionSpec()"
+    assert summary["reserved"] == {"fsdp": None, "tp": None, "kv_cache": None}
+
+
+def test_placed_array_summary_reports_global_and_shard_shapes() -> None:
+    require_fake_devices()
+    context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
+    plan = build_sharding_plan(context)
+    batch = Batch(
+        input_ids=np.arange(32, dtype=np.int32).reshape(8, 4),
+        target_ids=np.arange(32, 64, dtype=np.int32).reshape(8, 4),
+        loss_mask=np.ones((8, 4), dtype=np.bool_),
+    )
+
+    summary = placed_array_summary(place_batch(batch, plan).input_ids)
+
+    assert summary["global_shape"] == [8, 4]
+    assert summary["dtype"] == "int32"
+    assert summary["addressable_shard_count"] == 4
+    assert summary["unique_addressable_shard_shapes"] == [[2, 4]]
+    assert summary["sharding"]["partition_spec"] == "PartitionSpec('data', None)"
+
+
 def test_training_diagnostics_summary_uses_logged_rows_and_steady_state() -> None:
     runtime = {
         "performance": {
@@ -147,6 +199,9 @@ def test_training_diagnostics_summary_uses_logged_rows_and_steady_state() -> Non
     assert summary["avg_mfu"] == pytest.approx(2.0)
     assert summary["final_mfu"] == pytest.approx(3.0)
     assert summary["runtime_diagnostics_path"] == "diagnostics/runtime.json"
+    assert summary["execution_mode"] == "replicated_data_parallel"
+    assert summary["metrics_scope"] == "global"
+    assert summary["artifact_writer"] == "single_host"
 
 
 class _FakeDevice:

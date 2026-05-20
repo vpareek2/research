@@ -1,10 +1,18 @@
 import json
 from pathlib import Path
 
+import jax
 import pytest
 
-from jaxtitan.errors import ContractError
+from jaxtitan.errors import ConfigError, ContractError
 from jaxtitan.runtime.preflight import format_preflight_report, preflight_report_to_json, run_preflight
+
+FAKE_DEVICE_COUNT = 4
+
+
+def require_fake_devices() -> None:
+    if jax.local_device_count() < FAKE_DEVICE_COUNT:
+        pytest.skip("JAX was initialized before fake CPU device flags were set")
 
 
 def test_run_preflight_validates_full_runtime_path_without_artifacts(
@@ -40,6 +48,13 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert payload["eval"]["compile"] == "passed"
     assert payload["diagnostics"]["run_id"] == "loop"
     assert payload["diagnostics"]["jax"]["backend"]
+    assert payload["parallelism"]["execution_mode"] == "replicated_data_parallel"
+    assert payload["parallelism"]["metrics_scope"] == "global"
+    assert payload["parallelism"]["artifact_writer"] == "single_host"
+    assert payload["sharding"]["batch"]["input_ids"]["partition_spec"] == "PartitionSpec('data', None)"
+    assert payload["sharding"]["metrics"]["partition_spec"] == "PartitionSpec()"
+    assert payload["observed_sharding"]["first_train_batch"]["input_ids"]["global_shape"] == [2, 4]
+    assert payload["observed_sharding"]["train_state"]["replicated_leaf_count"] > 0
     assert payload["diagnostics"]["performance"]["flops_per_token"] > 0
     assert payload["diagnostics"]["device_telemetry"]["device_memory_used_bytes"] is None or isinstance(
         payload["diagnostics"]["device_telemetry"]["device_memory_used_bytes"], int
@@ -47,9 +62,37 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert decoded == payload
     assert "preflight: passed" in text
     assert "mesh:" in text
+    assert "parallelism:" in text
+    assert "mode=replicated_data_parallel" in text
     assert "devices:" in text
     assert "runtime:" in text
     assert "compile=passed" in text
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_accepts_four_device_data_axis_without_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("dp-preflight", shard_token_groups=(tuple(range(0, 80)),), train_tokens=50)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_preflight_config(manifest, axis_sizes=(4,), global_batch_size=8, target_tokens=32))
+
+    payload = run_preflight(config_path).payload
+
+    assert payload["devices"]["selected_device_count"] == 4
+    assert payload["devices"]["global_device_count"] >= 4
+    assert payload["devices"]["process_count"] == 1
+    assert payload["devices"]["single_process"] is True
+    assert payload["mesh"]["data_axis_size"] == 4
+    assert payload["training"]["global_batch_size"] == 8
+    assert payload["training"]["per_device_batch_size"] == 2
+    assert payload["training"]["per_device_target_tokens"] == 8
+    assert payload["diagnostics"]["mesh"]["per_device_batch_size"] == 2
+    assert payload["observed_sharding"]["first_train_batch"]["input_ids"]["unique_addressable_shard_shapes"] == [[2, 4]]
     assert not (tmp_path / "runs" / "loop").exists()
 
 
@@ -145,6 +188,65 @@ def test_run_preflight_rejects_insufficient_local_devices(
     assert not (tmp_path / "runs" / "loop").exists()
 
 
+def test_run_preflight_rejects_non_divisible_global_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("nondivisible", shard_token_groups=(tuple(range(0, 80)),), train_tokens=50)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_preflight_config(manifest, axis_sizes=(4,), global_batch_size=6, target_tokens=24))
+
+    with pytest.raises(ConfigError, match="data axis size"):
+        run_preflight(config_path)
+
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_rejects_reserved_parallel_axes_greater_than_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("reserved-axis", shard_token_groups=(tuple(range(0, 80)),), train_tokens=50)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            axis_names=("data", "tp"),
+            axis_sizes=(4, 2),
+            global_batch_size=8,
+            target_tokens=32,
+        )
+    )
+
+    with pytest.raises(ContractError, match="reserved for later"):
+        run_preflight(config_path)
+
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_rejects_multi_process_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("multi-process", shard_token_groups=(tuple(range(0, 30)),), train_tokens=25)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_preflight_config(manifest))
+    monkeypatch.setattr("jaxtitan.mesh.sharding.jax.process_count", lambda: 2)
+
+    with pytest.raises(ContractError, match="exactly one process"):
+        run_preflight(config_path)
+
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
 def test_run_preflight_rejects_missing_train_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -198,6 +300,7 @@ def _preflight_config(
     tokenizer_id: str = "toy-tokenizer",
     schedule_name: str = "constant",
     optimizer_name: str = "adamw",
+    axis_names: tuple[str, ...] = ("data",),
     axis_sizes: tuple[int, ...] = (1,),
     global_batch_size: int = 2,
     eval_every_steps: int | None = None,
@@ -258,7 +361,7 @@ log_every_steps = 1
 checkpoint_every_steps = 10
 
 [mesh]
-axis_names = ["data"]
+axis_names = [{", ".join(f'"{name}"' for name in axis_names)}]
 axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 {eval_block}
 """

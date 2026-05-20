@@ -7,11 +7,18 @@ import pytest
 
 from jaxtitan.batch import Batch
 from jaxtitan.errors import ContractError
-from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch
+from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch, place_replicated
 from jaxtitan.models import build_model
 from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.steps import causal_lm_loss, eval_step, make_eval_step
+
+FAKE_DEVICE_COUNT = 4
+
+
+def require_fake_devices() -> None:
+    if jax.local_device_count() < FAKE_DEVICE_COUNT:
+        pytest.skip("JAX was initialized before fake CPU device flags were set")
 
 
 def test_causal_lm_loss_matches_hand_computed_cross_entropy() -> None:
@@ -96,6 +103,22 @@ def test_make_eval_step_accepts_host_arrays_and_placed_batch() -> None:
 
     assert host_metrics.token_count == placed_metrics.token_count
     assert jnp.allclose(host_metrics.loss_sum, placed_metrics.loss_sum)
+
+
+def test_make_eval_step_with_data_axis_sharding_reports_global_metrics() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(), seed=1)
+    context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
+    plan = build_sharding_plan(context)
+    model_state = place_replicated(built.state, plan)
+    step = make_eval_step(built.graph, sharding=plan, state_template=model_state)
+    batch = _batch(batch_size=8, seq_len=4, vocab_size=16)
+
+    metrics = step(model_state, place_batch(batch, plan))
+
+    assert metrics.token_count == 32
+    assert metrics.loss_sum.shape == ()
+    assert metrics.loss_sum.sharding == plan.metrics
 
 
 def test_repeated_compiled_eval_calls_return_stable_shapes_and_dtypes() -> None:

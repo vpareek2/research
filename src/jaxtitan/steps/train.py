@@ -7,7 +7,9 @@ import jax
 import jax.numpy as jnp
 
 from jaxtitan.batch import Batch
+from jaxtitan.errors import ContractError
 from jaxtitan.metrics import StepMetrics
+from jaxtitan.mesh import ShardingPlan, replicated_shardings_like
 from jaxtitan.models import apply_model
 from jaxtitan.optim import OptimizerBuildResult, OptimizerTransform
 from jaxtitan.state import RngState, TrainState
@@ -42,11 +44,35 @@ def train_step(
 def make_train_step(
     graph: Any,
     optimizer: OptimizerBuildResult,
+    *,
+    sharding: ShardingPlan | None = None,
+    state_template: TrainState | None = None,
 ) -> Callable[[TrainState, Batch], tuple[TrainState, StepMetrics]]:
     """Create a compiled train callable bound to a static graph and optimizer."""
 
-    @jax.jit
-    def _compiled(
+    if sharding is not None and state_template is None:
+        raise ContractError("state_template is required when compiling train step with explicit shardings")
+    state_sharding = None if sharding is None else replicated_shardings_like(state_template, sharding)
+    in_shardings = None
+    out_shardings = None
+    if sharding is not None:
+        in_shardings = (
+            state_sharding,
+            sharding.batch.input_ids,
+            sharding.batch.target_ids,
+            sharding.batch.loss_mask,
+        )
+        out_shardings = (
+            state_sharding,
+            sharding.metrics,
+            sharding.metrics,
+            sharding.metrics,
+            sharding.metrics,
+            sharding.metrics,
+            sharding.metrics,
+        )
+
+    def _compiled_impl(
         state: TrainState,
         input_ids: Any,
         target_ids: Any,
@@ -73,6 +99,8 @@ def make_train_step(
         param_norm = _tree_l2_norm(next_model)
         update_norm = _tree_l2_norm(updates)
         return next_state, loss_sum, token_count, lr, grad_norm, param_norm, update_norm
+
+    _compiled = jax.jit(_compiled_impl, in_shardings=in_shardings, out_shardings=out_shardings)
 
     def _train(state: TrainState, batch: Batch) -> tuple[TrainState, StepMetrics]:
         _validate_batch(batch)

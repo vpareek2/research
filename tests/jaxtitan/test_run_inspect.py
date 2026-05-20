@@ -34,10 +34,20 @@ def test_inspect_run_reports_summary_checkpoints_and_recent_metrics(
     assert payload["diagnostics"]["path"] == "diagnostics/runtime.json"
     assert payload["diagnostics"]["jax_backend"]
     assert payload["diagnostics"]["flops_per_token"] > 0
+    assert payload["diagnostics"]["parallelism"]["execution_mode"] == "replicated_data_parallel"
+    assert payload["diagnostics"]["parallelism"]["metrics_scope"] == "global"
+    assert payload["diagnostics"]["parallelism"]["artifact_writer"] == "single_host"
+    assert payload["diagnostics"]["parallelism"]["mesh"]["data_axis_size"] == 1
+    assert payload["diagnostics"]["parallelism"]["batch"]["global_batch_size"] == 2
+    assert payload["diagnostics"]["parallelism"]["batch"]["per_device_batch_size"] == 2
+    assert payload["diagnostics"]["sharding"]["batch"]["input_ids"]["partition_spec"] == "PartitionSpec('data', None)"
     assert payload["recent_train_metrics"][-1]["step"] == 2
     assert payload["recent_eval_metrics"][-1]["eval_name"] == "validation"
     assert "run: loop" in text
     assert "runtime:" in text
+    assert "parallelism:" in text
+    assert "mode=replicated_data_parallel" in text
+    assert "artifacts=single_host" in text
     assert "best checkpoint:" in text
     assert json.loads(run_inspection_to_json(inspection))["run_id"] == "loop"
 

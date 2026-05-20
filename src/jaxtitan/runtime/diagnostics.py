@@ -20,6 +20,9 @@ from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.run import RunSpec
 
 SECONDS_PER_DEVICE_HOUR = 3600.0
+EXECUTION_MODE = "replicated_data_parallel"
+METRICS_SCOPE = "global"
+ARTIFACT_WRITER = "single_host"
 
 # BF16 dense peak FLOPs. More-specific patterns must come before broad ones.
 BF16_PEAK_FLOPS_TABLE = (
@@ -130,7 +133,13 @@ def peak_flops_for_device(device_name: str | None) -> float | None:
     return None
 
 
-def build_runtime_diagnostics(spec: RunSpec, context: Any, metadata: tuple[ParamMetadata, ...]) -> RuntimeDiagnostics:
+def build_runtime_diagnostics(
+    spec: RunSpec,
+    context: Any,
+    metadata: tuple[ParamMetadata, ...],
+    *,
+    sharding: Any | None = None,
+) -> RuntimeDiagnostics:
     """Build the canonical runtime diagnostics payload for a run/preflight."""
 
     device_kind = selected_device_kind(context.devices)
@@ -156,16 +165,25 @@ def build_runtime_diagnostics(spec: RunSpec, context: Any, metadata: tuple[Param
         },
         "jax": {
             "backend": jax.default_backend(),
-            "process_count": jax.process_count(),
-            "process_index": jax.process_index(),
-            "local_device_count": jax.local_device_count(),
-            "global_device_count": jax.device_count(),
+            "process_count": context.process_count,
+            "process_index": context.process_index,
+            "single_process": context.process_count == 1,
+            "local_device_count": context.local_device_count,
+            "global_device_count": context.global_device_count,
+            "selected_device_count": device_count,
+            "addressable_device_count": len(jax.local_devices()),
         },
         "mesh": {
             "axis_names": list(spec.mesh.axis_names),
             "axis_sizes": list(spec.mesh.axis_sizes),
             "data_axis_size": context.data_axis_size,
+            "global_mesh_size": _product(spec.mesh.axis_sizes),
             "selected_device_count": device_count,
+            "selected_addressable_device_count": device_count,
+            "global_batch_size": spec.training.global_batch_size,
+            "per_device_batch_size": spec.training.global_batch_size // context.data_axis_size,
+            "global_tokens_per_step": spec.training.global_batch_size * spec.training.seq_len,
+            "per_device_tokens_per_step": (spec.training.global_batch_size * spec.training.seq_len) // context.data_axis_size,
             "selected_devices": [_device_summary(device) for device in context.devices],
         },
         "model": {
@@ -183,9 +201,103 @@ def build_runtime_diagnostics(spec: RunSpec, context: Any, metadata: tuple[Param
             "peak_flops_per_device": peak_flops_per_device,
             "peak_flops_total": peak_flops_total,
         },
+        "parallelism": parallelism_summary(spec, context),
+        "sharding": None if sharding is None else sharding_policy_summary(sharding),
         "device_telemetry": sample_device_telemetry(context.devices),
     }
     return RuntimeDiagnostics(payload=_normalize(payload))
+
+
+def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
+    """Summarize the runtime execution and artifact policy."""
+
+    global_tokens_per_step = spec.training.global_batch_size * spec.training.seq_len
+    return _normalize(
+        {
+            "schema_version": 1,
+            "execution_mode": EXECUTION_MODE,
+            "metrics_scope": METRICS_SCOPE,
+            "artifact_writer": ARTIFACT_WRITER,
+            "single_process": context.process_count == 1,
+            "process": {
+                "count": context.process_count,
+                "index": context.process_index,
+            },
+            "devices": {
+                "selected": len(context.devices),
+                "local": context.local_device_count,
+                "global": context.global_device_count,
+                "addressable": len(jax.local_devices()),
+            },
+            "mesh": {
+                "axis_names": list(spec.mesh.axis_names),
+                "axis_sizes": list(spec.mesh.axis_sizes),
+                "data_axis_size": context.data_axis_size,
+            },
+            "batch": {
+                "global_batch_size": spec.training.global_batch_size,
+                "per_device_batch_size": spec.training.global_batch_size // context.data_axis_size,
+                "global_tokens_per_step": global_tokens_per_step,
+                "per_device_tokens_per_step": global_tokens_per_step // context.data_axis_size,
+            },
+            "host_artifacts": {
+                "writer": ARTIFACT_WRITER,
+                "records": METRICS_SCOPE,
+            },
+        }
+    )
+
+
+def sharding_policy_summary(plan: Any) -> dict[str, Any]:
+    """Summarize intended shardings without dumping large trees."""
+
+    replicated = _sharding_summary(plan.replicated)
+    return _normalize(
+        {
+            "schema_version": 1,
+            "batch": {
+                "input_ids": _sharding_summary(plan.batch.input_ids),
+                "target_ids": _sharding_summary(plan.batch.target_ids),
+                "loss_mask": _sharding_summary(plan.batch.loss_mask),
+            },
+            "train_state": {
+                "step": replicated,
+                "tokens_seen": replicated,
+                "model": replicated,
+                "opt_state": replicated,
+                "rng": replicated,
+                "schedule_state": replicated,
+            },
+            "model_state": replicated,
+            "optimizer_state": replicated,
+            "rng": replicated,
+            "metrics": _sharding_summary(plan.metrics),
+            "checkpoint": {
+                "restore_template": replicated,
+            },
+            "reserved": {
+                "fsdp": None,
+                "tp": None,
+                "kv_cache": None,
+            },
+        }
+    )
+
+
+def placed_array_summary(value: Any) -> dict[str, Any]:
+    """Summarize one placed array's global and addressable shard shape."""
+
+    shards = tuple(getattr(value, "addressable_shards", ()) or ())
+    shard_shapes = sorted({tuple(int(dim) for dim in shard.data.shape) for shard in shards})
+    return _normalize(
+        {
+            "global_shape": tuple(int(dim) for dim in getattr(value, "shape", ())),
+            "dtype": str(getattr(value, "dtype", "unknown")),
+            "sharding": _sharding_summary(getattr(value, "sharding", None)),
+            "addressable_shard_count": len(shards),
+            "unique_addressable_shard_shapes": shard_shapes,
+        }
+    )
 
 
 def selected_device_kind(devices: Sequence[Any]) -> str:
@@ -241,6 +353,9 @@ def enrich_train_metrics(
     enriched = dict(row)
     enriched.update(
         {
+            "execution_mode": EXECUTION_MODE,
+            "metrics_scope": METRICS_SCOPE,
+            "artifact_writer": ARTIFACT_WRITER,
             "data_sec": data_sec,
             "placement_sec": placement_sec,
             "train_dispatch_sec": train_dispatch_sec,
@@ -299,6 +414,9 @@ def training_diagnostics_summary(
             "device_kind": performance["device_kind"],
             "device_count": performance["device_count"],
             "runtime_diagnostics_path": "diagnostics/runtime.json",
+            "execution_mode": EXECUTION_MODE,
+            "metrics_scope": METRICS_SCOPE,
+            "artifact_writer": ARTIFACT_WRITER,
         }
     )
 
@@ -417,6 +535,33 @@ def _device_summary(device: Any) -> dict[str, Any]:
         "device_kind": str(getattr(device, "device_kind", "unknown")),
         "process_index": getattr(device, "process_index", None),
     }
+
+
+def _sharding_summary(sharding: Any) -> dict[str, Any] | None:
+    if sharding is None:
+        return None
+    return {
+        "type": type(sharding).__name__,
+        "partition_spec": _partition_spec_string(getattr(sharding, "spec", None)),
+    }
+
+
+def _partition_spec_string(spec: Any) -> str | None:
+    if spec is None:
+        return None
+    text = str(spec)
+    if text == "P()":
+        return "PartitionSpec()"
+    if text.startswith("P("):
+        return f"PartitionSpec({text[2:]}"
+    return text
+
+
+def _product(values: Sequence[int]) -> int:
+    product = 1
+    for value in values:
+        product *= int(value)
+    return product
 
 
 def _package_version(name: str) -> str | None:

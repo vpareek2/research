@@ -24,10 +24,17 @@ class MeshContext:
     mesh: Mesh
     devices: tuple[Any, ...]
     local_device_count: int
+    global_device_count: int
+    process_count: int
+    process_index: int
 
     @property
     def data_axis_size(self) -> int:
         return self.spec.axis_sizes[self.spec.axis_names.index("data")]
+
+    @property
+    def selected_device_count(self) -> int:
+        return len(self.devices)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +60,7 @@ class ShardingPlan:
 def build_mesh_context(spec: MeshSpec, devices: tuple[Any, ...] | list[Any] | None = None) -> MeshContext:
     """Build a local JAX mesh from a static MeshSpec."""
 
-    _validate_supported_spec(spec)
+    validate_runtime_mesh_spec(spec)
     available_devices = tuple(jax.local_devices() if devices is None else devices)
     requested_devices = reduce(mul, spec.axis_sizes, 1)
     if requested_devices > len(available_devices):
@@ -68,6 +75,9 @@ def build_mesh_context(spec: MeshSpec, devices: tuple[Any, ...] | list[Any] | No
         mesh=mesh,
         devices=selected,
         local_device_count=len(available_devices),
+        global_device_count=jax.device_count(),
+        process_count=jax.process_count(),
+        process_index=jax.process_index(),
     )
 
 
@@ -114,6 +124,29 @@ def place_replicated(tree: Any, plan: ShardingPlan) -> Any:
     """Place every PyTree leaf with replicated sharding."""
 
     return jax.tree.map(lambda leaf: jax.device_put(leaf, plan.replicated), tree)
+
+
+def replicated_shardings_like(tree: Any, plan: ShardingPlan) -> Any:
+    """Build a replicated sharding PyTree matching a runtime state tree."""
+
+    return jax.tree.map(lambda _leaf: plan.replicated, tree)
+
+
+def require_single_process_runtime() -> None:
+    """Fail until host-side data partitioning is implemented."""
+
+    process_count = jax.process_count()
+    if process_count != 1:
+        raise ContractError(
+            "distributed multi-process runtime is not supported yet; "
+            f"jax.process_count() is {process_count}, but this slice supports exactly one process"
+        )
+
+
+def validate_runtime_mesh_spec(spec: MeshSpec) -> None:
+    """Validate the mesh axes currently supported by the runtime."""
+
+    _validate_supported_spec(spec)
 
 
 def _validate_supported_spec(spec: MeshSpec) -> None:

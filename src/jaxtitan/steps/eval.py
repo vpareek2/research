@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from jaxtitan.batch import Batch
 from jaxtitan.errors import ContractError
 from jaxtitan.metrics import EvalMetrics
+from jaxtitan.mesh import ShardingPlan, replicated_shardings_like
 from jaxtitan.models import apply_model
 
 
@@ -41,14 +42,34 @@ def eval_step(graph: Any, state: Any, batch: Batch) -> EvalMetrics:
     return make_eval_step(graph)(state, batch)
 
 
-def make_eval_step(graph: Any) -> Callable[[Any, Batch], EvalMetrics]:
+def make_eval_step(
+    graph: Any,
+    *,
+    sharding: ShardingPlan | None = None,
+    state_template: Any | None = None,
+) -> Callable[[Any, Batch], EvalMetrics]:
     """Create a compiled eval callable bound to a static model graph."""
 
-    @jax.jit
-    def _compiled(state: Any, input_ids: Any, target_ids: Any, loss_mask: Any) -> tuple[Any, Any]:
+    if sharding is not None and state_template is None:
+        raise ContractError("state_template is required when compiling eval step with explicit shardings")
+    state_sharding = None if sharding is None else replicated_shardings_like(state_template, sharding)
+    in_shardings = None
+    out_shardings = None
+    if sharding is not None:
+        in_shardings = (
+            state_sharding,
+            sharding.batch.input_ids,
+            sharding.batch.target_ids,
+            sharding.batch.loss_mask,
+        )
+        out_shardings = (sharding.metrics, sharding.metrics)
+
+    def _compiled_impl(state: Any, input_ids: Any, target_ids: Any, loss_mask: Any) -> tuple[Any, Any]:
         logits = apply_model(graph, state, input_ids)
         loss = causal_lm_loss(logits, target_ids, loss_mask)
         return loss.loss_sum, loss.token_count
+
+    _compiled = jax.jit(_compiled_impl, in_shardings=in_shardings, out_shardings=out_shardings)
 
     def _eval(state: Any, batch: Batch) -> EvalMetrics:
         _validate_batch(batch)
