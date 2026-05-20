@@ -64,11 +64,14 @@ class OptimizerSpec:
     schedule: ScheduleSpec
     weight_decay: float = 0.0
     grad_clip_norm: float | None = None
+    adamw_fallback_schedule: ScheduleSpec | None = None
     route_rules: tuple[ParamRouteRule, ...] = ()
 
     def __post_init__(self) -> None:
         if self.name not in _OPTIMIZER_NAMES:
             raise ContractError(f"optimizer.name must be one of {sorted(_OPTIMIZER_NAMES)}, got {self.name!r}")
+        if self.name != "muon" and self.adamw_fallback_schedule is not None:
+            raise ContractError("optimizer.adamw_fallback_schedule is only supported when optimizer.name is 'muon'")
         if self.weight_decay < 0:
             raise ContractError(f"optimizer.weight_decay must be non-negative, got {self.weight_decay}")
         if self.grad_clip_norm is not None and self.grad_clip_norm <= 0:

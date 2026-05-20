@@ -68,6 +68,9 @@ def run_spec_from_mapping(raw: Mapping[str, Any]) -> RunSpec:
                 schedule=ScheduleSpec(**asdict(optimizer_section.schedule)),
                 weight_decay=optimizer_section.weight_decay,
                 grad_clip_norm=optimizer_section.grad_clip_norm,
+                adamw_fallback_schedule=None
+                if optimizer_section.adamw_fallback_schedule is None
+                else ScheduleSpec(**asdict(optimizer_section.adamw_fallback_schedule)),
             ),
             data=DataSpec(**asdict(data_section)),
             mesh=MeshSpec(axis_names=mesh_section.axis_names, axis_sizes=mesh_section.axis_sizes),
@@ -137,11 +140,15 @@ def _model_section(raw: Mapping[str, Any]) -> TomlModelSection:
 
 
 def _optimizer_section(raw: Mapping[str, Any]) -> TomlOptimizerSection:
+    fallback_raw = raw.get("adamw_fallback_schedule")
     return TomlOptimizerSection(
         name=_required_str(raw, "name", "optimizer"),
         schedule=_schedule_section(_required_mapping(raw, "schedule")),
         weight_decay=float(raw.get("weight_decay", 0.0)),
         grad_clip_norm=_optional_float(raw, "grad_clip_norm", "optimizer"),
+        adamw_fallback_schedule=None
+        if fallback_raw is None
+        else _schedule_section(_ensure_mapping(fallback_raw, "optimizer.adamw_fallback_schedule")),
     )
 
 

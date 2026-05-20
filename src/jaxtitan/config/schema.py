@@ -46,6 +46,7 @@ class TomlOptimizerSection:
     schedule: TomlScheduleSection
     weight_decay: float = 0.0
     grad_clip_norm: float | None = None
+    adamw_fallback_schedule: TomlScheduleSection | None = None
 
 
 @dataclass(frozen=True, slots=True)

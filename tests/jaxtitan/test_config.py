@@ -104,6 +104,39 @@ def test_load_config_accepts_explicit_model_runtime_fields(tmp_path: Path) -> No
     assert spec.model.remat == "block"
 
 
+def test_load_config_accepts_muon_fallback_schedule(tmp_path: Path) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "adamw"', 'name = "muon"', 1)
+        + """
+[optimizer.adamw_fallback_schedule]
+name = "constant"
+peak_lr = 0.0006
+"""
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.optimizer.name == "muon"
+    assert spec.optimizer.adamw_fallback_schedule is not None
+    assert spec.optimizer.adamw_fallback_schedule.peak_lr == 0.0006
+
+
+def test_load_config_rejects_fallback_schedule_for_non_muon(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG
+        + """
+[optimizer.adamw_fallback_schedule]
+name = "constant"
+peak_lr = 0.0006
+"""
+    )
+
+    with pytest.raises(ConfigError, match="adamw_fallback_schedule"):
+        load_config(config_path)
+
+
 def test_load_config_rejects_invalid_remat_policy(tmp_path: Path) -> None:
     config_path = tmp_path / "bad.toml"
     config_path.write_text(MINIMAL_CONFIG.replace('variant = "tiny"', 'variant = "tiny"\nremat = "layer"'))

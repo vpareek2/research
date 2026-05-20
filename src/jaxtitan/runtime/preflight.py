@@ -225,6 +225,9 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
             "schedule": runtime_spec.optimizer.schedule.name,
             "peak_lr": runtime_spec.optimizer.schedule.peak_lr,
             "total_steps": runtime_spec.optimizer.schedule.total_steps,
+            "adamw_fallback_peak_lr": None
+            if runtime_spec.optimizer.adamw_fallback_schedule is None
+            else runtime_spec.optimizer.adamw_fallback_schedule.peak_lr,
             "description": optimizer.description,
             "policy": runtime_diagnostics.payload["optimizer"],
         },
@@ -329,6 +332,7 @@ def format_preflight_report(report: PreflightReport) -> str:
             "optimizer: "
             f"{optimizer['name']} schedule={optimizer['schedule']} "
             f"peak_lr={optimizer['peak_lr']} total_steps={optimizer['total_steps']} "
+            f"adamw_fallback_peak_lr={optimizer['adamw_fallback_peak_lr']} "
             f"routes={optimizer['policy']['route_counts']}"
         ),
         (

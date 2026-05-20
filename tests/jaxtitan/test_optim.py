@@ -139,6 +139,34 @@ def test_muon_build_init_and_update_accept_nnx_model_state() -> None:
     assert any(jnp.any(leaf != 0) for leaf in jax.tree.leaves(updates))
 
 
+def test_muon_adamw_fallback_can_use_separate_schedule() -> None:
+    params = {
+        "matrix": jnp.ones((2, 3), dtype=jnp.float32),
+        "head": jnp.ones((3,), dtype=jnp.float32),
+    }
+    grads = jax.tree.map(jnp.zeros_like, params)
+    metadata = (
+        ParamMetadata(path=("matrix",), shape=(2, 3), dtype="float32", count=6, tag="attention_q"),
+        ParamMetadata(path=("head",), shape=(3,), dtype="float32", count=3, tag="lm_head"),
+    )
+    built = build_optimizer(
+        OptimizerSpec(
+            name="muon",
+            schedule=ScheduleSpec(peak_lr=0.02),
+            adamw_fallback_schedule=ScheduleSpec(peak_lr=0.001),
+            weight_decay=0.1,
+        ),
+        params,
+        metadata,
+    )
+
+    opt_state = built.transform.init(params)
+    updates, _next_opt_state = built.transform.update(grads, opt_state, params=params)
+
+    assert built.adamw_fallback_schedule is not None
+    assert updates["head"] == pytest.approx(jnp.full((3,), -0.0001))
+
+
 def test_muon_momentum_matches_reference_convention() -> None:
     params = {"w": jnp.ones((2, 3), dtype=jnp.float32)}
     grads = {"w": jnp.full((2, 3), 2.0, dtype=jnp.float32)}
@@ -283,9 +311,17 @@ def test_describe_optimizer_includes_backend_schedule_and_adamw_defaults() -> No
 
 
 def test_describe_optimizer_includes_muon_policy_constants() -> None:
-    description = describe_optimizer(OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=0.001)))
+    description = describe_optimizer(
+        OptimizerSpec(
+            name="muon",
+            schedule=ScheduleSpec(peak_lr=0.02),
+            adamw_fallback_schedule=ScheduleSpec(peak_lr=0.001),
+        )
+    )
 
     assert "muon" in description
+    assert "peak_lr=0.02" in description
+    assert "adamw_fallback_schedule=constant:peak_lr=0.001" in description
     assert "muon_momentum=0.95" in description
     assert "muon_ns_steps=5" in description
     assert "muon_scale_mode=match_rms_adamw" in description

@@ -39,6 +39,9 @@ def run_spec_from_resolved_mapping(raw: Mapping[str, Any]) -> RunSpec:
             schedule=ScheduleSpec(**dict(_required_mapping(optimizer_raw, "schedule"))),
             weight_decay=float(optimizer_raw.get("weight_decay", 0.0)),
             grad_clip_norm=_optional_float(optimizer_raw, "grad_clip_norm", "optimizer"),
+            adamw_fallback_schedule=None
+            if optimizer_raw.get("adamw_fallback_schedule") is None
+            else ScheduleSpec(**dict(_required_mapping(optimizer_raw, "adamw_fallback_schedule"))),
             route_rules=tuple(
                 ParamRouteRule(**dict(_require_mapping(rule, "optimizer.route_rules[]")))
                 for rule in _optional_list(optimizer_raw, "route_rules")

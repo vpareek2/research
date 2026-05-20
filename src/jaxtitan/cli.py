@@ -3,13 +3,14 @@
 import argparse
 from collections.abc import Sequence
 from pathlib import Path
+import shutil
 import sys
 import time
 from typing import Any
 
 from jaxtitan import __version__
 from jaxtitan.config import load_config, run_spec_to_json
-from jaxtitan.errors import JaxtitanError
+from jaxtitan.errors import ContractError, JaxtitanError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser = run_commands.add_parser("train", help="Run a minimal local training loop from a TOML config.")
     train_parser.add_argument("path", help="Path to a Jaxtitan TOML config.")
     train_parser.add_argument("--resume", action="store_true", help="Resume from the latest local checkpoint.")
+    train_parser.add_argument("--overwrite", action="store_true", help="Delete an existing fresh-run directory before training.")
 
     inspect_parser = run_commands.add_parser("inspect", help="Inspect local run artifacts.")
     inspect_parser.add_argument("run_dir", help="Path to a local Jaxtitan run directory.")
@@ -121,6 +123,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "run" and args.run_command == "train":
             from jaxtitan.runtime import run_training
 
+            if not args.resume:
+                _prepare_fresh_train_run(args.path, overwrite=args.overwrite)
             run_training(args.path, resume=args.resume, progress=_training_progress_printer())
             return 0
 
@@ -174,6 +178,25 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser.print_help()
     return 0
+
+
+def _prepare_fresh_train_run(config_path: str | Path, *, overwrite: bool) -> None:
+    spec = load_config(config_path)
+    run_dir = spec.dirs.run_dir
+    if not run_dir.exists():
+        return
+    if overwrite:
+        shutil.rmtree(run_dir)
+        return
+    if not sys.stdin.isatty():
+        raise ContractError(
+            f"run directory already exists: {run_dir}; rerun with --overwrite to replace it"
+        )
+    print(f"run directory already exists: {run_dir}", file=sys.stderr)
+    answer = input("Overwrite this run directory? [y/N] ")
+    if answer.strip().lower() not in {"y", "yes"}:
+        raise ContractError(f"run directory already exists: {run_dir}")
+    shutil.rmtree(run_dir)
 
 
 def _training_progress_printer():

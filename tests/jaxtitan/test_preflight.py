@@ -157,13 +157,16 @@ def test_run_preflight_accepts_muon_optimizer(
     monkeypatch.chdir(tmp_path)
     manifest = prepared_dataset_factory("muon", shard_token_groups=(tuple(range(0, 50)),), train_tokens=25)
     config_path = tmp_path / "jaxtitan.toml"
-    config_path.write_text(_preflight_config(manifest, optimizer_name="muon"))
+    config_path.write_text(_preflight_config(manifest, optimizer_name="muon", adamw_fallback_peak_lr=0.001))
 
     report = run_preflight(config_path)
     payload = report.payload
     text = format_preflight_report(report)
 
     assert payload["optimizer"]["name"] == "muon"
+    assert payload["optimizer"]["peak_lr"] == 0.02
+    assert payload["optimizer"]["adamw_fallback_peak_lr"] == 0.001
+    assert payload["optimizer"]["policy"]["adamw_fallback_schedule"]["peak_lr"] == 0.001
     assert payload["optimizer"]["policy"]["route_counts"] == {"adamw": 7, "muon": 7}
     assert payload["optimizer"]["policy"]["fallback_counts"] == {
         "embedding": 1,
@@ -171,6 +174,7 @@ def test_run_preflight_accepts_muon_optimizer(
         "norm": 5,
     }
     assert payload["diagnostics"]["optimizer"] == payload["optimizer"]["policy"]
+    assert "adamw_fallback_peak_lr=0.001" in text
     assert "routes={'adamw': 7, 'muon': 7}" in text
     assert not (tmp_path / "runs" / "loop").exists()
 
@@ -496,6 +500,7 @@ def _preflight_config(
     tokenizer_id: str = "toy-tokenizer",
     schedule_name: str = "constant",
     optimizer_name: str = "adamw",
+    adamw_fallback_peak_lr: float | None = None,
     axis_names: tuple[str, ...] = ("data",),
     axis_sizes: tuple[int, ...] = (1,),
     global_batch_size: int = 2,
@@ -516,6 +521,13 @@ def _preflight_config(
     shuffle_seed_line = "" if shuffle_seed is None else f"shuffle_seed = {shuffle_seed}\n"
     document_buffer_size_line = "" if document_buffer_size is None else f"document_buffer_size = {document_buffer_size}\n"
     document_refill_size_line = "" if document_refill_size is None else f"document_refill_size = {document_refill_size}\n"
+    fallback_schedule_block = ""
+    if adamw_fallback_peak_lr is not None:
+        fallback_schedule_block = f"""
+[optimizer.adamw_fallback_schedule]
+name = "{schedule_name}"
+peak_lr = {adamw_fallback_peak_lr}
+"""
     eval_block = ""
     if eval_every_steps is not None:
         eval_block = f"""
@@ -556,7 +568,8 @@ weight_decay = 0.0
 
 [optimizer.schedule]
 name = "{schedule_name}"
-peak_lr = 0.001
+peak_lr = {0.02 if optimizer_name == "muon" else 0.001}
+{fallback_schedule_block}
 
 [data]
 train_manifest = "{train_manifest.as_posix()}"

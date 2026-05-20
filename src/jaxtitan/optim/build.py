@@ -24,6 +24,7 @@ ADAMW_B1 = 0.9
 ADAMW_B2 = 0.999
 ADAMW_EPS = 1e-8
 _SUPPORTED_RUNTIME_BACKENDS = {"adamw", "muon"}
+# Next optimizer backends to evaluate after Muon has run artifacts: Aurora, Scion, and SOAP.
 _MUON_TAGS = frozenset(
     {
         "attention_q",
@@ -73,6 +74,7 @@ class OptimizerBuildResult:
 
     transform: OptimizerTransform
     schedule: Callable[[Any], jax.Array]
+    adamw_fallback_schedule: Callable[[Any], jax.Array] | None
     route_assignments: tuple[RouteAssignment, ...]
     description: str
 
@@ -126,6 +128,9 @@ def build_optimizer(
     metadata = tuple(metadata)
     assignments = _route_assignments(spec, metadata)
     schedule = build_lr_schedule(spec.schedule)
+    adamw_fallback_schedule = None
+    if spec.adamw_fallback_schedule is not None:
+        adamw_fallback_schedule = build_lr_schedule(spec.adamw_fallback_schedule)
     _validate_assignment_paths(model_state, assignments)
 
     transforms = []
@@ -135,7 +140,15 @@ def build_optimizer(
     if spec.name == "adamw":
         transforms.append(_adamw_transform(schedule, spec, assignments, model_state))
     elif spec.name == "muon":
-        transforms.extend(_muon_primary_transforms(schedule, spec, assignments, model_state))
+        transforms.extend(
+            _muon_primary_transforms(
+                schedule,
+                adamw_fallback_schedule if adamw_fallback_schedule is not None else schedule,
+                spec,
+                assignments,
+                model_state,
+            )
+        )
     else:
         raise ContractError(
             f"optimizer.name {spec.name!r} is valid config but has no Jaxtitan runtime adapter yet; "
@@ -146,6 +159,7 @@ def build_optimizer(
     return OptimizerBuildResult(
         transform=transform,
         schedule=schedule,
+        adamw_fallback_schedule=adamw_fallback_schedule,
         route_assignments=assignments,
         description=describe_optimizer(spec),
     )
@@ -157,10 +171,12 @@ def describe_optimizer(spec: OptimizerSpec) -> str:
     clip = "none" if spec.grad_clip_norm is None else f"{spec.grad_clip_norm:g}"
     total = "none" if spec.schedule.total_steps is None else str(spec.schedule.total_steps)
     stable = "none" if spec.schedule.stable_steps is None else str(spec.schedule.stable_steps)
+    fallback_schedule = _schedule_description(spec.adamw_fallback_schedule)
     return (
         f"{spec.name} schedule={spec.schedule.name} peak_lr={spec.schedule.peak_lr:g} "
         f"warmup_steps={spec.schedule.warmup_steps} total_steps={total} "
         f"min_lr_ratio={spec.schedule.min_lr_ratio:g} stable_steps={stable} "
+        f"adamw_fallback_schedule={fallback_schedule} "
         f"weight_decay={spec.weight_decay:g} grad_clip_norm={clip} "
         f"adamw_b1={ADAMW_B1:g} adamw_b2={ADAMW_B2:g} adamw_eps={ADAMW_EPS:g}"
         f"{_muon_description_suffix(spec)}"
@@ -176,6 +192,10 @@ def optimizer_policy_summary(
     assignments = None if assignments is None else tuple(assignments)
     payload = {
         "name": spec.name,
+        "schedule": _schedule_payload(spec.schedule),
+        "adamw_fallback_schedule": None
+        if spec.adamw_fallback_schedule is None
+        else _schedule_payload(spec.adamw_fallback_schedule),
         "supported_runtime_backends": sorted(_SUPPORTED_RUNTIME_BACKENDS),
         "adamw": {
             "b1": ADAMW_B1,
@@ -270,6 +290,7 @@ def _adamw_transform(
 
 def _muon_primary_transforms(
     schedule: Callable[[Any], jax.Array],
+    adamw_fallback_schedule: Callable[[Any], jax.Array],
     spec: OptimizerSpec,
     assignments: tuple[RouteAssignment, ...],
     params: PyTree,
@@ -311,7 +332,7 @@ def _muon_primary_transforms(
         transforms.append(
             optax.masked(
                 optax.adamw(
-                    learning_rate=schedule,
+                    learning_rate=adamw_fallback_schedule,
                     b1=ADAMW_B1,
                     b2=ADAMW_B2,
                     eps=ADAMW_EPS,
@@ -403,6 +424,28 @@ def _muon_description_suffix(spec: OptimizerSpec) -> str:
         f"muon_rms_match_scale={constants['rms_match_scale']:g} "
         "adamw_fallback=true"
     )
+
+
+def _schedule_description(spec: ScheduleSpec | None) -> str:
+    if spec is None:
+        return "same"
+    total = "none" if spec.total_steps is None else str(spec.total_steps)
+    stable = "none" if spec.stable_steps is None else str(spec.stable_steps)
+    return (
+        f"{spec.name}:peak_lr={spec.peak_lr:g}:warmup_steps={spec.warmup_steps}:"
+        f"total_steps={total}:min_lr_ratio={spec.min_lr_ratio:g}:stable_steps={stable}"
+    )
+
+
+def _schedule_payload(spec: ScheduleSpec) -> dict[str, Any]:
+    return {
+        "name": spec.name,
+        "peak_lr": spec.peak_lr,
+        "warmup_steps": spec.warmup_steps,
+        "total_steps": spec.total_steps,
+        "min_lr_ratio": spec.min_lr_ratio,
+        "stable_steps": spec.stable_steps,
+    }
 
 
 def _metadata_path_from_jax_path(path) -> tuple[str, ...]:

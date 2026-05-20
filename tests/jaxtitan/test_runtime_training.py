@@ -1330,6 +1330,67 @@ def test_cli_run_train_succeeds_for_tiny_run(
     assert (tmp_path / "runs" / "loop" / "summaries" / "final.json").is_file()
 
 
+def test_cli_run_train_existing_dir_fails_without_overwrite(
+    tmp_path: Path,
+    prepared_dataset_factory,
+) -> None:
+    manifest = prepared_dataset_factory(
+        "cli-existing",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_training_config(manifest, target_tokens=8, log_every_steps=1))
+    run_dir = tmp_path / "runs" / "loop"
+    run_dir.mkdir(parents=True)
+    sentinel = run_dir / "keep.txt"
+    sentinel.write_text("keep")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "jaxtitan.cli", "run", "train", str(config_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 2
+    assert "run directory already exists" in result.stderr
+    assert "--overwrite" in result.stderr
+    assert sentinel.read_text() == "keep"
+    assert "Traceback" not in result.stderr
+
+
+def test_cli_run_train_overwrite_replaces_existing_dir(
+    tmp_path: Path,
+    prepared_dataset_factory,
+) -> None:
+    manifest = prepared_dataset_factory(
+        "cli-overwrite",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_training_config(manifest, target_tokens=8, log_every_steps=1))
+    run_dir = tmp_path / "runs" / "loop"
+    run_dir.mkdir(parents=True)
+    (run_dir / "old.txt").write_text("old")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "jaxtitan.cli", "run", "train", "--overwrite", str(config_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert "JAX TITAN TRAINING" in result.stdout
+    assert not (run_dir / "old.txt").exists()
+    assert (run_dir / "metrics" / "train.jsonl").is_file()
+    assert (run_dir / "summaries" / "final.json").is_file()
+
+
 def test_cli_run_train_resume_succeeds(
     tmp_path: Path,
     prepared_dataset_factory,
