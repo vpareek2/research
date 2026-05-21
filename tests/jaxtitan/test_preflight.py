@@ -205,6 +205,86 @@ def test_run_preflight_accepts_four_device_data_axis_without_artifacts(
     assert not (tmp_path / "runs" / "loop").exists()
 
 
+def test_run_preflight_accepts_fsdp_parallelism_without_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("fsdp-preflight", shard_token_groups=(tuple(range(0, 80)),), train_tokens=50)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            axis_names=("data", "fsdp"),
+            axis_sizes=(1, 4),
+            parallelism_mode="fsdp",
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=4,
+            n_kv_heads=4,
+            global_batch_size=4,
+            target_tokens=16,
+        )
+    )
+
+    report = run_preflight(config_path)
+    payload = report.payload
+    text = format_preflight_report(report)
+
+    assert payload["parallelism"]["mode"] == "fsdp"
+    assert payload["parallelism"]["execution_mode"] == "fsdp"
+    assert payload["mesh"]["fsdp_axis_size"] == 4
+    assert payload["diagnostics"]["parallelism"]["mode"] == "fsdp"
+    assert payload["sharding"]["model_state"]["mode"] == "fsdp"
+    assert payload["sharding"]["model_state"]["fsdp_sharded_leaves"] > 0
+    assert payload["sharding"]["model_state"]["replicated_leaves"] > 0
+    assert payload["compile"]["train"]["input_shardings"]["state"]["mode"] == "from_template"
+    assert payload["training"]["compile"] == "passed"
+    assert "mode=fsdp" in text
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_accepts_zero2_parallelism_without_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("zero2-preflight", shard_token_groups=(tuple(range(0, 80)),), train_tokens=50)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            axis_names=("data", "fsdp"),
+            axis_sizes=(1, 4),
+            parallelism_mode="zero2",
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=4,
+            n_kv_heads=4,
+            global_batch_size=4,
+            target_tokens=16,
+        )
+    )
+
+    report = run_preflight(config_path)
+    payload = report.payload
+    text = format_preflight_report(report)
+
+    assert payload["parallelism"]["mode"] == "zero2"
+    assert payload["parallelism"]["execution_mode"] == "zero2"
+    assert payload["sharding"]["model_state"]["mode"] == "zero2"
+    assert payload["sharding"]["model_state"]["fsdp_sharded_leaves"] == 0
+    assert payload["sharding"]["optimizer_state"]["fsdp_sharded_leaves"] > 0
+    assert payload["sharding"]["gradients"]["fsdp_sharded_leaves"] > 0
+    assert payload["training"]["compile"] == "passed"
+    assert "mode=zero2" in text
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
 def test_run_preflight_reports_gradient_accumulation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -503,7 +583,12 @@ def _preflight_config(
     adamw_fallback_peak_lr: float | None = None,
     axis_names: tuple[str, ...] = ("data",),
     axis_sizes: tuple[int, ...] = (1,),
+    parallelism_mode: str = "ddp",
     global_batch_size: int = 2,
+    hidden_size: int = 8,
+    intermediate_size: int = 16,
+    num_heads: int = 2,
+    n_kv_heads: int = 1,
     gradient_accumulation_steps: int = 1,
     remat: str = "none",
     eval_every_steps: int | None = None,
@@ -553,11 +638,11 @@ output_dir = "runs"
 name = "decoder"
 variant = "tiny"
 vocab_size = 64
-hidden_size = 8
-intermediate_size = 16
+hidden_size = {hidden_size}
+intermediate_size = {intermediate_size}
 num_layers = 1
-num_heads = 2
-n_kv_heads = 1
+num_heads = {num_heads}
+n_kv_heads = {n_kv_heads}
 max_seq_len = 4
 compute_dtype = "float32"
 remat = "{remat}"
@@ -591,5 +676,8 @@ checkpoint_every_steps = 10
 [mesh]
 axis_names = [{", ".join(f'"{name}"' for name in axis_names)}]
 axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
+
+[parallelism]
+mode = "{parallelism_mode}"
 {eval_block}
 """

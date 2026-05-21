@@ -83,6 +83,11 @@ class TomlMeshSection:
 
 
 @dataclass(frozen=True, slots=True)
+class TomlParallelismSection:
+    mode: str = "ddp"
+
+
+@dataclass(frozen=True, slots=True)
 class TomlArtifactSection:
     wandb_enabled: bool = False
 

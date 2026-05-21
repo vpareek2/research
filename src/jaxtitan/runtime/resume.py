@@ -39,6 +39,7 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
             "policy": optimizer_policy_summary(spec.optimizer),
         },
         "mesh": _normalize(spec.mesh),
+        "parallelism": _normalize(spec.parallelism),
         "data": {
             "train_manifest": spec.data.train_manifest.as_posix(),
             "train_manifest_sha256": dataset_manifest_sha256(spec.data.train_manifest),
@@ -223,8 +224,17 @@ def _first_mismatch(left: Any, right: Any, path: str = "compatibility") -> str:
 
 
 def _preferred_mismatch(left: Mapping[str, Any], right: Mapping[str, Any]) -> str:
-    for key in ("seed", "model", "optimizer", "mesh", "training", "data"):
+    for key in ("seed", "model", "optimizer", "mesh", "parallelism", "training", "data"):
         if left.get(key) != right.get(key):
+            if key == "optimizer":
+                left_optimizer = _require_mapping(left.get("optimizer"), "optimizer")
+                right_optimizer = _require_mapping(right.get("optimizer"), "optimizer")
+                if left_optimizer.get("schedule") != right_optimizer.get("schedule"):
+                    return _first_mismatch(
+                        left_optimizer.get("schedule"),
+                        right_optimizer.get("schedule"),
+                        "compatibility.optimizer.schedule",
+                    )
             return _first_mismatch(left.get(key), right.get(key), f"compatibility.{key}")
     return _first_mismatch(left, right)
 

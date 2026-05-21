@@ -72,6 +72,7 @@ def test_load_config_resolves_minimal_toml(tmp_path: Path) -> None:
     assert spec.training.target_tokens == 128
     assert spec.training.gradient_accumulation_steps == 1
     assert spec.mesh.axis_names == ("data",)
+    assert spec.parallelism.mode == "ddp"
     assert spec.artifacts.root == Path("runs")
 
 
@@ -120,6 +121,69 @@ peak_lr = 0.0006
     assert spec.optimizer.name == "muon"
     assert spec.optimizer.adamw_fallback_schedule is not None
     assert spec.optimizer.adamw_fallback_schedule.peak_lr == 0.0006
+
+
+def test_load_config_accepts_explicit_parallelism_modes(tmp_path: Path) -> None:
+    ddp_path = tmp_path / "ddp.toml"
+    ddp_path.write_text(MINIMAL_CONFIG + "\n[parallelism]\nmode = \"ddp\"\n")
+    fsdp_path = tmp_path / "fsdp.toml"
+    fsdp_path.write_text(
+        MINIMAL_CONFIG.replace('axis_names = ["data"]', 'axis_names = ["data", "fsdp"]').replace(
+            "axis_sizes = [1]",
+            "axis_sizes = [1, 4]",
+        )
+        + "\n[parallelism]\nmode = \"fsdp\"\n"
+    )
+    zero2_path = tmp_path / "zero2.toml"
+    zero2_path.write_text(
+        MINIMAL_CONFIG.replace('axis_names = ["data"]', 'axis_names = ["data", "fsdp"]').replace(
+            "axis_sizes = [1]",
+            "axis_sizes = [1, 4]",
+        )
+        + "\n[parallelism]\nmode = \"zero2\"\n"
+    )
+
+    assert load_config(ddp_path).parallelism.mode == "ddp"
+    assert load_config(fsdp_path).parallelism.mode == "fsdp"
+    assert load_config(zero2_path).parallelism.mode == "zero2"
+
+
+def test_load_config_rejects_invalid_parallelism_mode(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad.toml"
+    config_path.write_text(MINIMAL_CONFIG + "\n[parallelism]\nmode = \"zero2\"\n")
+
+    with pytest.raises(ConfigError, match="parallelism.mode"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_ddp_with_fsdp_axis_size_greater_than_one(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('axis_names = ["data"]', 'axis_names = ["data", "fsdp"]').replace(
+            "axis_sizes = [1]",
+            "axis_sizes = [1, 4]",
+        )
+        + "\n[parallelism]\nmode = \"ddp\"\n"
+    )
+
+    with pytest.raises(ConfigError, match="parallelism.mode='ddp'"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_fsdp_without_fsdp_axis(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad.toml"
+    config_path.write_text(MINIMAL_CONFIG + "\n[parallelism]\nmode = \"fsdp\"\n")
+
+    with pytest.raises(ConfigError, match="requires a mesh fsdp axis"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_zero2_without_fsdp_axis(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad.toml"
+    config_path.write_text(MINIMAL_CONFIG + "\n[parallelism]\nmode = \"zero2\"\n")
+
+    with pytest.raises(ConfigError, match="requires a mesh fsdp axis"):
+        load_config(config_path)
 
 
 def test_load_config_rejects_fallback_schedule_for_non_muon(tmp_path: Path) -> None:

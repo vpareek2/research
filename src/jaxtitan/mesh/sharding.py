@@ -11,7 +11,9 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from jaxtitan.batch import Batch
 from jaxtitan.errors import ContractError
+from jaxtitan.models import ParamLayout
 from jaxtitan.specs.mesh import MeshSpec
+from jaxtitan.specs.parallelism import ParallelismSpec
 
 SUPPORTED_AXES = {"data", "fsdp", "tp"}
 
@@ -31,6 +33,12 @@ class MeshContext:
     @property
     def data_axis_size(self) -> int:
         return self.spec.axis_sizes[self.spec.axis_names.index("data")]
+
+    @property
+    def fsdp_axis_size(self) -> int:
+        if "fsdp" not in self.spec.axis_names:
+            return 1
+        return self.spec.axis_sizes[self.spec.axis_names.index("fsdp")]
 
     @property
     def selected_device_count(self) -> int:
@@ -57,6 +65,8 @@ class ShardingPlan:
     batch: BatchSharding
     replicated: NamedSharding
     metrics: NamedSharding
+    parallelism: ParallelismSpec
+    param_shardings: dict[tuple[str, ...], NamedSharding]
     kv_cache: Any | None = None
 
 
@@ -84,12 +94,21 @@ def build_mesh_context(spec: MeshSpec, devices: tuple[Any, ...] | list[Any] | No
     )
 
 
-def build_sharding_plan(context: MeshContext) -> ShardingPlan:
-    """Build v1 shardings for data-sharded batches and replicated state."""
+def build_sharding_plan(
+    context: MeshContext,
+    *,
+    parallelism: ParallelismSpec | None = None,
+    param_layouts: tuple[ParamLayout, ...] = (),
+) -> ShardingPlan:
+    """Build shardings for data-sharded batches and policy-placed state."""
 
+    parallelism = ParallelismSpec() if parallelism is None else parallelism
+    if parallelism.mode in {"zero2", "fsdp"} and "fsdp" not in context.spec.axis_names:
+        raise ContractError(f"parallelism.mode='{parallelism.mode}' requires a mesh fsdp axis")
     batch_matrix = NamedSharding(context.mesh, P("data", None))
     accumulated_batch = NamedSharding(context.mesh, P(None, "data", None))
     replicated = NamedSharding(context.mesh, P())
+    param_shardings = _param_shardings(context, parallelism, param_layouts, replicated)
     return ShardingPlan(
         mesh=context,
         batch=BatchSharding(
@@ -102,6 +121,8 @@ def build_sharding_plan(context: MeshContext) -> ShardingPlan:
         ),
         replicated=replicated,
         metrics=replicated,
+        parallelism=parallelism,
+        param_shardings=param_shardings,
     )
 
 
@@ -163,10 +184,63 @@ def place_replicated(tree: Any, plan: ShardingPlan) -> Any:
     return jax.tree.map(lambda leaf: jax.device_put(leaf, plan.replicated), tree)
 
 
-def replicated_shardings_like(tree: Any, plan: ShardingPlan) -> Any:
-    """Build a replicated sharding PyTree matching a runtime state tree."""
+def place_model_state(tree: Any, plan: ShardingPlan) -> Any:
+    """Place model state leaves according to the sharding plan's parameter policy."""
 
-    return jax.tree.map(lambda _leaf: plan.replicated, tree)
+    if plan.parallelism.mode in {"ddp", "zero2"}:
+        return place_replicated(tree, plan)
+    return _place_params_by_policy(tree, plan)
+
+
+def place_optimizer_init_state(tree: Any, plan: ShardingPlan) -> Any:
+    """Place a model-shaped tree used only to initialize optimizer state."""
+
+    if plan.parallelism.mode == "ddp":
+        return place_replicated(tree, plan)
+    return _place_params_by_policy(tree, plan)
+
+
+def gradient_shardings_like(tree: Any, plan: ShardingPlan) -> Any:
+    """Build a model-shaped sharding tree for gradients and optimizer updates."""
+
+    if plan.parallelism.mode == "ddp":
+        return jax.tree.map(lambda _leaf: plan.replicated, tree)
+
+    def leaf_sharding(path, _leaf):
+        metadata_path = _metadata_path_from_jax_path(path)
+        sharding = plan.param_shardings.get(metadata_path)
+        if sharding is None:
+            raise ContractError(f"missing sharding policy for model parameter {'.'.join(metadata_path)!r}")
+        return sharding
+
+    return jax.tree_util.tree_map_with_path(leaf_sharding, tree)
+
+
+def optimizer_shardings_like(tree: Any, plan: ShardingPlan) -> Any:
+    """Build a sharding PyTree matching an already placed optimizer state tree."""
+
+    return replicated_shardings_like(tree, plan)
+
+
+def _place_params_by_policy(tree: Any, plan: ShardingPlan) -> Any:
+    def place_leaf(path, leaf):
+        metadata_path = _metadata_path_from_jax_path(path)
+        sharding = plan.param_shardings.get(metadata_path)
+        if sharding is None:
+            raise ContractError(f"missing sharding policy for model parameter {'.'.join(metadata_path)!r}")
+        return jax.device_put(leaf, sharding)
+
+    return jax.tree_util.tree_map_with_path(place_leaf, tree)
+
+
+def replicated_shardings_like(tree: Any, plan: ShardingPlan) -> Any:
+    """Build a sharding PyTree matching an already placed runtime state tree."""
+
+    def leaf_sharding(leaf):
+        sharding = getattr(leaf, "sharding", None)
+        return sharding if isinstance(sharding, NamedSharding) else plan.replicated
+
+    return jax.tree.map(leaf_sharding, tree)
 
 
 def require_single_process_runtime() -> None:
@@ -192,7 +266,7 @@ def _validate_supported_spec(spec: MeshSpec) -> None:
     for axis_name, axis_size in zip(spec.axis_names, spec.axis_sizes, strict=True):
         if axis_name not in SUPPORTED_AXES:
             raise ContractError(f"unsupported mesh axis {axis_name!r}; supported axes are {sorted(SUPPORTED_AXES)}")
-        if axis_name != "data" and axis_size != 1:
+        if axis_name == "tp" and axis_size != 1:
             raise ContractError(f"mesh axis {axis_name!r} is reserved for later and must have size 1 for now")
 
 
@@ -222,3 +296,43 @@ def _validate_accumulated_batch_dims(batch: Batch) -> None:
         prefix_dims.append(array.shape[:2])
     if len(set(prefix_dims)) != 1:
         raise ContractError(f"all accumulated batch fields must share accumulation/batch dimensions, got {prefix_dims}")
+
+
+def _param_shardings(
+    context: MeshContext,
+    parallelism: ParallelismSpec,
+    param_layouts: tuple[ParamLayout, ...],
+    replicated: NamedSharding,
+) -> dict[tuple[str, ...], NamedSharding]:
+    if parallelism.mode == "ddp":
+        return {layout.path: replicated for layout in param_layouts}
+    shardings = {}
+    fsdp_axis_size = context.fsdp_axis_size
+    for layout in param_layouts:
+        if layout.fsdp_axis is None:
+            shardings[layout.path] = replicated
+            continue
+        if len(layout.shape) <= layout.fsdp_axis:
+            raise ContractError(f"parameter {'.'.join(layout.path)!r} has invalid fsdp axis {layout.fsdp_axis}")
+        dim_size = layout.shape[layout.fsdp_axis]
+        if dim_size % fsdp_axis_size != 0:
+            raise ContractError(
+                f"parameter {'.'.join(layout.path)!r} dimension {layout.fsdp_axis} "
+                f"with size {dim_size} must be divisible by fsdp axis size {fsdp_axis_size}"
+            )
+        spec = [None] * len(layout.shape)
+        spec[layout.fsdp_axis] = "fsdp"
+        shardings[layout.path] = NamedSharding(context.mesh, P(*spec))
+    return shardings
+
+
+def _metadata_path_from_jax_path(path) -> tuple[str, ...]:
+    parts = []
+    for key in path:
+        name = getattr(key, "key", None)
+        if name is None:
+            name = getattr(key, "name", None)
+        if name == "value":
+            continue
+        parts.append(str(name))
+    return tuple(parts)

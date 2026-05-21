@@ -7,7 +7,13 @@ from typing import Any
 from jaxtitan.config import load_config, load_resolved_config
 from jaxtitan.errors import ContractError
 from jaxtitan.infer.core import InferenceMetadata, InferenceState, inference_from_train_state
-from jaxtitan.mesh import ShardingPlan, build_mesh_context, build_sharding_plan, place_replicated
+from jaxtitan.mesh import (
+    ShardingPlan,
+    build_mesh_context,
+    build_sharding_plan,
+    place_model_state,
+    place_optimizer_init_state,
+)
 from jaxtitan.models import build_model
 from jaxtitan.optim import build_optimizer
 from jaxtitan.runtime.checkpoint_index import CheckpointRecord, load_checkpoint_index
@@ -43,11 +49,17 @@ def restore_inference_checkpoint(run_dir: str | Path, checkpoint: str) -> Infere
         validate_resume_metadata(metadata, runtime_spec)
 
         context = build_mesh_context(runtime_spec.mesh)
-        sharding = build_sharding_plan(context)
         model = build_model(runtime_spec.model, seed=runtime_spec.seed)
-        optimizer = build_optimizer(runtime_spec.optimizer, model.state, model.metadata)
-        model_state = place_replicated(model.state, sharding)
-        template_train_state = initialize_train_state(model_state, optimizer.transform, seed=runtime_spec.seed)
+        sharding = build_sharding_plan(context, parallelism=runtime_spec.parallelism, param_layouts=model.param_layouts)
+        model_state = place_model_state(model.state, sharding)
+        optimizer_init_state = place_optimizer_init_state(model.state, sharding)
+        optimizer = build_optimizer(runtime_spec.optimizer, optimizer_init_state, model.metadata)
+        template_train_state = initialize_train_state(
+            model_state,
+            optimizer.transform,
+            seed=runtime_spec.seed,
+            optimizer_init_model_state=optimizer_init_state,
+        )
         restored = service.restore(record.step, template_train_state)
         validate_resume_compat(restored, runtime_spec)
     finally:

@@ -39,7 +39,12 @@ def evaluate_checkpoint(run_dir: str | Path, selector: str) -> dict[str, Any]:
     row = _validation_eval_row(
         eval_spec,
         data,
-        make_eval_step(restored.graph),
+        make_eval_step(
+            restored.graph,
+            sharding=restored.sharding,
+            state_template=restored.state.model,
+            expected_batch_shape=(runtime_spec.training.global_batch_size, runtime_spec.training.seq_len),
+        ),
         restored.sharding,
         restored.state,
         train_row,

@@ -39,6 +39,8 @@ def test_resume_fingerprint_ignores_safe_runtime_controls(tmp_path: Path, prepar
         {"optimizer_name": "muon"},
         {"weight_decay": 0.2},
         {"axis_sizes": (2,)},
+        {"axis_names": ("data", "fsdp"), "axis_sizes": (1, 4), "parallelism_mode": "fsdp", "hidden_size": 16, "intermediate_size": 32, "num_heads": 4, "n_kv_heads": 4},
+        {"axis_names": ("data", "fsdp"), "axis_sizes": (1, 4), "parallelism_mode": "zero2", "hidden_size": 16, "intermediate_size": 32, "num_heads": 4, "n_kv_heads": 4},
         {"seed": 12},
         {"precision": "fp32"},
         {"seq_len": 2},
@@ -131,6 +133,7 @@ def test_resume_metadata_contains_compatibility_payload(tmp_path: Path, prepared
     assert metadata["compatibility"]["optimizer"]["name"] == "adamw"
     assert metadata["compatibility"]["optimizer"]["policy"]["name"] == "adamw"
     assert metadata["compatibility"]["optimizer"]["policy"]["muon"]["scale_mode"] == "match_rms_adamw"
+    assert metadata["compatibility"]["parallelism"]["mode"] == "ddp"
     assert metadata["mutable_controls"] == {
         "target_tokens": 128,
         "log_every_steps": 1,
@@ -211,6 +214,9 @@ def _config_text(
     *,
     seed: int = 11,
     hidden_size: int = 8,
+    intermediate_size: int = 16,
+    num_heads: int = 2,
+    n_kv_heads: int = 1,
     remat: str = "none",
     weight_decay: float = 0.0,
     optimizer_name: str = "adamw",
@@ -224,7 +230,9 @@ def _config_text(
     target_tokens: int = 128,
     log_every_steps: int = 1,
     checkpoint_every_steps: int = 10,
+    axis_names: tuple[str, ...] = ("data",),
     axis_sizes: tuple[int, ...] = (1,),
+    parallelism_mode: str = "ddp",
     data_order: str = "sequential",
     shuffle_seed: int | None = None,
     worker_count: int = 0,
@@ -248,10 +256,10 @@ name = "decoder"
 variant = "tiny"
 vocab_size = 64
 hidden_size = {hidden_size}
-intermediate_size = 16
+intermediate_size = {intermediate_size}
 num_layers = 1
-num_heads = 2
-n_kv_heads = 1
+num_heads = {num_heads}
+n_kv_heads = {n_kv_heads}
 max_seq_len = 4
 compute_dtype = "float32"
 remat = "{remat}"
@@ -283,8 +291,11 @@ log_every_steps = {log_every_steps}
 checkpoint_every_steps = {checkpoint_every_steps}
 
 [mesh]
-axis_names = ["data"]
+axis_names = [{", ".join(f'"{name}"' for name in axis_names)}]
 axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
+
+[parallelism]
+mode = "{parallelism_mode}"
 """
 
 

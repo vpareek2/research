@@ -11,6 +11,7 @@ from jaxtitan.specs.generation import GenerationSpec
 from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.optimizer import OptimizerSpec
+from jaxtitan.specs.parallelism import ParallelismSpec
 
 PrecisionName = Literal["fp32", "bf16", "mixed_bf16"]
 _PRECISION_NAMES = {"fp32", "bf16", "mixed_bf16"}
@@ -102,6 +103,7 @@ class RunSpec:
     data: DataSpec
     mesh: MeshSpec
     training: TrainingSpec
+    parallelism: ParallelismSpec = ParallelismSpec()
     artifacts: ArtifactSpec = ArtifactSpec()
     evals: tuple[EvalSpec, ...] = ()
     generation: GenerationSpec | None = None

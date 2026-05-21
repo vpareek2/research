@@ -13,6 +13,7 @@ from jaxtitan.specs.generation import GenerationSpec
 from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ParamRouteRule, ScheduleSpec
+from jaxtitan.specs.parallelism import ParallelismSpec
 from jaxtitan.specs.run import ArtifactSpec, RunSpec, TrainingSpec
 
 
@@ -57,6 +58,7 @@ def run_spec_from_resolved_mapping(raw: Mapping[str, Any]) -> RunSpec:
             data=_data_spec(_required_mapping(raw, "data")),
             mesh=_mesh_spec(_required_mapping(raw, "mesh")),
             training=TrainingSpec(**dict(_required_mapping(raw, "training"))),
+            parallelism=ParallelismSpec(**dict(raw.get("parallelism", {"mode": "ddp"}))),
             artifacts=ArtifactSpec(**dict(_required_mapping(raw, "artifacts"))),
             evals=tuple(EvalSpec(**dict(_require_mapping(item, "evals[]"))) for item in _optional_list(raw, "evals")),
             generation=None if generation_raw is None else GenerationSpec(**dict(_require_mapping(generation_raw, "generation"))),

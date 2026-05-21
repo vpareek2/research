@@ -7,12 +7,21 @@ import pytest
 
 from jaxtitan.batch import Batch
 from jaxtitan.errors import ContractError
-from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_accumulated_batch, place_batch, place_replicated
+from jaxtitan.mesh import (
+    build_mesh_context,
+    build_sharding_plan,
+    place_accumulated_batch,
+    place_batch,
+    place_model_state,
+    place_optimizer_init_state,
+    place_replicated,
+)
 from jaxtitan.models import build_model
 from jaxtitan.optim import build_optimizer
 from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
+from jaxtitan.specs.parallelism import ParallelismSpec
 from jaxtitan.steps import initialize_train_state, make_train_step, train_step
 
 FAKE_DEVICE_COUNT = 4
@@ -444,6 +453,208 @@ def test_data_axis_sharded_train_step_matches_one_device_global_batch() -> None:
     assert _trees_close(next_four.model, next_one.model)
 
 
+def test_fsdp_train_step_reports_global_metrics_and_sharded_state() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
+    plan = build_sharding_plan(context, parallelism=ParallelismSpec(mode="fsdp"), param_layouts=built.param_layouts)
+    model_state = place_model_state(built.state, plan)
+    optimizer = _optimizer(model_state, built.metadata)
+    state = initialize_train_state(model_state, optimizer.transform, seed=1)
+    step = make_train_step(
+        built.graph,
+        optimizer,
+        sharding=plan,
+        state_template=state,
+        donate_state=True,
+        expected_batch_shape=(1, 4, 4),
+    )
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
+
+    next_state, metrics = step(state, place_batch(batch, plan))
+
+    assert next_state.step == 1
+    assert next_state.tokens_seen == 16
+    assert metrics.token_count == 16
+    assert metrics.loss_sum.shape == ()
+    assert metrics.loss_sum.sharding == plan.metrics
+    assert next_state.step.sharding == plan.replicated
+    assert jax.tree.leaves(next_state.model)[0].sharding == plan.replicated
+    assert any(getattr(leaf, "sharding", None).spec == jax.sharding.PartitionSpec(None, "fsdp") for leaf in jax.tree.leaves(next_state.model))
+
+
+def test_fsdp_train_step_supports_muon_optimizer() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
+    plan = build_sharding_plan(context, parallelism=ParallelismSpec(mode="fsdp"), param_layouts=built.param_layouts)
+    model_state = place_model_state(built.state, plan)
+    optimizer = _optimizer(model_state, built.metadata, optimizer_name="muon")
+    state = initialize_train_state(model_state, optimizer.transform, seed=1)
+    step = make_train_step(
+        built.graph,
+        optimizer,
+        sharding=plan,
+        state_template=state,
+        donate_state=True,
+        expected_batch_shape=(2, 4, 4),
+    )
+    micro = _batch(batch_size=4, seq_len=4, vocab_size=16)
+    batch = Batch(
+        input_ids=np.stack([micro.input_ids, micro.input_ids]),
+        target_ids=np.stack([micro.target_ids, micro.target_ids]),
+        loss_mask=np.ones((2, 4, 4), dtype=np.bool_),
+    )
+
+    next_state, metrics = step(state, place_accumulated_batch(batch, plan))
+
+    assert next_state.tokens_seen == 32
+    assert metrics.token_count == 32
+    assert {assignment.backend for assignment in optimizer.route_assignments} == {"adamw", "muon"}
+
+
+def test_zero2_train_step_keeps_model_replicated_and_optimizer_sharded() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
+    plan = build_sharding_plan(context, parallelism=ParallelismSpec(mode="zero2"), param_layouts=built.param_layouts)
+    model_state = place_model_state(built.state, plan)
+    optimizer_init_state = place_optimizer_init_state(built.state, plan)
+    optimizer = _optimizer(optimizer_init_state, built.metadata)
+    state = initialize_train_state(
+        model_state,
+        optimizer.transform,
+        seed=1,
+        optimizer_init_model_state=optimizer_init_state,
+    )
+    step = make_train_step(
+        built.graph,
+        optimizer,
+        sharding=plan,
+        state_template=state,
+        donate_state=True,
+        expected_batch_shape=(1, 4, 4),
+    )
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
+
+    next_state, metrics = step(state, place_batch(batch, plan))
+
+    assert next_state.step == 1
+    assert next_state.tokens_seen == 16
+    assert metrics.token_count == 16
+    assert metrics.loss_sum.shape == ()
+    assert metrics.loss_sum.sharding == plan.metrics
+    assert all(getattr(leaf, "sharding", None) == plan.replicated for leaf in jax.tree.leaves(next_state.model))
+    assert any(
+        getattr(leaf, "sharding", None).spec == jax.sharding.PartitionSpec(None, "fsdp")
+        for leaf in jax.tree.leaves(next_state.opt_state)
+        if hasattr(getattr(leaf, "sharding", None), "spec")
+    )
+
+
+def test_zero2_train_step_supports_muon_optimizer() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
+    plan = build_sharding_plan(context, parallelism=ParallelismSpec(mode="zero2"), param_layouts=built.param_layouts)
+    model_state = place_model_state(built.state, plan)
+    optimizer_init_state = place_optimizer_init_state(built.state, plan)
+    optimizer = _optimizer(optimizer_init_state, built.metadata, optimizer_name="muon")
+    state = initialize_train_state(
+        model_state,
+        optimizer.transform,
+        seed=1,
+        optimizer_init_model_state=optimizer_init_state,
+    )
+    step = make_train_step(
+        built.graph,
+        optimizer,
+        sharding=plan,
+        state_template=state,
+        donate_state=True,
+        expected_batch_shape=(2, 4, 4),
+    )
+    micro = _batch(batch_size=4, seq_len=4, vocab_size=16)
+    batch = Batch(
+        input_ids=np.stack([micro.input_ids, micro.input_ids]),
+        target_ids=np.stack([micro.target_ids, micro.target_ids]),
+        loss_mask=np.ones((2, 4, 4), dtype=np.bool_),
+    )
+
+    next_state, metrics = step(state, place_accumulated_batch(batch, plan))
+
+    assert next_state.tokens_seen == 32
+    assert metrics.token_count == 32
+    assert {assignment.backend for assignment in optimizer.route_assignments} == {"adamw", "muon"}
+
+
+def test_fsdp_train_step_matches_ddp_global_batch_loss() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
+
+    ddp_context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(1,)))
+    ddp_plan = build_sharding_plan(ddp_context, parallelism=ParallelismSpec(mode="ddp"), param_layouts=built.param_layouts)
+    ddp_model = place_model_state(built.state, ddp_plan)
+    ddp_optimizer = _optimizer(ddp_model, built.metadata)
+    ddp_state = initialize_train_state(ddp_model, ddp_optimizer.transform, seed=1)
+    ddp_step = make_train_step(built.graph, ddp_optimizer, sharding=ddp_plan, state_template=ddp_state)
+    _, ddp_metrics = ddp_step(ddp_state, place_batch(batch, ddp_plan))
+
+    fsdp_context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
+    fsdp_plan = build_sharding_plan(fsdp_context, parallelism=ParallelismSpec(mode="fsdp"), param_layouts=built.param_layouts)
+    fsdp_model = place_model_state(built.state, fsdp_plan)
+    fsdp_optimizer = _optimizer(fsdp_model, built.metadata)
+    fsdp_state = initialize_train_state(fsdp_model, fsdp_optimizer.transform, seed=1)
+    fsdp_step = make_train_step(built.graph, fsdp_optimizer, sharding=fsdp_plan, state_template=fsdp_state)
+    _, fsdp_metrics = fsdp_step(fsdp_state, place_batch(batch, fsdp_plan))
+
+    assert _scalar_int(fsdp_metrics.token_count) == _scalar_int(ddp_metrics.token_count) == 16
+    assert np.allclose(
+        np.asarray(jax.device_get(fsdp_metrics.loss_sum)),
+        np.asarray(jax.device_get(ddp_metrics.loss_sum)),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+def test_zero2_train_step_matches_ddp_global_batch_loss() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
+
+    ddp_context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(1,)))
+    ddp_plan = build_sharding_plan(ddp_context, parallelism=ParallelismSpec(mode="ddp"), param_layouts=built.param_layouts)
+    ddp_model = place_model_state(built.state, ddp_plan)
+    ddp_optimizer = _optimizer(ddp_model, built.metadata)
+    ddp_state = initialize_train_state(ddp_model, ddp_optimizer.transform, seed=1)
+    ddp_step = make_train_step(built.graph, ddp_optimizer, sharding=ddp_plan, state_template=ddp_state)
+    next_ddp, ddp_metrics = ddp_step(ddp_state, place_batch(batch, ddp_plan))
+
+    zero2_context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
+    zero2_plan = build_sharding_plan(zero2_context, parallelism=ParallelismSpec(mode="zero2"), param_layouts=built.param_layouts)
+    zero2_model = place_model_state(built.state, zero2_plan)
+    zero2_optimizer_init = place_optimizer_init_state(built.state, zero2_plan)
+    zero2_optimizer = _optimizer(zero2_optimizer_init, built.metadata)
+    zero2_state = initialize_train_state(
+        zero2_model,
+        zero2_optimizer.transform,
+        seed=1,
+        optimizer_init_model_state=zero2_optimizer_init,
+    )
+    zero2_step = make_train_step(built.graph, zero2_optimizer, sharding=zero2_plan, state_template=zero2_state)
+    next_zero2, zero2_metrics = zero2_step(zero2_state, place_batch(batch, zero2_plan))
+
+    assert _scalar_int(zero2_metrics.token_count) == _scalar_int(ddp_metrics.token_count) == 16
+    assert np.allclose(
+        np.asarray(jax.device_get(zero2_metrics.loss_sum)),
+        np.asarray(jax.device_get(ddp_metrics.loss_sum)),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert _trees_close(next_zero2.model, next_ddp.model, rtol=2e-5, atol=2e-5)
+
+
 def _optimizer(model_state, metadata, *, schedule: ScheduleSpec | None = None, optimizer_name: str = "adamw"):
     if schedule is None:
         schedule = ScheduleSpec(peak_lr=1e-3)
@@ -495,13 +706,13 @@ def _trees_changed(left, right) -> bool:
     )
 
 
-def _trees_close(left, right) -> bool:
+def _trees_close(left, right, *, rtol: float = 1e-5, atol: float = 1e-5) -> bool:
     return all(
         np.allclose(
             np.asarray(jax.device_get(left_leaf)),
             np.asarray(jax.device_get(right_leaf)),
-            rtol=1e-5,
-            atol=1e-5,
+            rtol=rtol,
+            atol=atol,
         )
         for left_leaf, right_leaf in zip(jax.tree.leaves(left), jax.tree.leaves(right), strict=True)
     )

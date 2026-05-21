@@ -9,13 +9,20 @@ from jaxtitan.errors import ContractError
 from jaxtitan.mesh import (
     build_mesh_context,
     build_sharding_plan,
+    gradient_shardings_like,
+    optimizer_shardings_like,
+    place_model_state,
+    place_optimizer_init_state,
     place_accumulated_batch,
     place_batch,
     place_replicated,
     replicated_shardings_like,
     require_single_process_runtime,
 )
+from jaxtitan.models import build_model
 from jaxtitan.specs.mesh import MeshSpec
+from jaxtitan.specs.model import ModelSpec
+from jaxtitan.specs.parallelism import ParallelismSpec
 
 FAKE_DEVICE_COUNT = 4
 
@@ -73,6 +80,16 @@ def test_build_mesh_context_rejects_non_data_axis_size_greater_than_one() -> Non
         build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(2, 2)))
 
 
+def test_build_mesh_context_accepts_fsdp_axis() -> None:
+    require_fake_devices()
+
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
+
+    assert context.mesh.devices.shape == (1, 4)
+    assert context.data_axis_size == 1
+    assert context.fsdp_axis_size == 4
+
+
 def test_sharding_plan_contents() -> None:
     require_fake_devices()
     context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
@@ -91,6 +108,89 @@ def test_sharding_plan_contents() -> None:
     assert plan.replicated == expected_replicated
     assert plan.metrics == expected_replicated
     assert plan.kv_cache is None
+
+
+def test_fsdp_sharding_plan_maps_decoder_layouts_to_partition_specs() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
+
+    plan = build_sharding_plan(context, parallelism=ParallelismSpec(mode="fsdp"), param_layouts=built.param_layouts)
+
+    by_tag = {layout.tag: plan.param_shardings[layout.path] for layout in built.param_layouts}
+    assert by_tag["embedding"].spec == P()
+    assert by_tag["attention_q"].spec == P(None, "fsdp")
+    assert by_tag["attention_k"].spec == P(None, "fsdp")
+    assert by_tag["attention_v"].spec == P(None, "fsdp")
+    assert by_tag["attention_o"].spec == P("fsdp", None)
+    assert by_tag["mlp_gate"].spec == P(None, "fsdp")
+    assert by_tag["mlp_up"].spec == P(None, "fsdp")
+    assert by_tag["mlp_down"].spec == P("fsdp", None)
+    assert by_tag["lm_head"].spec == P("fsdp", None)
+    assert plan.metrics.spec == P()
+    assert plan.batch.accumulated_input_ids.spec == P(None, "data", None)
+
+
+def test_fsdp_sharding_plan_rejects_non_divisible_parameter_axis() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 3)))
+
+    with pytest.raises(ContractError, match="divisible by fsdp axis size"):
+        build_sharding_plan(
+            context,
+            parallelism=ParallelismSpec(mode="fsdp"),
+            param_layouts=built.param_layouts,
+        )
+
+
+def test_place_model_state_uses_fsdp_param_shardings() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
+    plan = build_sharding_plan(context, parallelism=ParallelismSpec(mode="fsdp"), param_layouts=built.param_layouts)
+
+    placed = place_model_state(built.state, plan)
+    shardings = replicated_shardings_like(placed, plan)
+    placed_by_path = {_metadata_path(path): value for path, value in jax.tree_util.tree_flatten_with_path(placed)[0]}
+    layout_by_tag = {layout.tag: layout for layout in built.param_layouts}
+
+    q = placed_by_path[layout_by_tag["attention_q"].path]
+    o = placed_by_path[layout_by_tag["attention_o"].path]
+    embed = placed_by_path[layout_by_tag["embedding"].path]
+    assert q.sharding.spec == P(None, "fsdp")
+    assert {shard.data.shape for shard in q.addressable_shards} == {(16, 4)}
+    assert o.sharding.spec == P("fsdp", None)
+    assert {shard.data.shape for shard in o.addressable_shards} == {(4, 16)}
+    assert embed.sharding.spec == P()
+    assert shardings == jax.tree.map(lambda leaf: leaf.sharding, placed)
+
+
+def test_zero2_sharding_plan_shards_optimizer_not_model_state() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
+    plan = build_sharding_plan(context, parallelism=ParallelismSpec(mode="zero2"), param_layouts=built.param_layouts)
+
+    model_state = place_model_state(built.state, plan)
+    optimizer_init_state = place_optimizer_init_state(built.state, plan)
+    grad_shardings = gradient_shardings_like(model_state, plan)
+    opt_shardings = optimizer_shardings_like(optimizer_init_state, plan)
+    model_by_path = {_metadata_path(path): value for path, value in jax.tree_util.tree_flatten_with_path(model_state)[0]}
+    opt_by_path = {_metadata_path(path): value for path, value in jax.tree_util.tree_flatten_with_path(optimizer_init_state)[0]}
+    grad_by_path = {_metadata_path(path): value for path, value in jax.tree_util.tree_flatten_with_path(grad_shardings)[0]}
+    layout_by_tag = {layout.tag: layout for layout in built.param_layouts}
+
+    q_path = layout_by_tag["attention_q"].path
+    embed_path = layout_by_tag["embedding"].path
+    assert plan.param_shardings[q_path].spec == P(None, "fsdp")
+    assert model_by_path[q_path].sharding == plan.replicated
+    assert model_by_path[embed_path].sharding == plan.replicated
+    assert opt_by_path[q_path].sharding.spec == P(None, "fsdp")
+    assert opt_by_path[embed_path].sharding == plan.replicated
+    assert grad_by_path[q_path].spec == P(None, "fsdp")
+    assert grad_by_path[embed_path] == plan.replicated
+    assert opt_shardings == jax.tree.map(lambda leaf: leaf.sharding, optimizer_init_state)
 
 
 def test_place_batch_shards_arrays_over_data_axis() -> None:
@@ -225,3 +325,32 @@ def test_require_single_process_runtime_rejects_multi_process(monkeypatch: pytes
 
     with pytest.raises(ContractError, match="exactly one process"):
         require_single_process_runtime()
+
+
+def _tiny_spec(**overrides) -> ModelSpec:
+    values = {
+        "name": "decoder",
+        "variant": "tiny",
+        "vocab_size": 32,
+        "hidden_size": 16,
+        "intermediate_size": 32,
+        "num_layers": 1,
+        "num_heads": 4,
+        "n_kv_heads": 4,
+        "max_seq_len": 8,
+        "compute_dtype": "float32",
+    }
+    values.update(overrides)
+    return ModelSpec(**values)
+
+
+def _metadata_path(path) -> tuple[str, ...]:
+    parts = []
+    for key in path:
+        name = getattr(key, "key", None)
+        if name is None:
+            name = getattr(key, "name", None)
+        if name == "value":
+            continue
+        parts.append(str(name))
+    return tuple(parts)

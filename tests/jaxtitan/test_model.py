@@ -94,13 +94,32 @@ def test_metadata_covers_every_parameter_leaf_once() -> None:
     flat_state = nnx.to_flat_state(result.state)
 
     assert len(result.metadata) == len(flat_state)
+    assert len(result.param_layouts) == len(flat_state)
     for metadata, (path, variable) in zip(result.metadata, flat_state, strict=True):
         value = variable.get_value()
         assert metadata.path == tuple(str(part) for part in path)
         assert metadata.shape == tuple(value.shape)
         assert metadata.dtype == str(value.dtype)
         assert metadata.count == value.size
+    assert {layout.path for layout in result.param_layouts} == {item.path for item in result.metadata}
     assert count_parameters(result.metadata) == sum(leaf.size for leaf in jax.tree.leaves(nnx.to_pure_dict(result.state)))
+
+
+def test_decoder_param_layouts_record_fsdp_policy() -> None:
+    result = build_model(_tiny_spec(), seed=0)
+    layouts = {item.tag: item for item in result.param_layouts}
+
+    for tag in ("embedding", "attention_q_norm", "attention_k_norm", "block_pre_norm", "block_post_norm", "final_norm"):
+        assert layouts[tag].fsdp_axis is None
+    for tag in ("attention_q", "attention_k", "attention_v", "mlp_gate", "mlp_up"):
+        assert layouts[tag].fsdp_axis == 1
+    for tag in ("attention_o", "mlp_down", "lm_head"):
+        assert layouts[tag].fsdp_axis == 0
+
+    for layout in result.param_layouts:
+        assert len(layout.shape) == len(layout.logical_axes)
+        if layout.fsdp_axis is not None:
+            assert 0 <= layout.fsdp_axis < len(layout.shape)
 
 
 def test_metadata_has_optimizer_routing_tags() -> None:

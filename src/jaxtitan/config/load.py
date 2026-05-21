@@ -14,6 +14,7 @@ from jaxtitan.config.schema import (
     TomlMeshSection,
     TomlModelSection,
     TomlOptimizerSection,
+    TomlParallelismSection,
     TomlRunSection,
     TomlScheduleSection,
     TomlTrainingSection,
@@ -26,6 +27,7 @@ from jaxtitan.specs.generation import GenerationSpec
 from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
+from jaxtitan.specs.parallelism import ParallelismSpec
 from jaxtitan.specs.run import ArtifactSpec, RunSpec, TrainingSpec
 
 
@@ -53,6 +55,7 @@ def run_spec_from_mapping(raw: Mapping[str, Any]) -> RunSpec:
         data_section = _data_section(_required_mapping(raw, "data"))
         training_section = _training_section(_required_mapping(raw, "training"))
         mesh_section = _mesh_section(_optional_mapping(raw, "mesh"))
+        parallelism_section = _parallelism_section(_optional_mapping(raw, "parallelism"))
         artifact_section = _artifact_section(_optional_mapping(raw, "artifacts"))
         eval_sections = tuple(_eval_section(item) for item in _optional_list(raw, "evals"))
         generation_raw = raw.get("generation")
@@ -75,6 +78,7 @@ def run_spec_from_mapping(raw: Mapping[str, Any]) -> RunSpec:
             data=DataSpec(**asdict(data_section)),
             mesh=MeshSpec(axis_names=mesh_section.axis_names, axis_sizes=mesh_section.axis_sizes),
             training=TrainingSpec(**asdict(training_section)),
+            parallelism=ParallelismSpec(**asdict(parallelism_section)),
             artifacts=ArtifactSpec(root=run_section.output_dir, wandb_enabled=artifact_section.wandb_enabled),
             evals=tuple(EvalSpec(**asdict(section)) for section in eval_sections),
             generation=None if generation_section is None else GenerationSpec(**asdict(generation_section)),
@@ -197,6 +201,10 @@ def _mesh_section(raw: Mapping[str, Any]) -> TomlMeshSection:
         axis_names=tuple(raw.get("axis_names", ("data",))),
         axis_sizes=tuple(int(size) for size in raw.get("axis_sizes", (1,))),
     )
+
+
+def _parallelism_section(raw: Mapping[str, Any]) -> TomlParallelismSection:
+    return TomlParallelismSection(mode=_optional_str(raw, "mode", "parallelism", default="ddp"))
 
 
 def _artifact_section(raw: Mapping[str, Any]) -> TomlArtifactSection:

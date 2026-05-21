@@ -184,6 +184,7 @@ def build_runtime_diagnostics(
             "axis_names": list(spec.mesh.axis_names),
             "axis_sizes": list(spec.mesh.axis_sizes),
             "data_axis_size": context.data_axis_size,
+            "fsdp_axis_size": context.fsdp_axis_size,
             "global_mesh_size": _product(spec.mesh.axis_sizes),
             "selected_device_count": device_count,
             "selected_addressable_device_count": device_count,
@@ -242,13 +243,13 @@ def compile_contract_summary(spec: RunSpec, sharding: Any | None) -> dict[str, A
     eval_shardings = None
     if sharding is not None:
         train_shardings = {
-            "state": _sharding_summary(sharding.replicated),
+            "state": {"mode": "from_template", **_sharding_summary(sharding.replicated)},
             "input_ids": _sharding_summary(sharding.batch.accumulated_input_ids),
             "target_ids": _sharding_summary(sharding.batch.accumulated_target_ids),
             "loss_mask": _sharding_summary(sharding.batch.accumulated_loss_mask),
         }
         eval_shardings = {
-            "state": _sharding_summary(sharding.replicated),
+            "state": {"mode": "from_template", **_sharding_summary(sharding.replicated)},
             "input_ids": _sharding_summary(sharding.batch.input_ids),
             "target_ids": _sharding_summary(sharding.batch.target_ids),
             "loss_mask": _sharding_summary(sharding.batch.loss_mask),
@@ -279,7 +280,8 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
     return _normalize(
         {
             "schema_version": 1,
-            "execution_mode": EXECUTION_MODE,
+            "mode": spec.parallelism.mode,
+            "execution_mode": runtime_execution_mode(spec),
             "metrics_scope": METRICS_SCOPE,
             "artifact_writer": ARTIFACT_WRITER,
             "single_process": context.process_count == 1,
@@ -297,6 +299,7 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
                 "axis_names": list(spec.mesh.axis_names),
                 "axis_sizes": list(spec.mesh.axis_sizes),
                 "data_axis_size": context.data_axis_size,
+                "fsdp_axis_size": context.fsdp_axis_size,
             },
             "batch": {
                 "global_batch_size": spec.training.global_batch_size,
@@ -321,6 +324,9 @@ def sharding_policy_summary(plan: Any) -> dict[str, Any]:
     """Summarize intended shardings without dumping large trees."""
 
     replicated = _sharding_summary(plan.replicated)
+    model_state = _state_policy_summary(plan, placement="model")
+    optimizer_state = _state_policy_summary(plan, placement="optimizer")
+    gradients = _state_policy_summary(plan, placement="gradients")
     return _normalize(
         {
             "schema_version": 1,
@@ -335,25 +341,46 @@ def sharding_policy_summary(plan: Any) -> dict[str, Any]:
             "train_state": {
                 "step": replicated,
                 "tokens_seen": replicated,
-                "model": replicated,
-                "opt_state": replicated,
+                "model": model_state,
+                "opt_state": optimizer_state,
                 "rng": replicated,
                 "schedule_state": replicated,
             },
-            "model_state": replicated,
-            "optimizer_state": replicated,
+            "model_state": model_state,
+            "optimizer_state": optimizer_state,
+            "gradients": gradients,
             "rng": replicated,
             "metrics": _sharding_summary(plan.metrics),
             "checkpoint": {
                 "restore_template": replicated,
             },
             "reserved": {
-                "fsdp": None,
+                "fsdp": None
+                if plan.parallelism.mode == "ddp"
+                else {"enabled": True, "axis_size": plan.mesh.fsdp_axis_size},
                 "tp": None,
                 "kv_cache": None,
             },
         }
     )
+
+
+def _state_policy_summary(plan: Any, *, placement: str) -> dict[str, Any]:
+    shardings = tuple(plan.param_shardings.values())
+    if placement == "model" and plan.parallelism.mode != "fsdp":
+        fsdp_sharded = 0
+    elif placement in {"optimizer", "gradients"} and plan.parallelism.mode == "ddp":
+        fsdp_sharded = 0
+    else:
+        fsdp_sharded = sum(1 for sharding in shardings if "fsdp" in str(getattr(sharding, "spec", "")))
+    replicated = len(shardings) - fsdp_sharded
+    return {
+        "mode": plan.parallelism.mode,
+        "partition_spec": _partition_spec_string(getattr(plan.replicated, "spec", None)),
+        "parameter_leaves": len(shardings),
+        "fsdp_sharded_leaves": fsdp_sharded,
+        "replicated_leaves": replicated,
+    }
 
 
 def placed_array_summary(value: Any) -> dict[str, Any]:
@@ -410,6 +437,10 @@ def enrich_train_metrics(
 
     payload = runtime.payload if isinstance(runtime, RuntimeDiagnostics) else runtime
     performance = payload["performance"]
+    parallelism = payload.get(
+        "parallelism",
+        {"mode": "ddp", "execution_mode": EXECUTION_MODE},
+    )
     data_sec = float(timings.get("data_sec", 0.0))
     placement_sec = float(timings.get("placement_sec", 0.0))
     train_dispatch_sec = float(timings.get("train_dispatch_sec", 0.0))
@@ -425,7 +456,8 @@ def enrich_train_metrics(
     enriched = dict(row)
     enriched.update(
         {
-            "execution_mode": EXECUTION_MODE,
+            "parallelism_mode": parallelism["mode"],
+            "execution_mode": parallelism["execution_mode"],
             "metrics_scope": METRICS_SCOPE,
             "artifact_writer": ARTIFACT_WRITER,
             "data_sec": data_sec,
@@ -473,6 +505,7 @@ def training_diagnostics_summary(
 
     payload = runtime.payload if isinstance(runtime, RuntimeDiagnostics) else runtime
     performance = payload["performance"]
+    parallelism = payload.get("parallelism", {"execution_mode": EXECUTION_MODE})
     final = rows[-1] if rows else {}
     steady_rows = rows[1:] if len(rows) >= 2 else ()
     return _normalize(
@@ -488,11 +521,19 @@ def training_diagnostics_summary(
             "device_kind": performance["device_kind"],
             "device_count": performance["device_count"],
             "runtime_diagnostics_path": "diagnostics/runtime.json",
-            "execution_mode": EXECUTION_MODE,
+            "execution_mode": parallelism["execution_mode"],
             "metrics_scope": METRICS_SCOPE,
             "artifact_writer": ARTIFACT_WRITER,
         }
     )
+
+
+def runtime_execution_mode(spec: RunSpec) -> str:
+    """Return the artifact-facing execution mode name."""
+
+    if spec.parallelism.mode in {"zero2", "fsdp"}:
+        return spec.parallelism.mode
+    return EXECUTION_MODE
 
 
 def _telemetry_fields(telemetry: Mapping[str, Any]) -> dict[str, Any]:

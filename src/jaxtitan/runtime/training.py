@@ -27,7 +27,8 @@ from jaxtitan.mesh import (
     build_sharding_plan,
     place_accumulated_batch,
     place_batch,
-    place_replicated,
+    place_model_state,
+    place_optimizer_init_state,
     require_single_process_runtime,
     validate_runtime_mesh_spec,
 )
@@ -36,7 +37,6 @@ from jaxtitan.optim import build_optimizer
 from jaxtitan.runtime.checkpoint_index import CheckpointIndex, load_checkpoint_index, record_checkpoint
 from jaxtitan.runtime.diagnostics import (
     ARTIFACT_WRITER,
-    EXECUTION_MODE,
     METRICS_SCOPE,
     PhaseTimer,
     build_runtime_diagnostics,
@@ -45,6 +45,7 @@ from jaxtitan.runtime.diagnostics import (
     sample_device_telemetry,
     sync_and_time,
     training_diagnostics_summary,
+    runtime_execution_mode,
 )
 from jaxtitan.runtime.resume import checkpoint_metadata, validate_resume_compat, validate_resume_metadata
 from jaxtitan.services import LocalArtifactWriter, LocalOrbaxCheckpointService, initialize_run
@@ -149,7 +150,8 @@ def run_training(
             {
                 **_event("training_started", spec),
                 "resume": resume,
-                "execution_mode": EXECUTION_MODE,
+                "execution_mode": runtime_execution_mode(spec),
+                "parallelism_mode": spec.parallelism.mode,
                 "metrics_scope": METRICS_SCOPE,
                 "artifact_writer": ARTIFACT_WRITER,
                 "model_remat": spec.model.remat,
@@ -231,9 +233,11 @@ def _run_training_initialized(
         run_id=runtime_spec.run_id,
     )
     context = build_mesh_context(runtime_spec.mesh)
-    sharding = build_sharding_plan(context)
     model = build_model(runtime_spec.model, seed=runtime_spec.seed)
-    optimizer = build_optimizer(runtime_spec.optimizer, model.state, model.metadata)
+    sharding = build_sharding_plan(context, parallelism=runtime_spec.parallelism, param_layouts=model.param_layouts)
+    model_state = place_model_state(model.state, sharding)
+    optimizer_init_state = place_optimizer_init_state(model.state, sharding)
+    optimizer = build_optimizer(runtime_spec.optimizer, optimizer_init_state, model.metadata)
     runtime_diagnostics = build_runtime_diagnostics(
         runtime_spec,
         context,
@@ -243,8 +247,12 @@ def _run_training_initialized(
         data_pipeline=data.describe(),
     )
     writer.write_runtime_diagnostics(runtime_diagnostics.payload)
-    model_state = place_replicated(model.state, sharding)
-    train_state = initialize_train_state(model_state, optimizer.transform, seed=runtime_spec.seed)
+    train_state = initialize_train_state(
+        model_state,
+        optimizer.transform,
+        seed=runtime_spec.seed,
+        optimizer_init_model_state=optimizer_init_state,
+    )
     expected_train_shape = (
         runtime_spec.training.gradient_accumulation_steps,
         runtime_spec.training.global_batch_size,

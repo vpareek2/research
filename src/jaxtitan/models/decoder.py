@@ -26,12 +26,24 @@ class ParamMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class ParamLayout:
+    """Model-owned parameter layout policy for distributed placement."""
+
+    path: tuple[str, ...]
+    tag: str
+    shape: tuple[int, ...]
+    logical_axes: tuple[str, ...]
+    fsdp_axis: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class ModelBuildResult:
     """Explicit model graph/state split plus parameter metadata."""
 
     graph: Any
     state: Any
     metadata: tuple[ParamMetadata, ...]
+    param_layouts: tuple[ParamLayout, ...]
 
 
 def dtype_from_name(name: str) -> Any:
@@ -52,7 +64,7 @@ def build_model(spec: ModelSpec, seed: int) -> ModelBuildResult:
     model = DecoderModel(spec, rngs=nnx.Rngs(seed))
     graph, state = nnx.split(model)
     metadata = parameter_metadata(state)
-    return ModelBuildResult(graph=graph, state=state, metadata=metadata)
+    return ModelBuildResult(graph=graph, state=state, metadata=metadata, param_layouts=parameter_layouts(metadata))
 
 
 def apply_model(graph: Any, state: Any, input_ids: Any) -> jax.Array:
@@ -114,6 +126,12 @@ def parameter_metadata(state: Any) -> tuple[ParamMetadata, ...]:
             )
         )
     return tuple(items)
+
+
+def parameter_layouts(metadata: tuple[ParamMetadata, ...]) -> tuple[ParamLayout, ...]:
+    """Build model-owned sharding layout metadata from semantic parameter metadata."""
+
+    return tuple(_layout_for_metadata(item) for item in metadata)
 
 
 class DecoderSwiGLU(nnx.Module):
@@ -538,3 +556,46 @@ def _mlp_tag(path: tuple[str, ...]) -> str:
         if component in path:
             return tag
     raise ContractError(f"unrecognized MLP parameter path {'.'.join(path)}")
+
+
+def _layout_for_metadata(item: ParamMetadata) -> ParamLayout:
+    logical_axes, fsdp_axis = _layout_policy(item)
+    if len(logical_axes) != len(item.shape):
+        raise ContractError(
+            f"parameter layout for {'.'.join(item.path)!r} has rank {len(logical_axes)}, "
+            f"but parameter shape has rank {len(item.shape)}"
+        )
+    if fsdp_axis is not None and not (0 <= fsdp_axis < len(item.shape)):
+        raise ContractError(f"parameter layout for {'.'.join(item.path)!r} has invalid fsdp axis {fsdp_axis}")
+    return ParamLayout(
+        path=item.path,
+        tag=item.tag,
+        shape=item.shape,
+        logical_axes=logical_axes,
+        fsdp_axis=fsdp_axis,
+    )
+
+
+def _layout_policy(item: ParamMetadata) -> tuple[tuple[str, ...], int | None]:
+    tag = item.tag
+    if tag == "embedding":
+        return ("vocab", "hidden"), None
+    if tag == "lm_head":
+        return ("hidden", "vocab"), 0
+    if tag in {"attention_q", "attention_k", "attention_v"}:
+        return ("hidden_in", "hidden_out"), 1
+    if tag == "attention_o":
+        return ("hidden_in", "hidden_out"), 0
+    if tag in {"mlp_gate", "mlp_up"}:
+        return ("hidden", "intermediate"), 1
+    if tag == "mlp_down":
+        return ("intermediate", "hidden"), 0
+    if tag in {
+        "attention_q_norm",
+        "attention_k_norm",
+        "block_pre_norm",
+        "block_post_norm",
+        "final_norm",
+    }:
+        return tuple("norm" for _dim in item.shape), None
+    return tuple("replicated" for _dim in item.shape), None

@@ -292,6 +292,97 @@ def test_run_training_with_four_device_data_axis_reports_global_and_per_device_m
     assert final["single_process"] is True
 
 
+def test_run_training_accepts_fsdp_parallelism(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "fsdp-loop",
+        shard_token_groups=(tuple(range(0, 80)),),
+        train_tokens=65,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=4,
+            n_kv_heads=4,
+            global_batch_size=4,
+            axis_names=("data", "fsdp"),
+            axis_sizes=(1, 4),
+            parallelism_mode="fsdp",
+        )
+    )
+
+    summary = run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+    checkpoint_index = json.loads((run_dir / "checkpoints" / "index.json").read_text())
+    metadata = json.loads((run_dir / "checkpoints" / "000001" / "metadata" / "metadata").read_text())
+    assert summary.execution_mode == "fsdp"
+    assert diagnostics["parallelism"]["mode"] == "fsdp"
+    assert diagnostics["parallelism"]["execution_mode"] == "fsdp"
+    assert diagnostics["sharding"]["model_state"]["mode"] == "fsdp"
+    assert diagnostics["sharding"]["model_state"]["fsdp_sharded_leaves"] > 0
+    assert diagnostics["compile"]["train"]["input_shardings"]["state"]["mode"] == "from_template"
+    assert checkpoint_index["latest_step"] == 1
+    assert metadata["compatibility"]["parallelism"]["mode"] == "fsdp"
+
+
+def test_run_training_accepts_zero2_parallelism(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "zero2-loop",
+        shard_token_groups=(tuple(range(0, 80)),),
+        train_tokens=65,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=4,
+            n_kv_heads=4,
+            global_batch_size=4,
+            axis_names=("data", "fsdp"),
+            axis_sizes=(1, 4),
+            parallelism_mode="zero2",
+        )
+    )
+
+    summary = run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+    checkpoint_index = json.loads((run_dir / "checkpoints" / "index.json").read_text())
+    metadata = json.loads((run_dir / "checkpoints" / "000001" / "metadata" / "metadata").read_text())
+    assert summary.execution_mode == "zero2"
+    assert diagnostics["parallelism"]["mode"] == "zero2"
+    assert diagnostics["sharding"]["model_state"]["fsdp_sharded_leaves"] == 0
+    assert diagnostics["sharding"]["optimizer_state"]["fsdp_sharded_leaves"] > 0
+    assert diagnostics["sharding"]["gradients"]["fsdp_sharded_leaves"] > 0
+    assert checkpoint_index["latest_step"] == 1
+    assert metadata["compatibility"]["parallelism"]["mode"] == "zero2"
+
+
 def test_run_training_with_gradient_accumulation_records_effective_batch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1458,6 +1549,9 @@ def _training_config(
     checkpoint_every_steps: int = 10,
     seed: int = 7,
     hidden_size: int = 8,
+    intermediate_size: int = 16,
+    num_heads: int = 2,
+    n_kv_heads: int = 1,
     remat: str = "none",
     optimizer_name: str = "adamw",
     weight_decay: float = 0.0,
@@ -1467,7 +1561,9 @@ def _training_config(
     seq_len: int = 4,
     global_batch_size: int = 2,
     gradient_accumulation_steps: int = 1,
+    axis_names: tuple[str, ...] = ("data",),
     axis_sizes: tuple[int, ...] = (1,),
+    parallelism_mode: str = "ddp",
     validation_manifest: Path | str | None = None,
     eval_every_steps: int | None = None,
     eval_num_batches: int = 1,
@@ -1514,10 +1610,10 @@ name = "decoder"
 variant = "tiny"
 vocab_size = 64
 hidden_size = {hidden_size}
-intermediate_size = 16
+intermediate_size = {intermediate_size}
 num_layers = 1
-num_heads = 2
-n_kv_heads = 1
+num_heads = {num_heads}
+n_kv_heads = {n_kv_heads}
 max_seq_len = 4
 compute_dtype = "float32"
 remat = "{remat}"
@@ -1550,8 +1646,11 @@ log_every_steps = {log_every_steps}
 checkpoint_every_steps = {checkpoint_every_steps}
 
 [mesh]
-axis_names = ["data"]
+axis_names = [{", ".join(f'"{name}"' for name in axis_names)}]
 axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
+
+[parallelism]
+mode = "{parallelism_mode}"
 {eval_block}
 """
 

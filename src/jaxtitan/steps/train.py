@@ -9,22 +9,31 @@ import jax.numpy as jnp
 from jaxtitan.batch import Batch
 from jaxtitan.errors import ContractError
 from jaxtitan.metrics import StepMetrics
-from jaxtitan.mesh import ShardingPlan, replicated_shardings_like
+from jaxtitan.mesh import ShardingPlan, gradient_shardings_like, replicated_shardings_like
 from jaxtitan.models import apply_model
 from jaxtitan.optim import OptimizerBuildResult, OptimizerTransform
 from jaxtitan.state import RngState, TrainState
 from jaxtitan.steps.eval import causal_lm_loss
 
 
-def initialize_train_state(model_state: Any, optimizer_transform: OptimizerTransform, seed: int) -> TrainState:
+def initialize_train_state(
+    model_state: Any,
+    optimizer_transform: OptimizerTransform,
+    seed: int,
+    *,
+    optimizer_init_model_state: Any | None = None,
+) -> TrainState:
     """Initialize explicit train state from model state and an optimizer transform."""
 
+    init_model_state = model_state if optimizer_init_model_state is None else optimizer_init_model_state
+    if jax.tree.structure(init_model_state) != jax.tree.structure(model_state):
+        raise ContractError("optimizer init model state must match model state structure")
     train_key, data_key, eval_key, sample_key = jax.random.split(jax.random.key(seed), 4)
     return TrainState(
         step=jnp.asarray(0, dtype=jnp.int32),
         tokens_seen=jnp.asarray(0, dtype=jnp.uint32),
         model=model_state,
-        opt_state=optimizer_transform.init(model_state),
+        opt_state=optimizer_transform.init(init_model_state),
         rng=RngState(train=train_key, data=data_key, eval=eval_key, sample=sample_key),
         schedule_state=None,
     )
@@ -55,6 +64,11 @@ def make_train_step(
     if sharding is not None and state_template is None:
         raise ContractError("state_template is required when compiling train step with explicit shardings")
     state_sharding = None if sharding is None else replicated_shardings_like(state_template, sharding)
+    gradient_sharding = (
+        None
+        if sharding is None or sharding.parallelism.mode != "zero2"
+        else gradient_shardings_like(state_template.model, sharding)
+    )
     in_shardings = None
     out_shardings = None
     if sharding is not None:
@@ -120,7 +134,11 @@ def make_train_step(
         )
         grad_denominator = jnp.asarray(token_count, dtype=jnp.float32)
         grads = jax.tree.map(lambda grad: grad / grad_denominator, grad_sum)
+        if gradient_sharding is not None:
+            grads = _constrain_like(grads, gradient_sharding)
         updates, next_opt_state = optimizer.transform.update(grads, state.opt_state, params=state.model)
+        if gradient_sharding is not None:
+            updates = _constrain_like(updates, gradient_sharding)
         next_model = jax.tree.map(lambda param, update: param + update, state.model, updates)
         next_step = state.step + jnp.asarray(1, dtype=state.step.dtype)
         next_tokens_seen = state.tokens_seen + token_count.astype(state.tokens_seen.dtype)
@@ -219,6 +237,10 @@ def _ensure_accumulation_axis(value: Any) -> Any:
     if len(_shape(value)) == 2:
         return jnp.asarray(value)[None, ...]
     return value
+
+
+def _constrain_like(tree: Any, shardings: Any) -> Any:
+    return jax.tree.map(lambda leaf, sharding: jax.lax.with_sharding_constraint(leaf, sharding), tree, shardings)
 
 
 def _tree_l2_norm(tree: Any):
