@@ -190,7 +190,12 @@ def test_dense_trinity_prefill_decode_matches_full_forward_logits() -> None:
 
 
 def test_trinity_moe_prefill_decode_matches_full_forward_logits() -> None:
-    spec = _tiny_trinity_spec(num_layers=2, initial_dense_layers=1, moe={"num_experts": 3, "top_k": 2})
+    spec = _tiny_trinity_spec(
+        num_layers=2,
+        initial_dense_layers=1,
+        norm_policy="afmoe_dual",
+        moe={"num_experts": 3, "top_k": 2, "num_shared_experts": 1, "route_scale": 1.25},
+    )
     built = build_model(spec, seed=0)
     state = initialize_inference_state(built.state, seed=1)
     prompt = jnp.asarray([[1, 2, 3], [4, 5, 6]], dtype=jnp.int32)
@@ -408,6 +413,7 @@ def _tiny_trinity_spec(**overrides) -> ModelSpec:
         "initial_dense_layers": 1,
         "local_window": 8,
         "local_layers_per_global": 1,
+        "norm_policy": "depth_scaled_sandwich",
         "moe": None,
     }
     for key in tuple(overrides):

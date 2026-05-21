@@ -72,7 +72,7 @@ class DecoderBlock(nnx.Module):
 
 
 class TrinityDenseBlock(nnx.Module):
-    """Dense Trinity-style transformer block with depth-scaled sandwich norms."""
+    """Dense Trinity-style transformer block."""
 
     def __init__(
         self,
@@ -86,7 +86,7 @@ class TrinityDenseBlock(nnx.Module):
         attention_gate: bool,
         kernel_init: Any,
     ):
-        post_scale = 1.0 / math.sqrt(spec.num_layers)
+        post_scale = _trinity_post_norm_scale(spec)
         self.attn_pre_norm = build_rms_norm(spec, rngs=rngs)
         self.attn = GroupedQueryAttention(
             spec,
@@ -163,7 +163,7 @@ class TrinityMoEBlock(nnx.Module):
         attention_gate: bool,
         kernel_init: Any,
     ):
-        post_scale = 1.0 / math.sqrt(spec.num_layers)
+        post_scale = _trinity_post_norm_scale(spec)
         self.attn_pre_norm = build_rms_norm(spec, rngs=rngs)
         self.attn = GroupedQueryAttention(
             spec,
@@ -223,3 +223,9 @@ class TrinityMoEBlock(nnx.Module):
         x = x + self.attn_post_norm(attn_out)
         x = x + self.ffn_post_norm(self.mlp(self.ffn_pre_norm(x)))
         return x, cache
+
+
+def _trinity_post_norm_scale(spec: ModelSpec) -> float:
+    if spec.trinity is not None and spec.trinity.norm_policy == "afmoe_dual":
+        return 1.0
+    return 1.0 / math.sqrt(spec.num_layers)

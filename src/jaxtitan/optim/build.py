@@ -37,6 +37,9 @@ _MUON_TAGS = frozenset(
         "mlp_gate",
         "mlp_up",
         "mlp_down",
+        "moe_shared_gate",
+        "moe_shared_up",
+        "moe_shared_down",
     }
 )
 _NORM_TAGS = frozenset(
@@ -324,7 +327,7 @@ def _route_assignments(
         if leaf is None:
             raise ContractError(f"optimizer metadata is missing model parameter path {'.'.join(item.path)!r}")
         backend, matrix_axis, resolution_reason = _resolve_backend(requested_backend, item, leaf)
-        weight_decay = True if rule is None else rule.weight_decay
+        weight_decay = _default_weight_decay(item) if rule is None else bool(rule.weight_decay and item.tag != "moe_expert_bias")
         _validate_route(item, backend)
         assignments.append(
             RouteAssignment(
@@ -539,9 +542,15 @@ def _fallback_reason(spec: OptimizerSpec, item: ParamMetadata, backend: str, exp
         return "lm_head"
     if item.tag in _NORM_TAGS:
         return "norm"
+    if item.tag == "moe_expert_bias":
+        return "expert_bias"
     if len(item.shape) != 2:
         return "rank_not_two"
     return "not_hidden_matrix"
+
+
+def _default_weight_decay(item: ParamMetadata) -> bool:
+    return item.tag != "moe_expert_bias"
 
 
 def _validate_assignment_paths(params: PyTree, assignments: tuple[RouteAssignment, ...]) -> None:

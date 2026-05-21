@@ -8,7 +8,7 @@ from jaxtitan.errors import ContractError
 
 _DTYPE_NAMES = {"float32", "bfloat16"}
 _REMAT_POLICIES = {"none", "block"}
-_TRINITY_NORM_POLICIES = {"depth_scaled_sandwich"}
+_TRINITY_NORM_POLICIES = {"afmoe_dual", "depth_scaled_sandwich"}
 _TRINITY_EMBEDDING_SCALES = {"sqrt_hidden"}
 
 
@@ -19,6 +19,8 @@ class TrinityMoeSpec:
     num_experts: int
     top_k: int
     expert_intermediate_size: int | None = None
+    num_shared_experts: int = 0
+    route_scale: float = 1.0
 
     def __post_init__(self) -> None:
         for field_name in ("num_experts", "top_k"):
@@ -33,6 +35,21 @@ class TrinityMoeSpec:
                 raise ContractError(
                     f"model.trinity.moe.expert_intermediate_size must be a positive integer, got {value!r}"
                 )
+        if (
+            not isinstance(self.num_shared_experts, int)
+            or isinstance(self.num_shared_experts, bool)
+            or self.num_shared_experts < 0
+        ):
+            raise ContractError(
+                "model.trinity.moe.num_shared_experts must be a non-negative integer, "
+                f"got {self.num_shared_experts!r}"
+            )
+        if (
+            not isinstance(self.route_scale, int | float)
+            or isinstance(self.route_scale, bool)
+            or self.route_scale <= 0.0
+        ):
+            raise ContractError(f"model.trinity.moe.route_scale must be positive, got {self.route_scale!r}")
 
 
 @dataclass(frozen=True, slots=True)

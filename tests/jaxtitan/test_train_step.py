@@ -99,7 +99,15 @@ def test_train_step_updates_dense_trinity_model() -> None:
 
 
 def test_train_step_updates_trinity_moe_model_with_adamw() -> None:
-    built = build_model(_tiny_trinity_spec(num_layers=2, initial_dense_layers=1, moe={"num_experts": 3, "top_k": 2}), seed=0)
+    built = build_model(
+        _tiny_trinity_spec(
+            num_layers=2,
+            initial_dense_layers=1,
+            norm_policy="afmoe_dual",
+            moe={"num_experts": 3, "top_k": 2, "num_shared_experts": 1, "route_scale": 1.25},
+        ),
+        seed=0,
+    )
     optimizer = _optimizer(built.state, built.metadata)
     state = initialize_train_state(built.state, optimizer.transform, seed=1)
     batch = _batch(batch_size=2, seq_len=4, vocab_size=16)
@@ -115,16 +123,30 @@ def test_train_step_updates_trinity_moe_model_with_adamw() -> None:
 
 
 def test_train_step_updates_trinity_moe_model_with_muon_fallback_routes() -> None:
-    built = build_model(_tiny_trinity_spec(num_layers=2, initial_dense_layers=1, moe={"num_experts": 3, "top_k": 2}), seed=0)
+    built = build_model(
+        _tiny_trinity_spec(
+            num_layers=2,
+            initial_dense_layers=1,
+            moe={"num_experts": 3, "top_k": 2, "num_shared_experts": 1},
+        ),
+        seed=0,
+    )
     optimizer = _optimizer(built.state, built.metadata, optimizer_name="muon")
     state = initialize_train_state(built.state, optimizer.transform, seed=1)
     batch = _batch(batch_size=2, seq_len=4, vocab_size=16)
 
     next_state, metrics = train_step(built.graph, optimizer, state, batch)
 
-    moe_routes = [assignment for assignment in optimizer.route_assignments if assignment.tag.startswith("moe_")]
-    assert {assignment.backend for assignment in moe_routes} == {"adamw"}
-    assert any(assignment.fallback_reason == "rank_not_two" for assignment in moe_routes)
+    routes = {assignment.tag: assignment for assignment in optimizer.route_assignments if assignment.tag.startswith("moe_")}
+    for tag in ("moe_gate", "moe_up", "moe_down"):
+        assert routes[tag].backend == "adamw"
+        assert routes[tag].fallback_reason == "rank_not_two"
+    for tag in ("moe_shared_gate", "moe_shared_up", "moe_shared_down"):
+        assert routes[tag].backend == "muon"
+    assert routes["moe_router"].backend == "adamw"
+    assert routes["moe_expert_bias"].backend == "adamw"
+    assert routes["moe_expert_bias"].weight_decay is False
+    assert routes["moe_expert_bias"].fallback_reason == "expert_bias"
     assert next_state.step == 1
     assert next_state.tokens_seen == 8
     assert metrics.token_count == 8
@@ -765,6 +787,7 @@ def _tiny_trinity_spec(**overrides) -> ModelSpec:
         "initial_dense_layers": 1,
         "local_window": 4,
         "local_layers_per_global": 1,
+        "norm_policy": "depth_scaled_sandwich",
         "moe": None,
     }
     for key in tuple(overrides):

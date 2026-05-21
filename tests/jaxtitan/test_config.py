@@ -143,10 +143,13 @@ def test_load_config_accepts_trinity_moe_section(tmp_path: Path) -> None:
 initial_dense_layers = 1
 local_window = 32
 local_layers_per_global = 3
+norm_policy = "afmoe_dual"
 
 [model.trinity.moe]
 num_experts = 4
 top_k = 2
+num_shared_experts = 2
+route_scale = 1.5
 """
     )
 
@@ -157,6 +160,9 @@ top_k = 2
     assert spec.model.trinity.moe.num_experts == 4
     assert spec.model.trinity.moe.top_k == 2
     assert spec.model.trinity.moe.expert_intermediate_size == spec.model.intermediate_size
+    assert spec.model.trinity.moe.num_shared_experts == 2
+    assert spec.model.trinity.moe.route_scale == 1.5
+    assert spec.model.trinity.norm_policy == "afmoe_dual"
 
 
 def test_load_config_rejects_missing_trinity_section(tmp_path: Path) -> None:
@@ -216,6 +222,52 @@ top_k = 3
     config_path.write_text(base)
 
     with pytest.raises(ConfigError, match="top_k"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("num_shared_experts", "-1", "num_shared_experts"),
+        ("route_scale", "0.0", "route_scale"),
+        ("route_scale", '"large"', "route_scale"),
+    ],
+)
+def test_load_config_rejects_invalid_afmoe_fields(tmp_path: Path, field: str, value: str, message: str) -> None:
+    config_path = tmp_path / "bad-afmoe.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        + f"""
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 4
+top_k = 2
+{field} = {value}
+"""
+    )
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(config_path)
+
+
+def test_load_config_rejects_invalid_trinity_norm_policy(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad-norm-policy.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        + """
+[model.trinity]
+initial_dense_layers = 2
+local_window = 32
+local_layers_per_global = 3
+norm_policy = "rmsnorm"
+"""
+    )
+
+    with pytest.raises(ConfigError, match="norm_policy"):
         load_config(config_path)
 
 

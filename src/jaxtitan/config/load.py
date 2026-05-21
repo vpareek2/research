@@ -163,10 +163,15 @@ def _trinity_section(raw: Mapping[str, Any]) -> TomlTrinitySection:
 
 
 def _trinity_moe_section(raw: Mapping[str, Any]) -> TomlTrinityMoeSection:
+    route_scale = raw.get("route_scale", 1.0)
+    if not isinstance(route_scale, int | float) or isinstance(route_scale, bool):
+        raise ConfigError("model.trinity.moe.route_scale must be numeric")
     return TomlTrinityMoeSection(
         num_experts=_required_int(raw, "num_experts", "model.trinity.moe"),
         top_k=_required_int(raw, "top_k", "model.trinity.moe"),
         expert_intermediate_size=_optional_int(raw, "expert_intermediate_size", "model.trinity.moe"),
+        num_shared_experts=_optional_int_with_default(raw, "num_shared_experts", "model.trinity.moe", default=0),
+        route_scale=float(route_scale),
     )
 
 

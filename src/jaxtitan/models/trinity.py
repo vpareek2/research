@@ -19,11 +19,7 @@ from jaxtitan.specs.model import ModelSpec, TrinitySpec
 
 
 class TrinityModel(nnx.Module):
-    """Dense-only Trinity recipe.
-
-    The recipe encodes Trinity's dense block shape while leaving MoE layers for
-    a later slice.
-    """
+    """Trinity recipe assembled from reusable dense and MoE components."""
 
     def __init__(self, spec: ModelSpec, rngs: nnx.Rngs):
         if spec.tied_embeddings:

@@ -168,6 +168,23 @@ def test_trinity_moe_recipe_uses_dense_prefix_then_moe_layers() -> None:
     assert all(isinstance(layer.mlp, SparseMoE) for layer in model.layers[1:])
 
 
+def test_trinity_afmoe_dual_norm_policy_uses_unit_post_norm_scale() -> None:
+    result = build_model(
+        _tiny_trinity_spec(
+            num_layers=2,
+            initial_dense_layers=1,
+            norm_policy="afmoe_dual",
+            moe={"num_experts": 3, "top_k": 2, "num_shared_experts": 1},
+        ),
+        seed=0,
+    )
+    model = nnx.merge(result.graph, result.state)
+
+    for layer in model.layers:
+        assert jnp.allclose(layer.attn_post_norm.scale[...], jnp.ones((model.spec.hidden_size,), dtype=jnp.float32))
+        assert jnp.allclose(layer.ffn_post_norm.scale[...], jnp.ones((model.spec.hidden_size,), dtype=jnp.float32))
+
+
 def test_sigmoid_top_k_router_is_deterministic_and_normalizes_weights() -> None:
     router = SigmoidTopKRouter(
         hidden_size=2,
@@ -187,6 +204,31 @@ def test_sigmoid_top_k_router_is_deterministic_and_normalizes_weights() -> None:
     assert jnp.array_equal(first.expert_ids[0, 0], jnp.asarray([2, 1], dtype=jnp.int32))
     assert jnp.allclose(jnp.sum(first.weights, axis=-1), jnp.ones((1, 2), dtype=jnp.float32))
     assert jnp.all(first.weights > 0)
+
+
+def test_sigmoid_top_k_router_uses_bias_for_selection_and_unbiased_scores_for_weights() -> None:
+    router = SigmoidTopKRouter(
+        hidden_size=2,
+        num_experts=3,
+        top_k=2,
+        dtype=jnp.float32,
+        param_dtype=jnp.float32,
+        rngs=nnx.Rngs(0),
+        route_scale=1.5,
+    )
+    router.proj.kernel[...] = jnp.asarray([[2.0, 0.0, -2.0], [0.0, 0.0, 0.0]], dtype=jnp.float32)
+    x = jnp.asarray([[[1.0, 0.0]]], dtype=jnp.float32)
+    bias = jnp.asarray([0.0, 0.0, 1.0], dtype=jnp.float32)
+
+    routed = router(x, expert_bias=bias)
+
+    unbiased_scores = jax.nn.sigmoid(jnp.asarray([2.0, 0.0, -2.0], dtype=jnp.float32))
+    expected_ids = jnp.asarray([[[2, 0]]], dtype=jnp.int32)
+    expected_selected_scores = jnp.asarray([unbiased_scores[2], unbiased_scores[0]], dtype=jnp.float32)
+    expected_weights = (expected_selected_scores / jnp.sum(expected_selected_scores)) * 1.5
+    assert jnp.array_equal(routed.expert_ids, expected_ids)
+    assert jnp.allclose(routed.weights[0, 0], expected_weights)
+    assert jnp.allclose(jnp.sum(routed.weights, axis=-1), jnp.asarray([[1.5]], dtype=jnp.float32))
 
 
 def test_expert_swiglu_matches_manual_selected_expert_calculation() -> None:
@@ -234,6 +276,20 @@ def test_expert_swiglu_matches_manual_selected_expert_calculation() -> None:
     outputs = jnp.einsum("...ki,...kih->...kh", hidden, selected_down)
     expected = jnp.sum(outputs * weights[..., None], axis=-2)
     assert jnp.allclose(actual, expected)
+
+
+def test_sparse_moe_adds_shared_expert_output() -> None:
+    spec = _tiny_trinity_spec(num_layers=2, initial_dense_layers=1, moe={"num_experts": 1, "top_k": 1, "num_shared_experts": 1})
+    moe = SparseMoE(spec, spec.trinity.moe, rngs=nnx.Rngs(0))
+    assert moe.shared_experts is not None
+    moe.experts.gate[...] = jnp.zeros_like(moe.experts.gate[...])
+    moe.experts.up[...] = jnp.zeros_like(moe.experts.up[...])
+    moe.experts.down[...] = jnp.zeros_like(moe.experts.down[...])
+    x = jnp.asarray([[[1.0] * spec.hidden_size]], dtype=jnp.float32)
+
+    actual = moe(x)
+
+    assert jnp.allclose(actual, moe.shared_experts(x))
 
 
 def test_model_parameter_dtype_follows_spec() -> None:
@@ -340,14 +396,29 @@ def test_dense_trinity_metadata_has_expected_dense_tags() -> None:
 
 
 def test_trinity_moe_metadata_has_expected_sparse_tags() -> None:
-    result = build_model(_tiny_trinity_spec(num_layers=2, initial_dense_layers=1, moe={"num_experts": 3, "top_k": 2}), seed=0)
+    result = build_model(
+        _tiny_trinity_spec(
+            num_layers=2,
+            initial_dense_layers=1,
+            moe={"num_experts": 3, "top_k": 2, "num_shared_experts": 1},
+        ),
+        seed=0,
+    )
 
     assert {
         "moe_router",
+        "moe_expert_bias",
         "moe_gate",
         "moe_up",
         "moe_down",
+        "moe_shared_gate",
+        "moe_shared_up",
+        "moe_shared_down",
     }.issubset({item.tag for item in result.metadata})
+    expert_bias = [item for item in result.metadata if item.tag == "moe_expert_bias"]
+    assert len(expert_bias) == 1
+    assert expert_bias[0].shape == (3,)
+    assert expert_bias[0].dtype == "float32"
     assert len(result.metadata) == len(nnx.to_flat_state(result.state))
     assert count_parameters(result.metadata) == sum(leaf.size for leaf in jax.tree.leaves(nnx.to_pure_dict(result.state)))
 
@@ -374,11 +445,21 @@ def test_dense_trinity_param_layouts_record_fsdp_policy() -> None:
 
 
 def test_trinity_moe_param_layouts_leave_sparse_experts_replicated() -> None:
-    result = build_model(_tiny_trinity_spec(num_layers=2, initial_dense_layers=1, moe={"num_experts": 3, "top_k": 2}), seed=0)
+    result = build_model(
+        _tiny_trinity_spec(
+            num_layers=2,
+            initial_dense_layers=1,
+            moe={"num_experts": 3, "top_k": 2, "num_shared_experts": 1},
+        ),
+        seed=0,
+    )
     layouts = {item.tag: item for item in result.param_layouts}
 
-    for tag in ("moe_router", "moe_gate", "moe_up", "moe_down"):
+    for tag in ("moe_router", "moe_expert_bias", "moe_gate", "moe_up", "moe_down"):
         assert layouts[tag].fsdp_axis is None
+    assert layouts["moe_shared_gate"].fsdp_axis == 1
+    assert layouts["moe_shared_up"].fsdp_axis == 1
+    assert layouts["moe_shared_down"].fsdp_axis == 0
 
 
 def test_sliding_window_mask_limits_attention_span() -> None:
@@ -425,6 +506,7 @@ def _tiny_trinity_spec(**overrides) -> ModelSpec:
         "initial_dense_layers": 1,
         "local_window": 8,
         "local_layers_per_global": 3,
+        "norm_policy": "depth_scaled_sandwich",
         "moe": None,
     }
     for key in tuple(overrides):

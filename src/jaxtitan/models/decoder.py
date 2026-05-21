@@ -254,7 +254,9 @@ def _tag_for_path(path: tuple[str, ...]) -> str:
         return "block_post_norm"
     if "attn" in path:
         return _attention_tag(path)
-    if "mlp" in path and ("router" in path or "experts" in path):
+    if "mlp" in path and (
+        "router" in path or "experts" in path or "shared_experts" in path or "expert_bias" in path
+    ):
         return _moe_tag(path)
     if "mlp" in path:
         return _mlp_tag(path)
@@ -284,8 +286,18 @@ def _mlp_tag(path: tuple[str, ...]) -> str:
 
 
 def _moe_tag(path: tuple[str, ...]) -> str:
+    if "expert_bias" in path:
+        return "moe_expert_bias"
     if "router" in path:
         return "moe_router"
+    if "shared_experts" in path:
+        for component, tag in (
+            ("gate", "moe_shared_gate"),
+            ("up", "moe_shared_up"),
+            ("down", "moe_shared_down"),
+        ):
+            if component in path:
+                return tag
     for component, tag in (("gate", "moe_gate"), ("up", "moe_up"), ("down", "moe_down")):
         if component in path:
             return tag
@@ -326,10 +338,16 @@ def _layout_policy(item: ParamMetadata) -> tuple[tuple[str, ...], int | None]:
         return ("intermediate", "hidden"), 0
     if tag == "moe_router":
         return ("hidden", "expert"), None
+    if tag == "moe_expert_bias":
+        return ("expert",), None
     if tag in {"moe_gate", "moe_up"}:
         return ("expert", "hidden", "intermediate"), None
     if tag == "moe_down":
         return ("expert", "intermediate", "hidden"), None
+    if tag in {"moe_shared_gate", "moe_shared_up"}:
+        return ("hidden", "intermediate"), 1
+    if tag == "moe_shared_down":
+        return ("intermediate", "hidden"), 0
     if tag in {
         "attention_q_norm",
         "attention_k_norm",

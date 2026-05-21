@@ -15,7 +15,7 @@ from jaxtitan.optim import (
 )
 from jaxtitan.optim.dion2 import dion2_policy_constants, dion2_transform, polar_express, select_dion2_slices
 from jaxtitan.specs.mesh import MeshSpec
-from jaxtitan.specs.model import ModelSpec
+from jaxtitan.specs.model import ModelSpec, TrinitySpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ParamRouteRule, ScheduleSpec
 from jaxtitan.specs.parallelism import ParallelismSpec
 
@@ -196,6 +196,34 @@ def test_muon_primary_routes_hidden_matrices_to_muon_with_adamw_fallback() -> No
     assert assignments[("embed", "embedding")].fallback_reason == "embedding"
     assert assignments[("lm_head", "kernel")].fallback_reason == "lm_head"
     assert assignments[("norm", "scale")].fallback_reason == "norm"
+
+
+def test_muon_routes_shared_moe_matrices_and_excludes_expert_bias_weight_decay() -> None:
+    result = build_model(
+        _tiny_trinity_spec(
+            num_layers=2,
+            initial_dense_layers=1,
+            moe={"num_experts": 3, "top_k": 2, "num_shared_experts": 1},
+        ),
+        seed=0,
+    )
+    built = build_optimizer(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.1),
+        result.state,
+        result.metadata,
+    )
+
+    assignments = {assignment.tag: assignment for assignment in built.route_assignments if assignment.tag.startswith("moe_")}
+    assert assignments["moe_shared_gate"].backend == "muon"
+    assert assignments["moe_shared_up"].backend == "muon"
+    assert assignments["moe_shared_down"].backend == "muon"
+    assert assignments["moe_router"].backend == "adamw"
+    assert assignments["moe_gate"].fallback_reason == "rank_not_two"
+    assert assignments["moe_up"].fallback_reason == "rank_not_two"
+    assert assignments["moe_down"].fallback_reason == "rank_not_two"
+    assert assignments["moe_expert_bias"].backend == "adamw"
+    assert assignments["moe_expert_bias"].weight_decay is False
+    assert assignments["moe_expert_bias"].fallback_reason == "expert_bias"
 
 
 def test_optimizer_policy_summary_records_distributed_safety() -> None:
@@ -484,6 +512,35 @@ def _tiny_spec(**overrides) -> ModelSpec:
         "max_seq_len": 8,
         "param_dtype": "float32",
         "compute_dtype": "bfloat16",
+    }
+    values.update(overrides)
+    return ModelSpec(**values)
+
+
+def _tiny_trinity_spec(**overrides) -> ModelSpec:
+    trinity_values = {
+        "initial_dense_layers": 1,
+        "local_window": 8,
+        "local_layers_per_global": 1,
+        "norm_policy": "depth_scaled_sandwich",
+        "moe": None,
+    }
+    for key in tuple(overrides):
+        if key in trinity_values:
+            trinity_values[key] = overrides.pop(key)
+    values = {
+        "name": "trinity",
+        "variant": "tiny",
+        "vocab_size": 32,
+        "hidden_size": 16,
+        "intermediate_size": 32,
+        "num_layers": 2,
+        "num_heads": 4,
+        "n_kv_heads": 2,
+        "max_seq_len": 8,
+        "param_dtype": "float32",
+        "compute_dtype": "bfloat16",
+        "trinity": TrinitySpec(**trinity_values),
     }
     values.update(overrides)
     return ModelSpec(**values)

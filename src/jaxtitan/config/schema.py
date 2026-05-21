@@ -16,6 +16,8 @@ class TomlTrinityMoeSection:
     num_experts: int
     top_k: int
     expert_intermediate_size: int | None = None
+    num_shared_experts: int = 0
+    route_scale: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
