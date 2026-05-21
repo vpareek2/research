@@ -18,6 +18,7 @@ from jaxtitan.config.schema import (
     TomlRunSection,
     TomlScheduleSection,
     TomlTrainingSection,
+    TomlTrinityMoeSection,
     TomlTrinitySection,
 )
 from jaxtitan.config.validate import validate_run_spec
@@ -147,6 +148,7 @@ def _model_section(raw: Mapping[str, Any]) -> TomlModelSection:
 
 
 def _trinity_section(raw: Mapping[str, Any]) -> TomlTrinitySection:
+    moe_raw = raw.get("moe")
     return TomlTrinitySection(
         initial_dense_layers=_required_int(raw, "initial_dense_layers", "model.trinity"),
         local_window=_required_int(raw, "local_window", "model.trinity"),
@@ -156,6 +158,15 @@ def _trinity_section(raw: Mapping[str, Any]) -> TomlTrinitySection:
         norm_policy=_optional_str(raw, "norm_policy", "model.trinity", default="depth_scaled_sandwich"),
         embedding_scale=_optional_str(raw, "embedding_scale", "model.trinity", default="sqrt_hidden"),
         init_std=_optional_float(raw, "init_std", "model.trinity"),
+        moe=None if moe_raw is None else _trinity_moe_section(_ensure_mapping(moe_raw, "model.trinity.moe")),
+    )
+
+
+def _trinity_moe_section(raw: Mapping[str, Any]) -> TomlTrinityMoeSection:
+    return TomlTrinityMoeSection(
+        num_experts=_required_int(raw, "num_experts", "model.trinity.moe"),
+        top_k=_required_int(raw, "top_k", "model.trinity.moe"),
+        expert_intermediate_size=_optional_int(raw, "expert_intermediate_size", "model.trinity.moe"),
     )
 
 

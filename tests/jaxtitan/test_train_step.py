@@ -3,6 +3,7 @@ import math
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 import pytest
 
 from jaxtitan.batch import Batch
@@ -16,8 +17,9 @@ from jaxtitan.mesh import (
     place_optimizer_init_state,
     place_replicated,
 )
-from jaxtitan.models import build_model
-from jaxtitan.optim import build_optimizer
+from jaxtitan.models import AuxLoss, ModelOutput, build_model
+from jaxtitan.optim import OptimizerBuildResult, build_optimizer
+import jaxtitan.steps.train as train_module
 from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec, TrinitySpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
@@ -96,6 +98,39 @@ def test_train_step_updates_dense_trinity_model() -> None:
     assert math.isfinite(float(jax.device_get(metrics.loss_sum)))
 
 
+def test_train_step_updates_trinity_moe_model_with_adamw() -> None:
+    built = build_model(_tiny_trinity_spec(num_layers=2, initial_dense_layers=1, moe={"num_experts": 3, "top_k": 2}), seed=0)
+    optimizer = _optimizer(built.state, built.metadata)
+    state = initialize_train_state(built.state, optimizer.transform, seed=1)
+    batch = _batch(batch_size=2, seq_len=4, vocab_size=16)
+
+    next_state, metrics = train_step(built.graph, optimizer, state, batch)
+
+    assert next_state.step == 1
+    assert next_state.tokens_seen == 8
+    assert _trees_changed(state.model, next_state.model)
+    assert _trees_changed(state.opt_state, next_state.opt_state)
+    assert metrics.token_count == 8
+    assert math.isfinite(float(jax.device_get(metrics.loss_sum)))
+
+
+def test_train_step_updates_trinity_moe_model_with_muon_fallback_routes() -> None:
+    built = build_model(_tiny_trinity_spec(num_layers=2, initial_dense_layers=1, moe={"num_experts": 3, "top_k": 2}), seed=0)
+    optimizer = _optimizer(built.state, built.metadata, optimizer_name="muon")
+    state = initialize_train_state(built.state, optimizer.transform, seed=1)
+    batch = _batch(batch_size=2, seq_len=4, vocab_size=16)
+
+    next_state, metrics = train_step(built.graph, optimizer, state, batch)
+
+    moe_routes = [assignment for assignment in optimizer.route_assignments if assignment.tag.startswith("moe_")]
+    assert {assignment.backend for assignment in moe_routes} == {"adamw"}
+    assert any(assignment.fallback_reason == "rank_not_two" for assignment in moe_routes)
+    assert next_state.step == 1
+    assert next_state.tokens_seen == 8
+    assert metrics.token_count == 8
+    assert math.isfinite(float(jax.device_get(metrics.loss_sum)))
+
+
 def test_train_state_is_a_jax_pytree() -> None:
     built = build_model(_tiny_spec(), seed=0)
     optimizer = _optimizer(built.state, built.metadata)
@@ -147,6 +182,41 @@ def test_partial_mask_controls_tokens_seen_and_metric_denominator() -> None:
     assert metrics.token_count == 2
     assert next_state.tokens_seen == 2
     assert math.isfinite(float(jax.device_get(metrics.loss_sum)))
+
+
+def test_train_step_aux_loss_changes_objective_without_changing_lm_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_apply_model_output(graph, params, input_ids):
+        logits = jnp.broadcast_to(jnp.stack([params, -params]), (*input_ids.shape, 2))
+        aux_losses = ()
+        if graph == "with_aux":
+            aux_losses = (AuxLoss(name="synthetic", value=jnp.square(params), weight=0.5),)
+        return ModelOutput(logits=logits, aux_losses=aux_losses)
+
+    monkeypatch.setattr(train_module, "apply_model_output", fake_apply_model_output)
+    optimizer = OptimizerBuildResult(
+        transform=optax.sgd(0.1),
+        schedule=lambda step: jnp.asarray(0.1, dtype=jnp.float32),
+        adamw_fallback_schedule=None,
+        route_assignments=(),
+        description="sgd",
+    )
+    initial_model = jnp.asarray(0.25, dtype=jnp.float32)
+    plain_state = initialize_train_state(initial_model, optimizer.transform, seed=1)
+    aux_state = initialize_train_state(initial_model, optimizer.transform, seed=1)
+    batch = Batch(
+        input_ids=jnp.zeros((2, 3), dtype=jnp.int32),
+        target_ids=jnp.zeros((2, 3), dtype=jnp.int32),
+        loss_mask=jnp.ones((2, 3), dtype=jnp.bool_),
+    )
+
+    next_plain, plain_metrics = make_train_step("plain", optimizer)(plain_state, batch)
+    next_aux, aux_metrics = make_train_step("with_aux", optimizer)(aux_state, batch)
+
+    assert jnp.allclose(aux_metrics.loss_sum, plain_metrics.loss_sum)
+    assert aux_metrics.token_count == plain_metrics.token_count == 6
+    assert aux_metrics.aux_loss > 0
+    assert aux_metrics.objective > plain_metrics.objective
+    assert next_aux.model < next_plain.model
 
 
 def test_train_step_rejects_bad_batch_shapes_before_compile() -> None:
@@ -691,6 +761,15 @@ def _tiny_spec(**overrides) -> ModelSpec:
 
 
 def _tiny_trinity_spec(**overrides) -> ModelSpec:
+    trinity_values = {
+        "initial_dense_layers": 1,
+        "local_window": 4,
+        "local_layers_per_global": 1,
+        "moe": None,
+    }
+    for key in tuple(overrides):
+        if key in trinity_values:
+            trinity_values[key] = overrides.pop(key)
     values = {
         "name": "trinity",
         "variant": "tiny",
@@ -702,11 +781,7 @@ def _tiny_trinity_spec(**overrides) -> ModelSpec:
         "n_kv_heads": 1,
         "max_seq_len": 4,
         "compute_dtype": "float32",
-        "trinity": TrinitySpec(
-            initial_dense_layers=1,
-            local_window=4,
-            local_layers_per_global=1,
-        ),
+        "trinity": TrinitySpec(**trinity_values),
     }
     values.update(overrides)
     return ModelSpec(**values)

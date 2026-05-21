@@ -15,6 +15,7 @@ from jaxtitan.models.components.blocks import DecoderBlock
 from jaxtitan.models.components.dtypes import dtype_from_name
 from jaxtitan.models.components.position import precompute_rope
 from jaxtitan.models.execution import apply_layer
+from jaxtitan.models.output import ModelOutput, ensure_model_output
 from jaxtitan.specs.model import ModelSpec
 
 
@@ -66,11 +67,17 @@ def build_model(spec: ModelSpec, seed: int) -> ModelBuildResult:
     return ModelBuildResult(graph=graph, state=state, metadata=metadata, param_layouts=parameter_layouts(metadata))
 
 
+def apply_model_output(graph: Any, state: Any, input_ids: Any) -> ModelOutput:
+    """Apply a split model graph/state and return the structured output."""
+
+    model = nnx.merge(graph, state)
+    return ensure_model_output(model(input_ids))
+
+
 def apply_model(graph: Any, state: Any, input_ids: Any) -> jax.Array:
     """Apply a split model graph/state to token ids."""
 
-    model = nnx.merge(graph, state)
-    return model(input_ids)
+    return apply_model_output(graph, state, input_ids).logits
 
 
 def prefill_model(
@@ -247,6 +254,8 @@ def _tag_for_path(path: tuple[str, ...]) -> str:
         return "block_post_norm"
     if "attn" in path:
         return _attention_tag(path)
+    if "mlp" in path and ("router" in path or "experts" in path):
+        return _moe_tag(path)
     if "mlp" in path:
         return _mlp_tag(path)
     raise ContractError(f"unrecognized decoder parameter path {'.'.join(path)}")
@@ -272,6 +281,15 @@ def _mlp_tag(path: tuple[str, ...]) -> str:
         if component in path:
             return tag
     raise ContractError(f"unrecognized MLP parameter path {'.'.join(path)}")
+
+
+def _moe_tag(path: tuple[str, ...]) -> str:
+    if "router" in path:
+        return "moe_router"
+    for component, tag in (("gate", "moe_gate"), ("up", "moe_up"), ("down", "moe_down")):
+        if component in path:
+            return tag
+    raise ContractError(f"unrecognized MoE parameter path {'.'.join(path)}")
 
 
 def _layout_for_metadata(item: ParamMetadata) -> ParamLayout:
@@ -306,6 +324,12 @@ def _layout_policy(item: ParamMetadata) -> tuple[tuple[str, ...], int | None]:
         return ("hidden", "intermediate"), 1
     if tag == "mlp_down":
         return ("intermediate", "hidden"), 0
+    if tag == "moe_router":
+        return ("hidden", "expert"), None
+    if tag in {"moe_gate", "moe_up"}:
+        return ("expert", "hidden", "intermediate"), None
+    if tag == "moe_down":
+        return ("expert", "intermediate", "hidden"), None
     if tag in {
         "attention_q_norm",
         "attention_k_norm",

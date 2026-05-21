@@ -10,7 +10,7 @@ from jaxtitan.batch import Batch
 from jaxtitan.errors import ContractError
 from jaxtitan.metrics import StepMetrics
 from jaxtitan.mesh import ShardingPlan, gradient_shardings_like, replicated_shardings_like
-from jaxtitan.models import apply_model
+from jaxtitan.models import apply_model_output
 from jaxtitan.optim import OptimizerBuildResult, OptimizerTransform
 from jaxtitan.state import RngState, TrainState
 from jaxtitan.steps.eval import causal_lm_loss
@@ -89,6 +89,8 @@ def make_train_step(
             sharding.metrics,
             sharding.metrics,
             sharding.metrics,
+            sharding.metrics,
+            sharding.metrics,
         )
 
     def _compiled_impl(
@@ -96,22 +98,27 @@ def make_train_step(
         input_ids: Any,
         target_ids: Any,
         loss_mask: Any,
-    ) -> tuple[TrainState, Any, Any, Any, Any, Any, Any, Any, Any, Any]:
+    ) -> tuple[TrainState, Any, Any, Any, Any, Any, Any, Any, Any, Any, Any, Any]:
         grad_zero = jax.tree.map(jnp.zeros_like, state.model)
 
         def microbatch_grad(params: Any, micro_input_ids: Any, micro_target_ids: Any, micro_loss_mask: Any):
-            def loss_sum_fn(loss_params: Any):
-                logits = apply_model(graph, loss_params, micro_input_ids)
-                loss = causal_lm_loss(logits, micro_target_ids, micro_loss_mask)
-                return loss.loss_sum, loss.token_count
+            def objective_sum_fn(loss_params: Any):
+                output = apply_model_output(graph, loss_params, micro_input_ids)
+                loss = causal_lm_loss(output.logits, micro_target_ids, micro_loss_mask)
+                aux_loss = _aux_loss_value(output.aux_losses)
+                objective_sum = loss.loss_sum + aux_loss * loss.token_count.astype(jnp.float32)
+                return objective_sum, (loss.loss_sum, loss.token_count, aux_loss)
 
-            (loss_sum, token_count), grads = jax.value_and_grad(loss_sum_fn, has_aux=True)(params)
-            return loss_sum, token_count, grads
+            (objective_sum, (loss_sum, token_count, aux_loss)), grads = jax.value_and_grad(
+                objective_sum_fn,
+                has_aux=True,
+            )(params)
+            return loss_sum, token_count, aux_loss, objective_sum, grads
 
-        def accumulate(carry: tuple[Any, Any, Any], micro: tuple[Any, Any, Any]):
-            grad_accum, loss_sum_accum, token_count_accum = carry
+        def accumulate(carry: tuple[Any, Any, Any, Any], micro: tuple[Any, Any, Any]):
+            grad_accum, loss_sum_accum, token_count_accum, objective_sum_accum = carry
             micro_input_ids, micro_target_ids, micro_loss_mask = micro
-            loss_sum, token_count, grads = microbatch_grad(
+            loss_sum, token_count, aux_loss, objective_sum, grads = microbatch_grad(
                 state.model,
                 micro_input_ids,
                 micro_target_ids,
@@ -121,14 +128,21 @@ def make_train_step(
                 jax.tree.map(lambda total, grad: total + grad, grad_accum, grads),
                 loss_sum_accum + loss_sum,
                 token_count_accum + token_count,
+                objective_sum_accum + objective_sum,
             ), (loss_sum, token_count)
 
-        (grad_sum, loss_sum, token_count), (micro_loss_sums, micro_token_counts) = jax.lax.scan(
+        (
+            grad_sum,
+            loss_sum,
+            token_count,
+            objective_sum,
+        ), (micro_loss_sums, micro_token_counts) = jax.lax.scan(
             accumulate,
             (
                 grad_zero,
                 jnp.asarray(0.0, dtype=jnp.float32),
                 jnp.asarray(0, dtype=jnp.int32),
+                jnp.asarray(0.0, dtype=jnp.float32),
             ),
             (input_ids, target_ids, loss_mask),
         )
@@ -156,6 +170,8 @@ def make_train_step(
         microbatch_loss_mean = jnp.mean(micro_losses)
         microbatch_loss_max = jnp.max(micro_losses)
         batch_het = microbatch_loss_max - microbatch_loss_mean
+        objective = objective_sum / grad_denominator
+        aux_loss = objective - (loss_sum / grad_denominator)
         return (
             next_state,
             loss_sum,
@@ -164,6 +180,8 @@ def make_train_step(
             grad_norm,
             param_norm,
             update_norm,
+            objective,
+            aux_loss,
             microbatch_loss_mean,
             microbatch_loss_max,
             batch_het,
@@ -186,6 +204,8 @@ def make_train_step(
             grad_norm,
             param_norm,
             update_norm,
+            objective,
+            aux_loss,
             microbatch_loss_mean,
             microbatch_loss_max,
             batch_het,
@@ -203,6 +223,9 @@ def make_train_step(
             param_norm=param_norm,
             update_norm=update_norm,
             overflow=None,
+            objective=objective,
+            aux_loss=aux_loss,
+            aux_metrics=(),
             microbatch_loss_mean=microbatch_loss_mean,
             microbatch_loss_max=microbatch_loss_max,
             batch_het=batch_het,
@@ -241,6 +264,13 @@ def _ensure_accumulation_axis(value: Any) -> Any:
 
 def _constrain_like(tree: Any, shardings: Any) -> Any:
     return jax.tree.map(lambda leaf, sharding: jax.lax.with_sharding_constraint(leaf, sharding), tree, shardings)
+
+
+def _aux_loss_value(aux_losses: Any):
+    total = jnp.asarray(0.0, dtype=jnp.float32)
+    for aux_loss in aux_losses:
+        total = total + jnp.asarray(aux_loss.value, dtype=jnp.float32) * jnp.asarray(aux_loss.weight, dtype=jnp.float32)
+    return total
 
 
 def _tree_l2_norm(tree: Any):

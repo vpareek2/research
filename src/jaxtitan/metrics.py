@@ -20,6 +20,9 @@ class StepMetrics:
     param_norm: ArrayScalar | None = None
     update_norm: ArrayScalar | None = None
     overflow: ArrayScalar | None = None
+    objective: ArrayScalar | None = None
+    aux_loss: ArrayScalar | None = None
+    aux_metrics: Any = ()
     microbatch_loss_mean: ArrayScalar | None = None
     microbatch_loss_max: ArrayScalar | None = None
     batch_het: ArrayScalar | None = None

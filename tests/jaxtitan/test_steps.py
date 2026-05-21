@@ -8,10 +8,11 @@ import pytest
 from jaxtitan.batch import Batch
 from jaxtitan.errors import ContractError
 from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch, place_replicated
-from jaxtitan.models import build_model
+from jaxtitan.models import AuxLoss, ModelOutput, build_model
 from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.steps import causal_lm_loss, eval_step, make_eval_step
+import jaxtitan.steps.eval as eval_module
 
 FAKE_DEVICE_COUNT = 4
 
@@ -77,6 +78,26 @@ def test_eval_step_returns_numerator_denominator_metrics() -> None:
     assert metrics.num_batches == 1
     assert metrics.byte_count is None
     assert math.isfinite(float(jax.device_get(metrics.loss_sum)))
+
+
+def test_eval_step_ignores_aux_losses_for_validation_loss(monkeypatch: pytest.MonkeyPatch) -> None:
+    logits = jnp.asarray([[[2.0, -1.0], [0.5, 1.0]]], dtype=jnp.float32)
+
+    def fake_apply_model_output(_graph, _state, _input_ids):
+        return ModelOutput(logits=logits, aux_losses=(AuxLoss(name="synthetic", value=jnp.asarray(10.0)),))
+
+    monkeypatch.setattr(eval_module, "apply_model_output", fake_apply_model_output)
+    batch = Batch(
+        input_ids=jnp.asarray([[0, 0]], dtype=jnp.int32),
+        target_ids=jnp.asarray([[0, 1]], dtype=jnp.int32),
+        loss_mask=jnp.asarray([[True, True]], dtype=jnp.bool_),
+    )
+
+    metrics = eval_step("graph", jnp.asarray(0.0), batch)
+    expected = causal_lm_loss(logits, batch.target_ids, batch.loss_mask)
+
+    assert jnp.allclose(metrics.loss_sum, expected.loss_sum)
+    assert metrics.token_count == expected.token_count
 
 
 def test_eval_step_rejects_bad_batch_shapes_before_compile() -> None:

@@ -4,15 +4,19 @@ import pytest
 from flax import nnx
 
 from jaxtitan.errors import ContractError
-from jaxtitan.models import apply_model, build_model, count_parameters, dtype_from_name
+from jaxtitan.models import ModelOutput, apply_model, apply_model_output, build_model, count_parameters, dtype_from_name
 from jaxtitan.models.components import (
     DecoderBlock,
     DecoderSwiGLU,
+    ExpertSwiGLU,
     GroupedQueryAttention,
+    SigmoidTopKRouter,
+    SparseMoE,
     TrinityDenseBlock,
+    TrinityMoEBlock,
     full_sequence_attention_mask,
 )
-from jaxtitan.specs.model import ModelSpec, TrinitySpec
+from jaxtitan.specs.model import ModelSpec, TrinityMoeSpec, TrinitySpec
 
 
 def test_model_spec_validates_decoder_runtime_fields() -> None:
@@ -73,6 +77,19 @@ def test_apply_model_returns_fixed_shape_logits() -> None:
     assert logits.dtype == jnp.bfloat16
 
 
+def test_apply_model_output_wraps_logits_and_matches_apply_model() -> None:
+    result = build_model(_tiny_spec(vocab_size=48, compute_dtype="bfloat16"), seed=0)
+    input_ids = jnp.arange(16, dtype=jnp.int32).reshape(2, 8)
+
+    output = apply_model_output(result.graph, result.state, input_ids)
+
+    assert isinstance(output, ModelOutput)
+    assert jnp.array_equal(output.logits, apply_model(result.graph, result.state, input_ids))
+    assert output.aux_losses == ()
+    assert output.aux_metrics == ()
+    assert jax.tree.leaves(output)
+
+
 def test_dense_trinity_apply_model_returns_fixed_shape_logits() -> None:
     result = build_model(_tiny_trinity_spec(vocab_size=48, compute_dtype="bfloat16"), seed=0)
     input_ids = jnp.arange(16, dtype=jnp.int32).reshape(2, 8)
@@ -80,6 +97,16 @@ def test_dense_trinity_apply_model_returns_fixed_shape_logits() -> None:
     logits = apply_model(result.graph, result.state, input_ids)
 
     assert logits.shape == (2, 8, 48)
+    assert logits.dtype == jnp.bfloat16
+
+
+def test_trinity_moe_apply_model_returns_fixed_shape_logits() -> None:
+    result = build_model(_tiny_trinity_spec(num_layers=2, initial_dense_layers=1, moe={"num_experts": 3, "top_k": 2}), seed=0)
+    input_ids = jnp.arange(16, dtype=jnp.int32).reshape(2, 8)
+
+    logits = apply_model(result.graph, result.state, input_ids)
+
+    assert logits.shape == (2, 8, 32)
     assert logits.dtype == jnp.bfloat16
 
 
@@ -129,6 +156,84 @@ def test_dense_trinity_recipe_assembles_dense_blocks_and_layer_pattern() -> None
     assert all(isinstance(layer, TrinityDenseBlock) for layer in model.layers)
     assert [layer.attn.position for layer in model.layers] == ["rope", "rope", "none", "rope"]
     assert [layer.attn.mask for layer in model.layers] == ["sliding_window", "sliding_window", "causal", "sliding_window"]
+
+
+def test_trinity_moe_recipe_uses_dense_prefix_then_moe_layers() -> None:
+    result = build_model(_tiny_trinity_spec(num_layers=3, initial_dense_layers=1, moe={"num_experts": 4, "top_k": 2}), seed=0)
+    model = nnx.merge(result.graph, result.state)
+
+    assert model.layer_kind == ("dense", "moe", "moe")
+    assert isinstance(model.layers[0], TrinityDenseBlock)
+    assert all(isinstance(layer, TrinityMoEBlock) for layer in model.layers[1:])
+    assert all(isinstance(layer.mlp, SparseMoE) for layer in model.layers[1:])
+
+
+def test_sigmoid_top_k_router_is_deterministic_and_normalizes_weights() -> None:
+    router = SigmoidTopKRouter(
+        hidden_size=2,
+        num_experts=3,
+        top_k=2,
+        dtype=jnp.float32,
+        param_dtype=jnp.float32,
+        rngs=nnx.Rngs(0),
+    )
+    router.proj.kernel[...] = jnp.asarray([[0.0, 1.0, 2.0], [0.0, 0.0, 0.0]], dtype=jnp.float32)
+    x = jnp.asarray([[[1.0, 0.0], [0.5, 0.0]]], dtype=jnp.float32)
+
+    first = router(x)
+    second = router(x)
+
+    assert jnp.array_equal(first.expert_ids, second.expert_ids)
+    assert jnp.array_equal(first.expert_ids[0, 0], jnp.asarray([2, 1], dtype=jnp.int32))
+    assert jnp.allclose(jnp.sum(first.weights, axis=-1), jnp.ones((1, 2), dtype=jnp.float32))
+    assert jnp.all(first.weights > 0)
+
+
+def test_expert_swiglu_matches_manual_selected_expert_calculation() -> None:
+    experts = ExpertSwiGLU(
+        hidden_size=2,
+        intermediate_size=2,
+        num_experts=2,
+        dtype=jnp.float32,
+        param_dtype=jnp.float32,
+        rngs=nnx.Rngs(0),
+    )
+    experts.gate[...] = jnp.asarray(
+        [
+            [[1.0, 0.0], [0.0, 1.0]],
+            [[0.5, 0.0], [0.0, 0.5]],
+        ],
+        dtype=jnp.float32,
+    )
+    experts.up[...] = jnp.asarray(
+        [
+            [[1.0, 1.0], [1.0, 1.0]],
+            [[2.0, 0.0], [0.0, 2.0]],
+        ],
+        dtype=jnp.float32,
+    )
+    experts.down[...] = jnp.asarray(
+        [
+            [[1.0, 0.0], [0.0, 1.0]],
+            [[1.0, 1.0], [1.0, -1.0]],
+        ],
+        dtype=jnp.float32,
+    )
+    x = jnp.asarray([[[1.0, 2.0]]], dtype=jnp.float32)
+    expert_ids = jnp.asarray([[[1, 0]]], dtype=jnp.int32)
+    weights = jnp.asarray([[[0.25, 0.75]]], dtype=jnp.float32)
+
+    actual = experts(x, expert_ids, weights)
+
+    selected_gate = experts.gate[...][expert_ids]
+    selected_up = experts.up[...][expert_ids]
+    selected_down = experts.down[...][expert_ids]
+    gate = jnp.einsum("...h,...khi->...ki", x, selected_gate)
+    up = jnp.einsum("...h,...khi->...ki", x, selected_up)
+    hidden = jax.nn.silu(gate) * up
+    outputs = jnp.einsum("...ki,...kih->...kh", hidden, selected_down)
+    expected = jnp.sum(outputs * weights[..., None], axis=-2)
+    assert jnp.allclose(actual, expected)
 
 
 def test_model_parameter_dtype_follows_spec() -> None:
@@ -234,6 +339,19 @@ def test_dense_trinity_metadata_has_expected_dense_tags() -> None:
     }
 
 
+def test_trinity_moe_metadata_has_expected_sparse_tags() -> None:
+    result = build_model(_tiny_trinity_spec(num_layers=2, initial_dense_layers=1, moe={"num_experts": 3, "top_k": 2}), seed=0)
+
+    assert {
+        "moe_router",
+        "moe_gate",
+        "moe_up",
+        "moe_down",
+    }.issubset({item.tag for item in result.metadata})
+    assert len(result.metadata) == len(nnx.to_flat_state(result.state))
+    assert count_parameters(result.metadata) == sum(leaf.size for leaf in jax.tree.leaves(nnx.to_pure_dict(result.state)))
+
+
 def test_dense_trinity_param_layouts_record_fsdp_policy() -> None:
     result = build_model(_tiny_trinity_spec(), seed=0)
     layouts = {item.tag: item for item in result.param_layouts}
@@ -253,6 +371,14 @@ def test_dense_trinity_param_layouts_record_fsdp_policy() -> None:
         assert layouts[tag].fsdp_axis == 1
     for tag in ("attention_o", "mlp_down", "lm_head"):
         assert layouts[tag].fsdp_axis == 0
+
+
+def test_trinity_moe_param_layouts_leave_sparse_experts_replicated() -> None:
+    result = build_model(_tiny_trinity_spec(num_layers=2, initial_dense_layers=1, moe={"num_experts": 3, "top_k": 2}), seed=0)
+    layouts = {item.tag: item for item in result.param_layouts}
+
+    for tag in ("moe_router", "moe_gate", "moe_up", "moe_down"):
+        assert layouts[tag].fsdp_axis is None
 
 
 def test_sliding_window_mask_limits_attention_span() -> None:
@@ -299,6 +425,7 @@ def _tiny_trinity_spec(**overrides) -> ModelSpec:
         "initial_dense_layers": 1,
         "local_window": 8,
         "local_layers_per_global": 3,
+        "moe": None,
     }
     for key in tuple(overrides):
         if key in trinity_values:

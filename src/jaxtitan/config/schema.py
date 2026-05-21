@@ -12,6 +12,13 @@ class TomlRunSection:
 
 
 @dataclass(frozen=True, slots=True)
+class TomlTrinityMoeSection:
+    num_experts: int
+    top_k: int
+    expert_intermediate_size: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TomlTrinitySection:
     initial_dense_layers: int
     local_window: int
@@ -21,6 +28,7 @@ class TomlTrinitySection:
     norm_policy: str = "depth_scaled_sandwich"
     embedding_scale: str = "sqrt_hidden"
     init_std: float | None = None
+    moe: TomlTrinityMoeSection | None = None
 
 
 @dataclass(frozen=True, slots=True)

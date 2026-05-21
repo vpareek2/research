@@ -11,7 +11,7 @@ from jaxtitan.batch import Batch
 from jaxtitan.errors import ContractError
 from jaxtitan.metrics import EvalMetrics
 from jaxtitan.mesh import ShardingPlan, replicated_shardings_like
-from jaxtitan.models import apply_model
+from jaxtitan.models import apply_model_output
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,8 +66,8 @@ def make_eval_step(
         out_shardings = (sharding.metrics, sharding.metrics)
 
     def _compiled_impl(state: Any, input_ids: Any, target_ids: Any, loss_mask: Any) -> tuple[Any, Any]:
-        logits = apply_model(graph, state, input_ids)
-        loss = causal_lm_loss(logits, target_ids, loss_mask)
+        output = apply_model_output(graph, state, input_ids)
+        loss = causal_lm_loss(output.logits, target_ids, loss_mask)
         return loss.loss_sum, loss.token_count
 
     _compiled = jax.jit(_compiled_impl, in_shardings=in_shardings, out_shardings=out_shardings)

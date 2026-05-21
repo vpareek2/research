@@ -6,20 +6,26 @@ from jaxtitan.models.decoder import (
     ParamMetadata,
     ParamLayout,
     apply_model,
+    apply_model_output,
     build_model,
     count_parameters,
     decode_model,
     dtype_from_name,
     prefill_model,
 )
+from jaxtitan.models.output import AuxLoss, AuxMetric, ModelOutput
 from jaxtitan.models.trinity import TrinityModel
 
 __all__ = [
+    "AuxLoss",
+    "AuxMetric",
     "DecoderModel",
+    "ModelOutput",
     "ModelBuildResult",
     "ParamMetadata",
     "ParamLayout",
     "apply_model",
+    "apply_model_output",
     "build_model",
     "count_parameters",
     "decode_model",

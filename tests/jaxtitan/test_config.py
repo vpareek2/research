@@ -134,6 +134,31 @@ init_std = 0.02
     assert spec.model.trinity.init_std == 0.02
 
 
+def test_load_config_accepts_trinity_moe_section(tmp_path: Path) -> None:
+    config_path = tmp_path / "trinity-moe.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 4
+top_k = 2
+"""
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.model.trinity is not None
+    assert spec.model.trinity.moe is not None
+    assert spec.model.trinity.moe.num_experts == 4
+    assert spec.model.trinity.moe.top_k == 2
+    assert spec.model.trinity.moe.expert_intermediate_size == spec.model.intermediate_size
+
+
 def test_load_config_rejects_missing_trinity_section(tmp_path: Path) -> None:
     config_path = tmp_path / "bad-trinity.toml"
     config_path.write_text(MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"'))
@@ -170,6 +195,27 @@ local_window = 32
     )
 
     with pytest.raises(ConfigError, match="model.trinity.local_layers_per_global"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_invalid_trinity_moe_section(tmp_path: Path) -> None:
+    base = (
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 2
+top_k = 3
+"""
+    )
+    config_path = tmp_path / "bad-moe.toml"
+    config_path.write_text(base)
+
+    with pytest.raises(ConfigError, match="top_k"):
         load_config(config_path)
 
 

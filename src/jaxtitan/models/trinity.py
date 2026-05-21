@@ -9,7 +9,7 @@ from flax import nnx
 
 from jaxtitan.errors import ContractError
 from jaxtitan.models.components.attention import FullAttentionContext
-from jaxtitan.models.components.blocks import TrinityDenseBlock
+from jaxtitan.models.components.blocks import TrinityDenseBlock, TrinityMoEBlock
 from jaxtitan.models.components.dtypes import dtype_from_name
 from jaxtitan.models.components.init import truncated_normal_init
 from jaxtitan.models.components.norm import build_rms_norm
@@ -32,6 +32,7 @@ class TrinityModel(nnx.Module):
         self.spec = spec
         self.trinity = trinity
         self.layer_attention = tuple(_layer_attention_kind(index, trinity) for index in range(spec.num_layers))
+        self.layer_kind = tuple(_layer_kind(index, trinity) for index in range(spec.num_layers))
         dtype = dtype_from_name(spec.compute_dtype)
         param_dtype = dtype_from_name(spec.param_dtype)
         init_std = trinity.init_std if trinity.init_std is not None else 0.5 / math.sqrt(spec.hidden_size)
@@ -46,17 +47,15 @@ class TrinityModel(nnx.Module):
         )
         self.layers = nnx.List(
             [
-                TrinityDenseBlock(
-                    spec,
+                _build_layer(
+                    spec=spec,
+                    trinity=trinity,
+                    layer_kind=layer_kind,
+                    attention_kind=attention_kind,
                     rngs=rngs,
-                    attention_position="none" if kind == "global" else "rope",
-                    attention_mask="causal" if kind == "global" else "sliding_window",
-                    local_window=None if kind == "global" else trinity.local_window,
-                    qk_norm=trinity.qk_norm,
-                    attention_gate=trinity.attention_gate,
                     kernel_init=initializer,
                 )
-                for kind in self.layer_attention
+                for layer_kind, attention_kind in zip(self.layer_kind, self.layer_attention, strict=True)
             ]
         )
         self.norm = build_rms_norm(spec, rngs=rngs)
@@ -147,3 +146,37 @@ def _trinity_spec(spec: ModelSpec) -> TrinitySpec:
 def _layer_attention_kind(index: int, trinity: TrinitySpec) -> str:
     cycle = trinity.local_layers_per_global + 1
     return "global" if (index + 1) % cycle == 0 else "local"
+
+
+def _layer_kind(index: int, trinity: TrinitySpec) -> str:
+    if trinity.moe is None or index < trinity.initial_dense_layers:
+        return "dense"
+    return "moe"
+
+
+def _build_layer(
+    *,
+    spec: ModelSpec,
+    trinity: TrinitySpec,
+    layer_kind: str,
+    attention_kind: str,
+    rngs: nnx.Rngs,
+    kernel_init: Any,
+) -> TrinityDenseBlock | TrinityMoEBlock:
+    kwargs = {
+        "spec": spec,
+        "rngs": rngs,
+        "attention_position": "none" if attention_kind == "global" else "rope",
+        "attention_mask": "causal" if attention_kind == "global" else "sliding_window",
+        "local_window": None if attention_kind == "global" else trinity.local_window,
+        "qk_norm": trinity.qk_norm,
+        "attention_gate": trinity.attention_gate,
+        "kernel_init": kernel_init,
+    }
+    if layer_kind == "dense":
+        return TrinityDenseBlock(**kwargs)
+    if layer_kind == "moe":
+        if trinity.moe is None:
+            raise ContractError("Trinity MoE layer requires model.trinity.moe")
+        return TrinityMoEBlock(moe=trinity.moe, **kwargs)
+    raise ContractError(f"unsupported Trinity layer kind {layer_kind!r}")

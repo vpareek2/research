@@ -1,7 +1,7 @@
 """Model architecture specs."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from jaxtitan.errors import ContractError
@@ -10,6 +10,29 @@ _DTYPE_NAMES = {"float32", "bfloat16"}
 _REMAT_POLICIES = {"none", "block"}
 _TRINITY_NORM_POLICIES = {"depth_scaled_sandwich"}
 _TRINITY_EMBEDDING_SCALES = {"sqrt_hidden"}
+
+
+@dataclass(frozen=True, slots=True)
+class TrinityMoeSpec:
+    """Trinity sparse feed-forward contract."""
+
+    num_experts: int
+    top_k: int
+    expert_intermediate_size: int | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in ("num_experts", "top_k"):
+            value = getattr(self, field_name)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ContractError(f"model.trinity.moe.{field_name} must be a positive integer, got {value!r}")
+        if self.top_k > self.num_experts:
+            raise ContractError("model.trinity.moe.top_k must be <= model.trinity.moe.num_experts")
+        if self.expert_intermediate_size is not None:
+            value = self.expert_intermediate_size
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ContractError(
+                    f"model.trinity.moe.expert_intermediate_size must be a positive integer, got {value!r}"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,8 +47,15 @@ class TrinitySpec:
     norm_policy: str = "depth_scaled_sandwich"
     embedding_scale: str = "sqrt_hidden"
     init_std: float | None = None
+    moe: TrinityMoeSpec | Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
+        moe = self.moe
+        if isinstance(moe, Mapping):
+            moe = TrinityMoeSpec(**dict(moe))
+            object.__setattr__(self, "moe", moe)
+        elif moe is not None and not isinstance(moe, TrinityMoeSpec):
+            raise ContractError("model.trinity.moe must be a TrinityMoeSpec or mapping")
         for field_name in ("initial_dense_layers", "local_window", "local_layers_per_global"):
             value = getattr(self, field_name)
             if not isinstance(value, int) or isinstance(value, bool):
@@ -102,8 +132,16 @@ class ModelSpec:
         if self.name == "trinity":
             if trinity is None:
                 raise ContractError("model.name='trinity' requires [model.trinity]")
+            if trinity.moe is not None and trinity.moe.expert_intermediate_size is None:
+                trinity = replace(
+                    trinity,
+                    moe=replace(trinity.moe, expert_intermediate_size=self.intermediate_size),
+                )
+                object.__setattr__(self, "trinity", trinity)
             if trinity.initial_dense_layers > self.num_layers:
                 raise ContractError("model.trinity.initial_dense_layers must be <= model.num_layers")
+            if trinity.moe is not None and trinity.initial_dense_layers >= self.num_layers:
+                raise ContractError("model.trinity.initial_dense_layers must leave at least one MoE layer")
             if trinity.local_window > self.max_seq_len:
                 raise ContractError("model.trinity.local_window must be <= model.max_seq_len")
         elif trinity is not None:

@@ -189,6 +189,35 @@ def test_dense_trinity_prefill_decode_matches_full_forward_logits() -> None:
     assert jnp.allclose(decoded.logits, full[:, -1, :], atol=1e-5)
 
 
+def test_trinity_moe_prefill_decode_matches_full_forward_logits() -> None:
+    spec = _tiny_trinity_spec(num_layers=2, initial_dense_layers=1, moe={"num_experts": 3, "top_k": 2})
+    built = build_model(spec, seed=0)
+    state = initialize_inference_state(built.state, seed=1)
+    prompt = jnp.asarray([[1, 2, 3], [4, 5, 6]], dtype=jnp.int32)
+    positions = jnp.broadcast_to(jnp.arange(3, dtype=jnp.int32)[None, :], prompt.shape)
+    cache = init_kv_cache(spec, batch_size=2, max_cache_len=5)
+    prefill_output = prefill(
+        built.graph,
+        state,
+        PrefillBatch(input_ids=prompt, positions=positions, attention_mask=jnp.ones_like(prompt, dtype=jnp.bool_)),
+        cache,
+    )
+    token_ids = jnp.asarray([7, 8], dtype=jnp.int32)
+    decode_positions = jnp.asarray([3, 3], dtype=jnp.int32)
+    attention_mask = jnp.broadcast_to((jnp.arange(5) <= 3)[None, :], (2, 5))
+
+    decoded = decode_one(
+        built.graph,
+        state,
+        DecodeBatch(token_ids=token_ids, positions=decode_positions, attention_mask=attention_mask),
+        prefill_output.cache,
+    )
+
+    full = apply_model(built.graph, built.state, jnp.concatenate([prompt, token_ids[:, None]], axis=1))
+    assert jnp.allclose(prefill_output.logits, apply_model(built.graph, built.state, prompt), atol=1e-5)
+    assert jnp.allclose(decoded.logits, full[:, -1, :], atol=1e-5)
+
+
 def test_prefill_and_decode_reject_invalid_shapes_and_positions() -> None:
     spec = _tiny_spec(max_seq_len=8, compute_dtype="float32")
     built = build_model(spec, seed=0)
@@ -375,11 +404,16 @@ def _tiny_spec(**overrides) -> ModelSpec:
 
 
 def _tiny_trinity_spec(**overrides) -> ModelSpec:
-    trinity = TrinitySpec(
-        initial_dense_layers=1,
-        local_window=8,
-        local_layers_per_global=1,
-    )
+    trinity_values = {
+        "initial_dense_layers": 1,
+        "local_window": 8,
+        "local_layers_per_global": 1,
+        "moe": None,
+    }
+    for key in tuple(overrides):
+        if key in trinity_values:
+            trinity_values[key] = overrides.pop(key)
+    trinity = TrinitySpec(**trinity_values)
     values = {
         "name": "trinity",
         "variant": "tiny",

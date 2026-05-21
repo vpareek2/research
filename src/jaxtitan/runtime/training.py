@@ -943,6 +943,8 @@ def _train_sync_target(train_state: TrainState, metrics: Any) -> tuple[Any, ...]
         metrics.param_norm,
         metrics.update_norm,
         metrics.overflow,
+        metrics.objective,
+        metrics.aux_loss,
         metrics.microbatch_loss_mean,
         metrics.microbatch_loss_max,
         metrics.batch_het,
