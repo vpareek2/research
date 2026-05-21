@@ -23,7 +23,7 @@ from jaxtitan.models import apply_model, build_model
 from jaxtitan.optim import build_optimizer
 from jaxtitan.runtime import run_training
 from jaxtitan.specs.generation import GenerationSpec
-from jaxtitan.specs.model import ModelSpec
+from jaxtitan.specs.model import ModelSpec, TrinitySpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
 from jaxtitan.state import RngState
 from jaxtitan.steps import initialize_train_state, make_train_step
@@ -158,6 +158,35 @@ def test_decode_updates_single_position_and_matches_full_forward_logits() -> Non
     assert jnp.array_equal(decoded.cache.lengths, jnp.asarray([4, 4], dtype=jnp.int32))
     assert jnp.any(decoded.cache.keys[:, :, 3] != 0)
     assert jnp.all(decoded.cache.keys[:, :, 4] == 0)
+
+
+def test_dense_trinity_prefill_decode_matches_full_forward_logits() -> None:
+    spec = _tiny_trinity_spec(max_seq_len=8, compute_dtype="float32")
+    built = build_model(spec, seed=0)
+    state = initialize_inference_state(built.state, seed=1)
+    prompt = jnp.asarray([[1, 2, 3], [4, 5, 6]], dtype=jnp.int32)
+    positions = jnp.broadcast_to(jnp.arange(3, dtype=jnp.int32)[None, :], prompt.shape)
+    cache = init_kv_cache(spec, batch_size=2, max_cache_len=5)
+    prefill_output = prefill(
+        built.graph,
+        state,
+        PrefillBatch(input_ids=prompt, positions=positions, attention_mask=jnp.ones_like(prompt, dtype=jnp.bool_)),
+        cache,
+    )
+    token_ids = jnp.asarray([7, 8], dtype=jnp.int32)
+    decode_positions = jnp.asarray([3, 3], dtype=jnp.int32)
+    attention_mask = jnp.broadcast_to((jnp.arange(5) <= 3)[None, :], (2, 5))
+
+    decoded = decode_one(
+        built.graph,
+        state,
+        DecodeBatch(token_ids=token_ids, positions=decode_positions, attention_mask=attention_mask),
+        prefill_output.cache,
+    )
+
+    full = apply_model(built.graph, built.state, jnp.concatenate([prompt, token_ids[:, None]], axis=1))
+    assert jnp.allclose(prefill_output.logits, apply_model(built.graph, built.state, prompt), atol=1e-5)
+    assert jnp.allclose(decoded.logits, full[:, -1, :], atol=1e-5)
 
 
 def test_prefill_and_decode_reject_invalid_shapes_and_positions() -> None:
@@ -340,6 +369,29 @@ def _tiny_spec(**overrides) -> ModelSpec:
         "n_kv_heads": 1,
         "max_seq_len": 4,
         "compute_dtype": "float32",
+    }
+    values.update(overrides)
+    return ModelSpec(**values)
+
+
+def _tiny_trinity_spec(**overrides) -> ModelSpec:
+    trinity = TrinitySpec(
+        initial_dense_layers=1,
+        local_window=8,
+        local_layers_per_global=1,
+    )
+    values = {
+        "name": "trinity",
+        "variant": "tiny",
+        "vocab_size": 16,
+        "hidden_size": 8,
+        "intermediate_size": 16,
+        "num_layers": 2,
+        "num_heads": 2,
+        "n_kv_heads": 1,
+        "max_seq_len": 8,
+        "compute_dtype": "float32",
+        "trinity": trinity,
     }
     values.update(overrides)
     return ModelSpec(**values)

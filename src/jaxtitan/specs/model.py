@@ -1,11 +1,53 @@
 """Model architecture specs."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from jaxtitan.errors import ContractError
 
 _DTYPE_NAMES = {"float32", "bfloat16"}
 _REMAT_POLICIES = {"none", "block"}
+_TRINITY_NORM_POLICIES = {"depth_scaled_sandwich"}
+_TRINITY_EMBEDDING_SCALES = {"sqrt_hidden"}
+
+
+@dataclass(frozen=True, slots=True)
+class TrinitySpec:
+    """Trinity recipe-specific dense-block contract."""
+
+    initial_dense_layers: int
+    local_window: int
+    local_layers_per_global: int
+    attention_gate: bool = True
+    qk_norm: bool = True
+    norm_policy: str = "depth_scaled_sandwich"
+    embedding_scale: str = "sqrt_hidden"
+    init_std: float | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in ("initial_dense_layers", "local_window", "local_layers_per_global"):
+            value = getattr(self, field_name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ContractError(f"model.trinity.{field_name} must be an integer, got {value!r}")
+            invalid = value < 0 if field_name == "initial_dense_layers" else value <= 0
+            if invalid:
+                raise ContractError(f"model.trinity.{field_name} is invalid: {value}")
+        for field_name in ("attention_gate", "qk_norm"):
+            if not isinstance(getattr(self, field_name), bool):
+                raise ContractError(f"model.trinity.{field_name} must be a boolean")
+        if self.norm_policy not in _TRINITY_NORM_POLICIES:
+            raise ContractError(
+                f"model.trinity.norm_policy must be one of {sorted(_TRINITY_NORM_POLICIES)}, "
+                f"got {self.norm_policy!r}"
+            )
+        if self.embedding_scale not in _TRINITY_EMBEDDING_SCALES:
+            raise ContractError(
+                f"model.trinity.embedding_scale must be one of {sorted(_TRINITY_EMBEDDING_SCALES)}, "
+                f"got {self.embedding_scale!r}"
+            )
+        if self.init_std is not None and self.init_std <= 0.0:
+            raise ContractError(f"model.trinity.init_std must be positive, got {self.init_std}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,8 +73,16 @@ class ModelSpec:
     param_dtype: str = "float32"
     compute_dtype: str = "bfloat16"
     remat: str = "none"
+    trinity: TrinitySpec | Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
+        trinity = self.trinity
+        if isinstance(trinity, Mapping):
+            trinity = TrinitySpec(**dict(trinity))
+            object.__setattr__(self, "trinity", trinity)
+        elif trinity is not None and not isinstance(trinity, TrinitySpec):
+            raise ContractError("model.trinity must be a TrinitySpec or mapping")
+
         for field_name in ("vocab_size", "hidden_size", "intermediate_size", "num_layers", "num_heads", "max_seq_len"):
             value = getattr(self, field_name)
             if value <= 0:
@@ -49,6 +99,15 @@ class ModelSpec:
             raise ContractError(f"model.remat must be one of {sorted(_REMAT_POLICIES)}, got {self.remat!r}")
         if self.tied_embeddings:
             raise ContractError("model.tied_embeddings is not supported yet")
+        if self.name == "trinity":
+            if trinity is None:
+                raise ContractError("model.name='trinity' requires [model.trinity]")
+            if trinity.initial_dense_layers > self.num_layers:
+                raise ContractError("model.trinity.initial_dense_layers must be <= model.num_layers")
+            if trinity.local_window > self.max_seq_len:
+                raise ContractError("model.trinity.local_window must be <= model.max_seq_len")
+        elif trinity is not None:
+            raise ContractError("[model.trinity] is only valid when model.name='trinity'")
 
         n_kv_heads = self.num_heads if self.n_kv_heads is None else self.n_kv_heads
         if n_kv_heads <= 0:

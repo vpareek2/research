@@ -18,6 +18,7 @@ from jaxtitan.config.schema import (
     TomlRunSection,
     TomlScheduleSection,
     TomlTrainingSection,
+    TomlTrinitySection,
 )
 from jaxtitan.config.validate import validate_run_spec
 from jaxtitan.errors import ConfigError, ContractError
@@ -124,6 +125,7 @@ def _run_section(raw: Mapping[str, Any]) -> TomlRunSection:
 def _model_section(raw: Mapping[str, Any]) -> TomlModelSection:
     rope_theta = _optional_float(raw, "rope_theta", "model")
     norm_epsilon = _optional_float(raw, "norm_epsilon", "model")
+    trinity_raw = raw.get("trinity")
     return TomlModelSection(
         name=_required_str(raw, "name", "model"),
         variant=_required_str(raw, "variant", "model"),
@@ -140,6 +142,20 @@ def _model_section(raw: Mapping[str, Any]) -> TomlModelSection:
         param_dtype=_optional_str(raw, "param_dtype", "model", default="float32"),
         compute_dtype=_optional_str(raw, "compute_dtype", "model", default="bfloat16"),
         remat=_optional_str(raw, "remat", "model", default="none"),
+        trinity=None if trinity_raw is None else _trinity_section(_ensure_mapping(trinity_raw, "model.trinity")),
+    )
+
+
+def _trinity_section(raw: Mapping[str, Any]) -> TomlTrinitySection:
+    return TomlTrinitySection(
+        initial_dense_layers=_required_int(raw, "initial_dense_layers", "model.trinity"),
+        local_window=_required_int(raw, "local_window", "model.trinity"),
+        local_layers_per_global=_required_int(raw, "local_layers_per_global", "model.trinity"),
+        attention_gate=_optional_bool(raw, "attention_gate", "model.trinity", default=True),
+        qk_norm=_optional_bool(raw, "qk_norm", "model.trinity", default=True),
+        norm_policy=_optional_str(raw, "norm_policy", "model.trinity", default="depth_scaled_sandwich"),
+        embedding_scale=_optional_str(raw, "embedding_scale", "model.trinity", default="sqrt_hidden"),
+        init_std=_optional_float(raw, "init_std", "model.trinity"),
     )
 
 

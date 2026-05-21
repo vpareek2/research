@@ -12,6 +12,7 @@ from jaxtitan.models.decoder import (
     dtype_from_name,
     prefill_model,
 )
+from jaxtitan.models.trinity import TrinityModel
 
 __all__ = [
     "DecoderModel",
@@ -24,4 +25,5 @@ __all__ = [
     "decode_model",
     "dtype_from_name",
     "prefill_model",
+    "TrinityModel",
 ]

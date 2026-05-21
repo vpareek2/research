@@ -8,6 +8,7 @@ from flax import nnx
 
 from jaxtitan.errors import ContractError
 from jaxtitan.models.components.dtypes import dtype_from_name
+from jaxtitan.models.components.masks import cache_attention_mask, full_sequence_attention_mask
 from jaxtitan.models.components.position import apply_rope, apply_rope_at_positions
 from jaxtitan.specs.model import ModelSpec
 
@@ -15,8 +16,8 @@ from jaxtitan.specs.model import ModelSpec
 class FullAttentionContext(NamedTuple):
     """Full-sequence attention inputs that are shared across attention mechanisms."""
 
-    cos: Any
-    sin: Any
+    cos: Any | None
+    sin: Any | None
 
 
 class PrefillAttentionContext(NamedTuple):
@@ -40,13 +41,36 @@ class DecodeAttentionContext(NamedTuple):
 class GroupedQueryAttention(nnx.Module):
     """Grouped-query causal self-attention."""
 
-    def __init__(self, spec: ModelSpec, rngs: nnx.Rngs):
+    def __init__(
+        self,
+        spec: ModelSpec,
+        rngs: nnx.Rngs,
+        *,
+        position: str = "rope",
+        mask: str = "causal",
+        local_window: int | None = None,
+        qk_norm: bool = True,
+        gate: bool = False,
+        kernel_init: Any | None = None,
+    ):
         self.hidden_size = spec.hidden_size
         self.num_heads = spec.num_heads
         self.n_kv_heads = spec.n_kv_heads
         self.head_dim = spec.hidden_size // spec.num_heads
+        self.position = position
+        self.mask = mask
+        self.local_window = local_window
+        self.qk_norm_enabled = qk_norm
+        self.gate_enabled = gate
+        if position not in {"rope", "none"}:
+            raise ContractError(f"unsupported attention position mode {position!r}")
+        if mask not in {"causal", "sliding_window"}:
+            raise ContractError(f"unsupported attention mask mode {mask!r}")
+        if mask == "sliding_window" and (local_window is None or local_window <= 0):
+            raise ContractError("sliding-window attention requires a positive local_window")
         dtype = dtype_from_name(spec.compute_dtype)
         param_dtype = dtype_from_name(spec.param_dtype)
+        linear_kwargs = {} if kernel_init is None else {"kernel_init": kernel_init}
 
         self.q = nnx.Linear(
             spec.hidden_size,
@@ -55,6 +79,7 @@ class GroupedQueryAttention(nnx.Module):
             dtype=dtype,
             param_dtype=param_dtype,
             rngs=rngs,
+            **linear_kwargs,
         )
         self.k = nnx.Linear(
             spec.hidden_size,
@@ -63,6 +88,7 @@ class GroupedQueryAttention(nnx.Module):
             dtype=dtype,
             param_dtype=param_dtype,
             rngs=rngs,
+            **linear_kwargs,
         )
         self.v = nnx.Linear(
             spec.hidden_size,
@@ -71,6 +97,7 @@ class GroupedQueryAttention(nnx.Module):
             dtype=dtype,
             param_dtype=param_dtype,
             rngs=rngs,
+            **linear_kwargs,
         )
         self.o = nnx.Linear(
             spec.hidden_size,
@@ -79,21 +106,38 @@ class GroupedQueryAttention(nnx.Module):
             dtype=dtype,
             param_dtype=param_dtype,
             rngs=rngs,
+            **linear_kwargs,
         )
-        self.q_norm = nnx.RMSNorm(
-            self.head_dim,
-            epsilon=spec.norm_epsilon,
-            dtype=dtype,
-            param_dtype=param_dtype,
-            rngs=rngs,
-        )
-        self.k_norm = nnx.RMSNorm(
-            self.head_dim,
-            epsilon=spec.norm_epsilon,
-            dtype=dtype,
-            param_dtype=param_dtype,
-            rngs=rngs,
-        )
+        if qk_norm:
+            self.q_norm = nnx.RMSNorm(
+                self.head_dim,
+                epsilon=spec.norm_epsilon,
+                dtype=dtype,
+                param_dtype=param_dtype,
+                rngs=rngs,
+            )
+            self.k_norm = nnx.RMSNorm(
+                self.head_dim,
+                epsilon=spec.norm_epsilon,
+                dtype=dtype,
+                param_dtype=param_dtype,
+                rngs=rngs,
+            )
+        else:
+            self.q_norm = None
+            self.k_norm = None
+        if gate:
+            self.gate = nnx.Linear(
+                spec.hidden_size,
+                spec.hidden_size,
+                use_bias=False,
+                dtype=dtype,
+                param_dtype=param_dtype,
+                rngs=rngs,
+                **linear_kwargs,
+            )
+        else:
+            self.gate = None
 
     def __call__(self, x: jax.Array, context: FullAttentionContext) -> jax.Array:
         batch_size, seq_len, _ = x.shape
@@ -101,11 +145,11 @@ class GroupedQueryAttention(nnx.Module):
         k = self.k(x).reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
         v = self.v(x).reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
 
-        q = apply_rope(self.q_norm(q), context.cos, context.sin)
-        k = apply_rope(self.k_norm(k), context.cos, context.sin)
+        q, k = self._prepare_qk(q, k, context)
 
-        mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))[None, :, :]
+        mask = full_sequence_attention_mask(seq_len, mode=self.mask, local_window=self.local_window)
         out = scaled_dot_product_attention(q, k, v, mask)
+        out = self._apply_gate(x, out)
         return self.o(out.reshape(batch_size, seq_len, self.hidden_size))
 
     def prefill(
@@ -117,8 +161,7 @@ class GroupedQueryAttention(nnx.Module):
         q = self.q(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim)
         k = self.k(x).reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
         v = self.v(x).reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
-        q = apply_rope_at_positions(self.q_norm(q), context.positions, self.head_dim, theta=context.cache.rope_theta)
-        k = apply_rope_at_positions(self.k_norm(k), context.positions, self.head_dim, theta=context.cache.rope_theta)
+        q, k = self._prepare_qk_at_positions(q, k, context.positions, context.cache.rope_theta)
 
         keys, values, lengths = _cache_write(
             context.cache,
@@ -130,14 +173,12 @@ class GroupedQueryAttention(nnx.Module):
         )
         next_cache = context.cache.replace(keys=keys, values=values, lengths=lengths)
         cache_positions = jnp.arange(context.cache.max_cache_len, dtype=context.positions.dtype)
-        mask = (
-            context.attention_mask.astype(jnp.bool_)[..., None]
-            & (cache_positions[None, None, :] <= context.positions[..., None])
-            & (cache_positions[None, None, :] < lengths[:, None, None])
-        )
+        mask = cache_attention_mask(context.positions, cache_positions, mode=self.mask, local_window=self.local_window)
+        mask = mask & context.attention_mask.astype(jnp.bool_)[..., None] & (cache_positions[None, None, :] < lengths[:, None, None])
         cached_k = next_cache.keys[context.layer_index]
         cached_v = next_cache.values[context.layer_index]
         out = scaled_dot_product_attention(q, cached_k, cached_v, mask)
+        out = self._apply_gate(x, out)
         return self.o(out.reshape(batch_size, seq_len, self.hidden_size)), next_cache
 
     def decode_one(
@@ -150,8 +191,7 @@ class GroupedQueryAttention(nnx.Module):
         q = self.q(x).reshape(batch_size, 1, self.num_heads, self.head_dim)
         k = self.k(x).reshape(batch_size, 1, self.n_kv_heads, self.head_dim)
         v = self.v(x).reshape(batch_size, 1, self.n_kv_heads, self.head_dim)
-        q = apply_rope_at_positions(self.q_norm(q), positions, self.head_dim, theta=context.cache.rope_theta)
-        k = apply_rope_at_positions(self.k_norm(k), positions, self.head_dim, theta=context.cache.rope_theta)
+        q, k = self._prepare_qk_at_positions(q, k, positions, context.cache.rope_theta)
 
         keys, values, lengths = _cache_write(
             context.cache,
@@ -163,15 +203,49 @@ class GroupedQueryAttention(nnx.Module):
         )
         next_cache = context.cache.replace(keys=keys, values=values, lengths=lengths)
         cache_positions = jnp.arange(context.cache.max_cache_len, dtype=positions.dtype)
-        mask = (
-            context.attention_mask.astype(jnp.bool_)[:, None, :]
-            & (cache_positions[None, None, :] <= positions[..., None])
-            & (cache_positions[None, None, :] < lengths[:, None, None])
-        )
+        mask = cache_attention_mask(positions, cache_positions, mode=self.mask, local_window=self.local_window)
+        mask = mask & context.attention_mask.astype(jnp.bool_)[:, None, :] & (cache_positions[None, None, :] < lengths[:, None, None])
         cached_k = next_cache.keys[context.layer_index]
         cached_v = next_cache.values[context.layer_index]
         out = scaled_dot_product_attention(q, cached_k, cached_v, mask)
+        out = self._apply_gate(x, out)
         return self.o(out.reshape(batch_size, 1, self.hidden_size)), next_cache
+
+    def _prepare_qk(
+        self,
+        q: jax.Array,
+        k: jax.Array,
+        context: FullAttentionContext,
+    ) -> tuple[jax.Array, jax.Array]:
+        q = q if self.q_norm is None else self.q_norm(q)
+        k = k if self.k_norm is None else self.k_norm(k)
+        if self.position == "none":
+            return q, k
+        if context.cos is None or context.sin is None:
+            raise ContractError("RoPE attention requires cos/sin tables")
+        return apply_rope(q, context.cos, context.sin), apply_rope(k, context.cos, context.sin)
+
+    def _prepare_qk_at_positions(
+        self,
+        q: jax.Array,
+        k: jax.Array,
+        positions: jax.Array,
+        rope_theta: float,
+    ) -> tuple[jax.Array, jax.Array]:
+        q = q if self.q_norm is None else self.q_norm(q)
+        k = k if self.k_norm is None else self.k_norm(k)
+        if self.position == "none":
+            return q, k
+        return (
+            apply_rope_at_positions(q, positions, self.head_dim, theta=rope_theta),
+            apply_rope_at_positions(k, positions, self.head_dim, theta=rope_theta),
+        )
+
+    def _apply_gate(self, x: jax.Array, out: jax.Array) -> jax.Array:
+        if self.gate is None:
+            return out
+        gate = jax.nn.sigmoid(self.gate(x)).reshape(x.shape[0], x.shape[1], self.num_heads, self.head_dim)
+        return out * gate
 
 
 def scaled_dot_product_attention(q: jax.Array, k: jax.Array, v: jax.Array, mask: jax.Array) -> jax.Array:

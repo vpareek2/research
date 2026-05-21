@@ -12,6 +12,18 @@ class TomlRunSection:
 
 
 @dataclass(frozen=True, slots=True)
+class TomlTrinitySection:
+    initial_dense_layers: int
+    local_window: int
+    local_layers_per_global: int
+    attention_gate: bool = True
+    qk_norm: bool = True
+    norm_policy: str = "depth_scaled_sandwich"
+    embedding_scale: str = "sqrt_hidden"
+    init_std: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TomlModelSection:
     name: str
     variant: str
@@ -28,6 +40,7 @@ class TomlModelSection:
     param_dtype: str = "float32"
     compute_dtype: str = "bfloat16"
     remat: str = "none"
+    trinity: TomlTrinitySection | None = None
 
 
 @dataclass(frozen=True, slots=True)

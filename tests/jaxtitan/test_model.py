@@ -5,8 +5,14 @@ from flax import nnx
 
 from jaxtitan.errors import ContractError
 from jaxtitan.models import apply_model, build_model, count_parameters, dtype_from_name
-from jaxtitan.models.components import DecoderBlock, DecoderSwiGLU, GroupedQueryAttention
-from jaxtitan.specs.model import ModelSpec
+from jaxtitan.models.components import (
+    DecoderBlock,
+    DecoderSwiGLU,
+    GroupedQueryAttention,
+    TrinityDenseBlock,
+    full_sequence_attention_mask,
+)
+from jaxtitan.specs.model import ModelSpec, TrinitySpec
 
 
 def test_model_spec_validates_decoder_runtime_fields() -> None:
@@ -43,8 +49,32 @@ def test_build_model_is_seed_deterministic() -> None:
     assert any(not jnp.array_equal(left, right) for left, right in zip(first_leaves, third_leaves, strict=True))
 
 
+def test_build_dense_trinity_is_seed_deterministic() -> None:
+    spec = _tiny_trinity_spec()
+
+    first = build_model(spec, seed=123)
+    second = build_model(spec, seed=123)
+    third = build_model(spec, seed=124)
+
+    first_leaves = jax.tree.leaves(nnx.to_pure_dict(first.state))
+    second_leaves = jax.tree.leaves(nnx.to_pure_dict(second.state))
+    third_leaves = jax.tree.leaves(nnx.to_pure_dict(third.state))
+    assert all(jnp.array_equal(left, right) for left, right in zip(first_leaves, second_leaves, strict=True))
+    assert any(not jnp.array_equal(left, right) for left, right in zip(first_leaves, third_leaves, strict=True))
+
+
 def test_apply_model_returns_fixed_shape_logits() -> None:
     result = build_model(_tiny_spec(vocab_size=48, compute_dtype="bfloat16"), seed=0)
+    input_ids = jnp.arange(16, dtype=jnp.int32).reshape(2, 8)
+
+    logits = apply_model(result.graph, result.state, input_ids)
+
+    assert logits.shape == (2, 8, 48)
+    assert logits.dtype == jnp.bfloat16
+
+
+def test_dense_trinity_apply_model_returns_fixed_shape_logits() -> None:
+    result = build_model(_tiny_trinity_spec(vocab_size=48, compute_dtype="bfloat16"), seed=0)
     input_ids = jnp.arange(16, dtype=jnp.int32).reshape(2, 8)
 
     logits = apply_model(result.graph, result.state, input_ids)
@@ -91,6 +121,16 @@ def test_decoder_recipe_assembles_reusable_components() -> None:
     assert isinstance(layer.mlp, DecoderSwiGLU)
 
 
+def test_dense_trinity_recipe_assembles_dense_blocks_and_layer_pattern() -> None:
+    result = build_model(_tiny_trinity_spec(num_layers=4, local_layers_per_global=2), seed=0)
+    model = nnx.merge(result.graph, result.state)
+
+    assert model.layer_attention == ("local", "local", "global", "local")
+    assert all(isinstance(layer, TrinityDenseBlock) for layer in model.layers)
+    assert [layer.attn.position for layer in model.layers] == ["rope", "rope", "none", "rope"]
+    assert [layer.attn.mask for layer in model.layers] == ["sliding_window", "sliding_window", "causal", "sliding_window"]
+
+
 def test_model_parameter_dtype_follows_spec() -> None:
     result = build_model(_tiny_spec(param_dtype="bfloat16", compute_dtype="float32"), seed=0)
 
@@ -102,6 +142,22 @@ def test_model_parameter_dtype_follows_spec() -> None:
 
 def test_metadata_covers_every_parameter_leaf_once() -> None:
     result = build_model(_tiny_spec(num_layers=2), seed=0)
+    flat_state = nnx.to_flat_state(result.state)
+
+    assert len(result.metadata) == len(flat_state)
+    assert len(result.param_layouts) == len(flat_state)
+    for metadata, (path, variable) in zip(result.metadata, flat_state, strict=True):
+        value = variable.get_value()
+        assert metadata.path == tuple(str(part) for part in path)
+        assert metadata.shape == tuple(value.shape)
+        assert metadata.dtype == str(value.dtype)
+        assert metadata.count == value.size
+    assert {layout.path for layout in result.param_layouts} == {item.path for item in result.metadata}
+    assert count_parameters(result.metadata) == sum(leaf.size for leaf in jax.tree.leaves(nnx.to_pure_dict(result.state)))
+
+
+def test_dense_trinity_metadata_covers_every_parameter_leaf_once() -> None:
+    result = build_model(_tiny_trinity_spec(num_layers=2), seed=0)
     flat_state = nnx.to_flat_state(result.state)
 
     assert len(result.metadata) == len(flat_state)
@@ -154,6 +210,67 @@ def test_metadata_has_optimizer_routing_tags() -> None:
     }
 
 
+def test_dense_trinity_metadata_has_expected_dense_tags() -> None:
+    result = build_model(_tiny_trinity_spec(num_layers=1), seed=0)
+
+    assert {item.tag for item in result.metadata} == {
+        "embedding",
+        "attention_q",
+        "attention_k",
+        "attention_v",
+        "attention_o",
+        "attention_gate",
+        "attention_q_norm",
+        "attention_k_norm",
+        "attention_pre_norm",
+        "attention_post_norm",
+        "mlp_gate",
+        "mlp_up",
+        "mlp_down",
+        "ffn_pre_norm",
+        "ffn_post_norm",
+        "final_norm",
+        "lm_head",
+    }
+
+
+def test_dense_trinity_param_layouts_record_fsdp_policy() -> None:
+    result = build_model(_tiny_trinity_spec(), seed=0)
+    layouts = {item.tag: item for item in result.param_layouts}
+
+    for tag in (
+        "embedding",
+        "attention_q_norm",
+        "attention_k_norm",
+        "attention_pre_norm",
+        "attention_post_norm",
+        "ffn_pre_norm",
+        "ffn_post_norm",
+        "final_norm",
+    ):
+        assert layouts[tag].fsdp_axis is None
+    for tag in ("attention_q", "attention_k", "attention_v", "attention_gate", "mlp_gate", "mlp_up"):
+        assert layouts[tag].fsdp_axis == 1
+    for tag in ("attention_o", "mlp_down", "lm_head"):
+        assert layouts[tag].fsdp_axis == 0
+
+
+def test_sliding_window_mask_limits_attention_span() -> None:
+    mask = full_sequence_attention_mask(5, mode="sliding_window", local_window=2)[0]
+    expected = jnp.asarray(
+        [
+            [True, False, False, False, False],
+            [True, True, False, False, False],
+            [False, True, True, False, False],
+            [False, False, True, True, False],
+            [False, False, False, True, True],
+        ],
+        dtype=jnp.bool_,
+    )
+
+    assert jnp.array_equal(mask, expected)
+
+
 def test_build_model_rejects_unknown_model_name() -> None:
     with pytest.raises(ContractError, match="unsupported model.name"):
         build_model(_tiny_spec(name="encoder"), seed=0)
@@ -172,6 +289,33 @@ def _tiny_spec(**overrides) -> ModelSpec:
         "max_seq_len": 8,
         "param_dtype": "float32",
         "compute_dtype": "bfloat16",
+    }
+    values.update(overrides)
+    return ModelSpec(**values)
+
+
+def _tiny_trinity_spec(**overrides) -> ModelSpec:
+    trinity_values = {
+        "initial_dense_layers": 1,
+        "local_window": 8,
+        "local_layers_per_global": 3,
+    }
+    for key in tuple(overrides):
+        if key in trinity_values:
+            trinity_values[key] = overrides.pop(key)
+    values = {
+        "name": "trinity",
+        "variant": "tiny",
+        "vocab_size": 32,
+        "hidden_size": 16,
+        "intermediate_size": 32,
+        "num_layers": 1,
+        "num_heads": 4,
+        "n_kv_heads": 2,
+        "max_seq_len": 8,
+        "param_dtype": "float32",
+        "compute_dtype": "bfloat16",
+        "trinity": TrinitySpec(**trinity_values),
     }
     values.update(overrides)
     return ModelSpec(**values)

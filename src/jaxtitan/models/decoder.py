@@ -53,9 +53,14 @@ class ModelBuildResult:
 def build_model(spec: ModelSpec, seed: int) -> ModelBuildResult:
     """Build a supported model and return explicit NNX graph/state pieces."""
 
-    if spec.name != "decoder":
-        raise ContractError(f"unsupported model.name {spec.name!r}; only 'decoder' is available")
-    model = DecoderModel(spec, rngs=nnx.Rngs(seed))
+    if spec.name == "decoder":
+        model = DecoderModel(spec, rngs=nnx.Rngs(seed))
+    elif spec.name == "trinity":
+        from jaxtitan.models.trinity import TrinityModel
+
+        model = TrinityModel(spec, rngs=nnx.Rngs(seed))
+    else:
+        raise ContractError(f"unsupported model.name {spec.name!r}; expected 'decoder' or 'trinity'")
     graph, state = nnx.split(model)
     metadata = parameter_metadata(state)
     return ModelBuildResult(graph=graph, state=state, metadata=metadata, param_layouts=parameter_layouts(metadata))
@@ -228,14 +233,22 @@ def _tag_for_path(path: tuple[str, ...]) -> str:
         return "lm_head"
     if path[0] == "norm":
         return "final_norm"
-    if "attn" in path:
-        return _attention_tag(path)
-    if "mlp" in path:
-        return _mlp_tag(path)
+    if "attn_pre_norm" in path:
+        return "attention_pre_norm"
+    if "attn_post_norm" in path:
+        return "attention_post_norm"
+    if "ffn_pre_norm" in path:
+        return "ffn_pre_norm"
+    if "ffn_post_norm" in path:
+        return "ffn_post_norm"
     if "pre_norm" in path:
         return "block_pre_norm"
     if "post_norm" in path:
         return "block_post_norm"
+    if "attn" in path:
+        return _attention_tag(path)
+    if "mlp" in path:
+        return _mlp_tag(path)
     raise ContractError(f"unrecognized decoder parameter path {'.'.join(path)}")
 
 
@@ -247,6 +260,7 @@ def _attention_tag(path: tuple[str, ...]) -> str:
         ("k", "attention_k"),
         ("v", "attention_v"),
         ("o", "attention_o"),
+        ("gate", "attention_gate"),
     ):
         if component in path:
             return tag
@@ -284,7 +298,7 @@ def _layout_policy(item: ParamMetadata) -> tuple[tuple[str, ...], int | None]:
         return ("vocab", "hidden"), None
     if tag == "lm_head":
         return ("hidden", "vocab"), 0
-    if tag in {"attention_q", "attention_k", "attention_v"}:
+    if tag in {"attention_q", "attention_k", "attention_v", "attention_gate"}:
         return ("hidden_in", "hidden_out"), 1
     if tag == "attention_o":
         return ("hidden_in", "hidden_out"), 0
@@ -295,8 +309,12 @@ def _layout_policy(item: ParamMetadata) -> tuple[tuple[str, ...], int | None]:
     if tag in {
         "attention_q_norm",
         "attention_k_norm",
+        "attention_pre_norm",
+        "attention_post_norm",
         "block_pre_norm",
         "block_post_norm",
+        "ffn_pre_norm",
+        "ffn_post_norm",
         "final_norm",
     }:
         return tuple("norm" for _dim in item.shape), None

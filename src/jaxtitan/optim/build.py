@@ -33,6 +33,7 @@ _MUON_TAGS = frozenset(
         "attention_k",
         "attention_v",
         "attention_o",
+        "attention_gate",
         "mlp_gate",
         "mlp_up",
         "mlp_down",
@@ -42,8 +43,12 @@ _NORM_TAGS = frozenset(
     {
         "attention_q_norm",
         "attention_k_norm",
+        "attention_pre_norm",
+        "attention_post_norm",
         "block_pre_norm",
         "block_post_norm",
+        "ffn_pre_norm",
+        "ffn_post_norm",
         "final_norm",
     }
 )

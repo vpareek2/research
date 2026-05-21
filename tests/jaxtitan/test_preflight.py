@@ -149,6 +149,24 @@ def test_run_preflight_reports_block_remat(
     assert not (tmp_path / "runs" / "loop").exists()
 
 
+def test_run_preflight_accepts_dense_trinity_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("trinity-preflight", shard_token_groups=(tuple(range(0, 50)),), train_tokens=25)
+    config_path = tmp_path / "trinity.toml"
+    config_path.write_text(_preflight_config(manifest, model_name="trinity", num_layers=2, trinity=True))
+
+    report = run_preflight(config_path)
+
+    assert report.payload["status"] == "passed"
+    assert report.payload["model"]["name"] == "trinity"
+    assert report.payload["training"]["compile"] == "passed"
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
 def test_run_preflight_accepts_muon_optimizer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -632,8 +650,11 @@ def _preflight_config(
     global_batch_size: int = 2,
     hidden_size: int = 8,
     intermediate_size: int = 16,
+    num_layers: int = 1,
     num_heads: int = 2,
     n_kv_heads: int = 1,
+    model_name: str = "decoder",
+    trinity: bool = False,
     gradient_accumulation_steps: int = 1,
     remat: str = "none",
     eval_every_steps: int | None = None,
@@ -658,6 +679,14 @@ def _preflight_config(
 name = "{schedule_name}"
 peak_lr = {adamw_fallback_peak_lr}
 """
+    trinity_block = ""
+    if trinity:
+        trinity_block = """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 4
+local_layers_per_global = 1
+"""
     eval_block = ""
     if eval_every_steps is not None:
         eval_block = f"""
@@ -680,17 +709,18 @@ seed = 7
 output_dir = "runs"
 
 [model]
-name = "decoder"
+name = "{model_name}"
 variant = "tiny"
 vocab_size = 64
 hidden_size = {hidden_size}
 intermediate_size = {intermediate_size}
-num_layers = 1
+num_layers = {num_layers}
 num_heads = {num_heads}
 n_kv_heads = {n_kv_heads}
 max_seq_len = 4
 compute_dtype = "float32"
 remat = "{remat}"
+{trinity_block}
 
 [optimizer]
 name = "{optimizer_name}"

@@ -1,5 +1,7 @@
 """Feed-forward model components."""
 
+from typing import Any
+
 import jax
 from flax import nnx
 
@@ -10,9 +12,10 @@ from jaxtitan.specs.model import ModelSpec
 class DecoderSwiGLU(nnx.Module):
     """SwiGLU feed-forward block."""
 
-    def __init__(self, spec: ModelSpec, rngs: nnx.Rngs):
+    def __init__(self, spec: ModelSpec, rngs: nnx.Rngs, *, kernel_init: Any | None = None):
         dtype = dtype_from_name(spec.compute_dtype)
         param_dtype = dtype_from_name(spec.param_dtype)
+        linear_kwargs = {} if kernel_init is None else {"kernel_init": kernel_init}
         self.gate = nnx.Linear(
             spec.hidden_size,
             spec.intermediate_size,
@@ -20,6 +23,7 @@ class DecoderSwiGLU(nnx.Module):
             dtype=dtype,
             param_dtype=param_dtype,
             rngs=rngs,
+            **linear_kwargs,
         )
         self.up = nnx.Linear(
             spec.hidden_size,
@@ -28,6 +32,7 @@ class DecoderSwiGLU(nnx.Module):
             dtype=dtype,
             param_dtype=param_dtype,
             rngs=rngs,
+            **linear_kwargs,
         )
         self.down = nnx.Linear(
             spec.intermediate_size,
@@ -36,6 +41,7 @@ class DecoderSwiGLU(nnx.Module):
             dtype=dtype,
             param_dtype=param_dtype,
             rngs=rngs,
+            **linear_kwargs,
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:

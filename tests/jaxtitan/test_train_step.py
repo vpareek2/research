@@ -19,7 +19,7 @@ from jaxtitan.mesh import (
 from jaxtitan.models import build_model
 from jaxtitan.optim import build_optimizer
 from jaxtitan.specs.mesh import MeshSpec
-from jaxtitan.specs.model import ModelSpec
+from jaxtitan.specs.model import ModelSpec, TrinitySpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
 from jaxtitan.specs.parallelism import ParallelismSpec
 from jaxtitan.steps import initialize_train_state, make_train_step, train_step
@@ -78,6 +78,22 @@ def test_train_step_updates_model_optimizer_state_and_metrics() -> None:
     assert math.isfinite(float(jax.device_get(metrics.grad_norm)))
     assert math.isfinite(float(jax.device_get(metrics.param_norm)))
     assert math.isfinite(float(jax.device_get(metrics.update_norm)))
+
+
+def test_train_step_updates_dense_trinity_model() -> None:
+    built = build_model(_tiny_trinity_spec(), seed=0)
+    optimizer = _optimizer(built.state, built.metadata)
+    state = initialize_train_state(built.state, optimizer.transform, seed=1)
+    batch = _batch(batch_size=2, seq_len=4, vocab_size=16)
+
+    next_state, metrics = train_step(built.graph, optimizer, state, batch)
+
+    assert next_state.step == 1
+    assert next_state.tokens_seen == 8
+    assert _trees_changed(state.model, next_state.model)
+    assert _trees_changed(state.opt_state, next_state.opt_state)
+    assert metrics.token_count == 8
+    assert math.isfinite(float(jax.device_get(metrics.loss_sum)))
 
 
 def test_train_state_is_a_jax_pytree() -> None:
@@ -669,6 +685,28 @@ def _tiny_spec(**overrides) -> ModelSpec:
         "n_kv_heads": 1,
         "max_seq_len": 4,
         "compute_dtype": "float32",
+    }
+    values.update(overrides)
+    return ModelSpec(**values)
+
+
+def _tiny_trinity_spec(**overrides) -> ModelSpec:
+    values = {
+        "name": "trinity",
+        "variant": "tiny",
+        "vocab_size": 16,
+        "hidden_size": 8,
+        "intermediate_size": 16,
+        "num_layers": 2,
+        "num_heads": 2,
+        "n_kv_heads": 1,
+        "max_seq_len": 4,
+        "compute_dtype": "float32",
+        "trinity": TrinitySpec(
+            initial_dense_layers=1,
+            local_window=4,
+            local_layers_per_global=1,
+        ),
     }
     values.update(overrides)
     return ModelSpec(**values)
