@@ -36,7 +36,11 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
         "model": _normalize(spec.model),
         "optimizer": {
             **_normalize(spec.optimizer),
-            "policy": optimizer_policy_summary(spec.optimizer),
+            "policy": optimizer_policy_summary(
+                spec.optimizer,
+                parallelism_mode=spec.parallelism.mode,
+                fsdp_axis_size=dict(zip(spec.mesh.axis_names, spec.mesh.axis_sizes, strict=True)).get("fsdp", 1),
+            ),
         },
         "mesh": _normalize(spec.mesh),
         "parallelism": _normalize(spec.parallelism),

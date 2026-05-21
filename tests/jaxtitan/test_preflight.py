@@ -168,6 +168,10 @@ def test_run_preflight_accepts_muon_optimizer(
     assert payload["optimizer"]["adamw_fallback_peak_lr"] == 0.001
     assert payload["optimizer"]["policy"]["adamw_fallback_schedule"]["peak_lr"] == 0.001
     assert payload["optimizer"]["policy"]["route_counts"] == {"adamw": 7, "muon": 7}
+    assert payload["optimizer"]["policy"]["distributed_policy"]["zero2_fsdp"] == "auto_dion2"
+    assert payload["optimizer"]["policy"]["muon"]["newton_schulz_precision"] == "bfloat16"
+    assert payload["optimizer"]["policy"]["muon"]["distributed_policy"] == "replicated_or_auto_dion2_when_sharded"
+    assert payload["optimizer"]["policy"]["auto_routing"]["active"] is False
     assert payload["optimizer"]["policy"]["fallback_counts"] == {
         "embedding": 1,
         "lm_head": 1,
@@ -176,6 +180,47 @@ def test_run_preflight_accepts_muon_optimizer(
     assert payload["diagnostics"]["optimizer"] == payload["optimizer"]["policy"]
     assert "adamw_fallback_peak_lr=0.001" in text
     assert "routes={'adamw': 7, 'muon': 7}" in text
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
+@pytest.mark.parametrize("mode", ["fsdp", "zero2"])
+def test_run_preflight_auto_resolves_sharded_muon_to_dion2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+    mode: str,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("muon-sharded", shard_token_groups=(tuple(range(0, 80)),), train_tokens=50)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            optimizer_name="muon",
+            axis_names=("data", "fsdp"),
+            axis_sizes=(1, 4),
+            parallelism_mode=mode,
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=4,
+            n_kv_heads=4,
+            global_batch_size=4,
+            target_tokens=16,
+        )
+    )
+
+    report = run_preflight(config_path)
+    payload = report.payload
+
+    assert payload["optimizer"]["name"] == "muon"
+    assert payload["optimizer"]["policy"]["route_counts"] == {"adamw": 7, "dion2": 7}
+    assert payload["optimizer"]["policy"]["auto_routing"] == {
+        "active": True,
+        "muon_sharded_matrix_backend": "dion2",
+    }
+    assert payload["optimizer"]["policy"]["dion2"]["fraction"] == 0.25
+    assert {route["backend"] for route in payload["optimizer"]["policy"]["routes"]} == {"adamw", "dion2"}
     assert not (tmp_path / "runs" / "loop").exists()
 
 

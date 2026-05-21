@@ -133,12 +133,41 @@ def test_resume_metadata_contains_compatibility_payload(tmp_path: Path, prepared
     assert metadata["compatibility"]["optimizer"]["name"] == "adamw"
     assert metadata["compatibility"]["optimizer"]["policy"]["name"] == "adamw"
     assert metadata["compatibility"]["optimizer"]["policy"]["muon"]["scale_mode"] == "match_rms_adamw"
+    assert metadata["compatibility"]["optimizer"]["policy"]["muon"]["newton_schulz_precision"] == "bfloat16"
+    assert metadata["compatibility"]["optimizer"]["policy"]["muon"]["distributed_policy"] == "replicated_or_auto_dion2_when_sharded"
+    assert metadata["compatibility"]["optimizer"]["policy"]["dion2"]["fraction"] == 0.25
+    assert metadata["compatibility"]["optimizer"]["policy"]["distributed_policy"]["zero2_fsdp"] == "supported"
+    assert metadata["compatibility"]["optimizer"]["policy"]["auto_routing"]["active"] is False
     assert metadata["compatibility"]["parallelism"]["mode"] == "ddp"
     assert metadata["mutable_controls"] == {
         "target_tokens": 128,
         "log_every_steps": 1,
         "checkpoint_every_steps": 10,
     }
+
+
+@pytest.mark.parametrize("mode", ["fsdp", "zero2"])
+def test_resume_compat_marks_sharded_muon_auto_dion2(tmp_path: Path, prepared_dataset_factory, mode: str) -> None:
+    manifest = _manifest(prepared_dataset_factory, f"{mode}-dion2")
+    spec = _runtime_spec(
+        tmp_path,
+        manifest,
+        optimizer_name="muon",
+        axis_names=("data", "fsdp"),
+        axis_sizes=(1, 4),
+        parallelism_mode=mode,
+        hidden_size=16,
+        intermediate_size=32,
+        num_heads=4,
+        n_kv_heads=4,
+    )
+    compat = build_resume_compat(spec)
+
+    assert compat.payload["optimizer"]["policy"]["auto_routing"] == {
+        "active": True,
+        "muon_sharded_matrix_backend": "dion2",
+    }
+    assert compat.payload["optimizer"]["policy"]["dion2"]["orthogonalizer"] == "polar_express"
 
 
 def test_resume_metadata_rejects_malformed_version(tmp_path: Path, prepared_dataset_factory) -> None:

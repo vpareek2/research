@@ -3,16 +3,28 @@ import jax.numpy as jnp
 import pytest
 
 from jaxtitan.errors import ContractError
+from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_optimizer_init_state
 from jaxtitan.models import ParamMetadata, build_model
 from jaxtitan.optim import (
     build_lr_schedule,
     build_optimizer,
     describe_optimizer,
     muon_policy_constants,
+    optimizer_policy_summary,
     zeropower_via_newton_schulz,
 )
+from jaxtitan.optim.dion2 import dion2_policy_constants, dion2_transform, polar_express, select_dion2_slices
+from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ParamRouteRule, ScheduleSpec
+from jaxtitan.specs.parallelism import ParallelismSpec
+
+FAKE_DEVICE_COUNT = 4
+
+
+def require_fake_devices() -> None:
+    if jax.local_device_count() < FAKE_DEVICE_COUNT:
+        pytest.skip("JAX was initialized before fake CPU device flags were set")
 
 
 def test_constant_schedule_supports_warmup() -> None:
@@ -91,6 +103,71 @@ def test_muon_newton_schulz_is_finite_shape_preserving_and_deterministic() -> No
     assert jnp.all(first == second)
 
 
+def test_dion2_selects_expected_rows_and_columns() -> None:
+    value = jnp.asarray(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [2.0, 2.0, 2.0, 2.0],
+            [0.5, 0.5, 0.5, 0.5],
+            [4.0, 1.0, -1.0, 2.0],
+        ],
+        dtype=jnp.float32,
+    )
+
+    rows, row_indices = select_dion2_slices(value, select_axis=0, fraction=0.5)
+    cols, col_indices = select_dion2_slices(value, select_axis=1, fraction=0.5)
+
+    assert set(map(int, row_indices.tolist())) == {1, 3}
+    assert rows.shape == (2, 4)
+    assert set(map(int, col_indices.tolist())) == {0, 3}
+    assert cols.shape == (4, 2)
+
+
+def test_polar_express_is_finite_shape_preserving_and_deterministic() -> None:
+    tall = jnp.arange(15, dtype=jnp.float32).reshape(5, 3) / 10.0
+    wide = jnp.arange(15, dtype=jnp.float32).reshape(3, 5) / 10.0
+
+    first = polar_express(tall)
+    second = polar_express(tall)
+    wide_result = polar_express(wide)
+
+    assert first.shape == tall.shape
+    assert wide_result.shape == wide.shape
+    assert jnp.all(jnp.isfinite(first))
+    assert jnp.all(jnp.isfinite(wide_result))
+    assert jnp.all(first == second)
+
+
+def test_dion2_update_touches_only_selected_rows_without_weight_decay() -> None:
+    params = {"w": jnp.ones((8, 4), dtype=jnp.float32)}
+    grads = {
+        "w": jnp.asarray(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [2.0, 2.0, 2.0, 2.0],
+                [0.5, 0.5, 0.5, 0.5],
+                [3.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0, 0.0],
+                [-1.0, 1.0, -1.0, 1.0],
+                [4.0, 2.0, -2.0, 2.0],
+            ],
+            dtype=jnp.float32,
+        )
+    }
+    transform = dion2_transform(lambda _count: jnp.asarray(1.0, dtype=jnp.float32), weight_decay=0.0, select_axis=0)
+
+    state = transform.init(params)
+    updates, next_state = transform.update(grads, state, params=params)
+
+    changed_rows = jnp.any(updates["w"] != 0, axis=1)
+    assert changed_rows.tolist() == [False, True, False, False, False, False, False, True]
+    assert jnp.allclose(next_state.momentum["w"][1], grads["w"][1] * dion2_policy_constants()["ef_decay"])
+    assert jnp.allclose(next_state.momentum["w"][7], grads["w"][7] * dion2_policy_constants()["ef_decay"])
+    assert jnp.allclose(next_state.momentum["w"][0], grads["w"][0])
+    assert jnp.allclose(next_state.momentum["w"][2], grads["w"][2])
+
+
 def test_muon_primary_routes_hidden_matrices_to_muon_with_adamw_fallback() -> None:
     result = build_model(_tiny_spec(), seed=0)
     built = build_optimizer(
@@ -119,6 +196,72 @@ def test_muon_primary_routes_hidden_matrices_to_muon_with_adamw_fallback() -> No
     assert assignments[("embed", "embedding")].fallback_reason == "embedding"
     assert assignments[("lm_head", "kernel")].fallback_reason == "lm_head"
     assert assignments[("norm", "scale")].fallback_reason == "norm"
+
+
+def test_optimizer_policy_summary_records_distributed_safety() -> None:
+    result = build_model(_tiny_spec(), seed=0)
+    muon = build_optimizer(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.1),
+        result.state,
+        result.metadata,
+    )
+
+    adamw_policy = optimizer_policy_summary(OptimizerSpec(name="adamw", schedule=ScheduleSpec(peak_lr=1e-3)))
+    muon_policy = optimizer_policy_summary(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3)),
+        muon.route_assignments,
+    )
+
+    assert adamw_policy["distributed_policy"] == {
+        "optimizer_state": "elementwise_shard_safe",
+        "gradient_update": "elementwise_shard_safe",
+        "zero2_fsdp": "supported",
+    }
+    assert adamw_policy["adamw"]["distributed_policy"] == "elementwise_shard_safe"
+    assert muon_policy["distributed_policy"] == {
+        "optimizer_state": "replicated_muon_or_sharded_dion2",
+        "gradient_update": "muon_when_replicated_dion2_when_sharded",
+        "zero2_fsdp": "auto_dion2",
+    }
+    assert muon_policy["muon"]["newton_schulz_precision"] == "bfloat16"
+    assert muon_policy["muon"]["distributed_policy"] == "replicated_or_auto_dion2_when_sharded"
+    assert muon_policy["muon"]["distributed_matrix_update"] == "auto_dion2"
+    assert muon_policy["dion2"]["fraction"] == 0.25
+    assert muon_policy["auto_routing"]["active"] is False
+    route_policies = {route["backend"]: route["distributed_policy"] for route in muon_policy["routes"]}
+    assert route_policies == {
+        "adamw": "elementwise_shard_safe",
+        "muon": "replicated_full_matrix_only",
+    }
+
+
+def test_sharded_muon_routes_auto_resolve_to_dion2() -> None:
+    require_fake_devices()
+    result = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
+    plan = build_sharding_plan(context, parallelism=ParallelismSpec(mode="zero2"), param_layouts=result.param_layouts)
+    optimizer_init_state = place_optimizer_init_state(result.state, plan)
+
+    built = build_optimizer(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.1),
+        optimizer_init_state,
+        result.metadata,
+    )
+    policy = optimizer_policy_summary(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3)),
+        built.route_assignments,
+        parallelism_mode="zero2",
+        fsdp_axis_size=4,
+    )
+
+    assert {assignment.backend for assignment in built.route_assignments} == {"adamw", "dion2"}
+    assert policy["route_counts"] == {"adamw": 7, "dion2": 7}
+    assert policy["auto_routing"]["active"] is True
+    dion2_routes = [assignment for assignment in built.route_assignments if assignment.backend == "dion2"]
+    assert {assignment.requested_backend for assignment in dion2_routes} == {"muon"}
+    assert {assignment.resolution_reason for assignment in dion2_routes} == {"fsdp_sharded_optimizer_state"}
+    assert all(assignment.auto_resolved for assignment in dion2_routes)
+    assert {assignment.matrix_axis for assignment in dion2_routes} == {0, 1}
 
 
 def test_muon_build_init_and_update_accept_nnx_model_state() -> None:

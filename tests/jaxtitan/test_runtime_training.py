@@ -234,6 +234,10 @@ def test_run_training_records_muon_optimizer_policy(
     assert diagnostics["optimizer"]["name"] == "muon"
     assert diagnostics["optimizer"]["route_counts"] == {"adamw": 7, "muon": 7}
     assert diagnostics["optimizer"]["muon"]["scale_mode"] == "match_rms_adamw"
+    assert diagnostics["optimizer"]["distributed_policy"]["zero2_fsdp"] == "auto_dion2"
+    assert diagnostics["optimizer"]["muon"]["newton_schulz_precision"] == "bfloat16"
+    assert diagnostics["optimizer"]["muon"]["distributed_policy"] == "replicated_or_auto_dion2_when_sharded"
+    assert diagnostics["optimizer"]["auto_routing"]["active"] is False
 
 
 def test_run_training_with_four_device_data_axis_reports_global_and_per_device_metrics(
@@ -381,6 +385,52 @@ def test_run_training_accepts_zero2_parallelism(
     assert diagnostics["sharding"]["gradients"]["fsdp_sharded_leaves"] > 0
     assert checkpoint_index["latest_step"] == 1
     assert metadata["compatibility"]["parallelism"]["mode"] == "zero2"
+
+
+@pytest.mark.parametrize("mode", ["fsdp", "zero2"])
+def test_run_training_auto_resolves_sharded_muon_to_dion2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+    mode: str,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        f"{mode}-muon-loop",
+        shard_token_groups=(tuple(range(0, 80)),),
+        train_tokens=65,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            optimizer_name="muon",
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=4,
+            n_kv_heads=4,
+            global_batch_size=4,
+            axis_names=("data", "fsdp"),
+            axis_sizes=(1, 4),
+            parallelism_mode=mode,
+        )
+    )
+
+    run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+    metadata = json.loads((run_dir / "checkpoints" / "000001" / "metadata" / "metadata").read_text())
+    assert diagnostics["optimizer"]["name"] == "muon"
+    assert diagnostics["optimizer"]["route_counts"] == {"adamw": 7, "dion2": 7}
+    assert diagnostics["optimizer"]["auto_routing"]["active"] is True
+    assert diagnostics["optimizer"]["dion2"]["orthogonalizer"] == "polar_express"
+    assert metadata["compatibility"]["optimizer"]["policy"]["auto_routing"]["active"] is True
+    assert metadata["compatibility"]["parallelism"]["mode"] == mode
 
 
 def test_run_training_with_gradient_accumulation_records_effective_batch(

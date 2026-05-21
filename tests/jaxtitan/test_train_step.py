@@ -483,7 +483,7 @@ def test_fsdp_train_step_reports_global_metrics_and_sharded_state() -> None:
     assert any(getattr(leaf, "sharding", None).spec == jax.sharding.PartitionSpec(None, "fsdp") for leaf in jax.tree.leaves(next_state.model))
 
 
-def test_fsdp_train_step_supports_muon_optimizer() -> None:
+def test_fsdp_train_step_auto_resolves_muon_to_dion2() -> None:
     require_fake_devices()
     built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
     context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
@@ -497,20 +497,16 @@ def test_fsdp_train_step_supports_muon_optimizer() -> None:
         sharding=plan,
         state_template=state,
         donate_state=True,
-        expected_batch_shape=(2, 4, 4),
+        expected_batch_shape=(1, 4, 4),
     )
-    micro = _batch(batch_size=4, seq_len=4, vocab_size=16)
-    batch = Batch(
-        input_ids=np.stack([micro.input_ids, micro.input_ids]),
-        target_ids=np.stack([micro.target_ids, micro.target_ids]),
-        loss_mask=np.ones((2, 4, 4), dtype=np.bool_),
-    )
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
 
-    next_state, metrics = step(state, place_accumulated_batch(batch, plan))
+    next_state, metrics = step(state, place_batch(batch, plan))
 
-    assert next_state.tokens_seen == 32
-    assert metrics.token_count == 32
-    assert {assignment.backend for assignment in optimizer.route_assignments} == {"adamw", "muon"}
+    assert {assignment.backend for assignment in optimizer.route_assignments} == {"adamw", "dion2"}
+    assert next_state.tokens_seen == 16
+    assert metrics.token_count == 16
+    assert metrics.loss_sum.shape == ()
 
 
 def test_zero2_train_step_keeps_model_replicated_and_optimizer_sharded() -> None:
@@ -552,7 +548,7 @@ def test_zero2_train_step_keeps_model_replicated_and_optimizer_sharded() -> None
     )
 
 
-def test_zero2_train_step_supports_muon_optimizer() -> None:
+def test_zero2_train_step_auto_resolves_muon_to_dion2() -> None:
     require_fake_devices()
     built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
     context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
@@ -572,20 +568,16 @@ def test_zero2_train_step_supports_muon_optimizer() -> None:
         sharding=plan,
         state_template=state,
         donate_state=True,
-        expected_batch_shape=(2, 4, 4),
+        expected_batch_shape=(1, 4, 4),
     )
-    micro = _batch(batch_size=4, seq_len=4, vocab_size=16)
-    batch = Batch(
-        input_ids=np.stack([micro.input_ids, micro.input_ids]),
-        target_ids=np.stack([micro.target_ids, micro.target_ids]),
-        loss_mask=np.ones((2, 4, 4), dtype=np.bool_),
-    )
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
 
-    next_state, metrics = step(state, place_accumulated_batch(batch, plan))
+    next_state, metrics = step(state, place_batch(batch, plan))
 
-    assert next_state.tokens_seen == 32
-    assert metrics.token_count == 32
-    assert {assignment.backend for assignment in optimizer.route_assignments} == {"adamw", "muon"}
+    assert {assignment.backend for assignment in optimizer.route_assignments} == {"adamw", "dion2"}
+    assert all(getattr(leaf, "sharding", None) == plan.replicated for leaf in jax.tree.leaves(next_state.model))
+    assert next_state.tokens_seen == 16
+    assert metrics.token_count == 16
 
 
 def test_fsdp_train_step_matches_ddp_global_batch_loss() -> None:

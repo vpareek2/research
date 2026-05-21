@@ -1,16 +1,33 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from jaxtitan.batch import Batch
 from jaxtitan.errors import ContractError
+from jaxtitan.mesh import (
+    build_mesh_context,
+    build_sharding_plan,
+    place_batch,
+    place_model_state,
+    place_optimizer_init_state,
+)
 from jaxtitan.models import build_model
 from jaxtitan.optim import build_optimizer
 from jaxtitan.services import LocalOrbaxCheckpointService
+from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
+from jaxtitan.specs.parallelism import ParallelismSpec
 from jaxtitan.state import DataPipelineState, HostState
 from jaxtitan.steps import initialize_train_state, make_train_step
+
+FAKE_DEVICE_COUNT = 4
+
+
+def require_fake_devices() -> None:
+    if jax.local_device_count() < FAKE_DEVICE_COUNT:
+        pytest.skip("JAX was initialized before fake CPU device flags were set")
 
 
 def test_orbax_checkpoint_restores_train_dataset_host_and_metadata(tmp_path) -> None:
@@ -154,6 +171,45 @@ def test_muon_optimizer_state_round_trips_and_can_continue(tmp_path) -> None:
     assert metrics.token_count == 8
 
 
+def test_auto_dion2_optimizer_state_round_trips_and_can_continue(tmp_path) -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
+    plan = build_sharding_plan(context, parallelism=ParallelismSpec(mode="zero2"), param_layouts=built.param_layouts)
+    model_state = place_model_state(built.state, plan)
+    optimizer_init_state = place_optimizer_init_state(built.state, plan)
+    optimizer = _optimizer(optimizer_init_state, built.metadata, optimizer_name="muon")
+    state = initialize_train_state(
+        model_state,
+        optimizer.transform,
+        seed=1,
+        optimizer_init_model_state=optimizer_init_state,
+    )
+    step = make_train_step(built.graph, optimizer, sharding=plan, state_template=state, expected_batch_shape=(1, 4, 4))
+    train_state, _metrics = step(state, place_batch(_batch(batch_size=4), plan))
+    dataset_state = _dataset_state(token_offset=16, next_record_index=4)
+    host_state = HostState(dataset=dataset_state, last_checkpoint_step=1, wallclock_start_ns=123, run_id="smoke")
+    service = LocalOrbaxCheckpointService(tmp_path / "run", max_to_keep=2)
+    service.save(1, train_state, dataset_state, host_state, {"step": 1, "optimizer": "muon"})
+
+    template = initialize_train_state(
+        model_state,
+        optimizer.transform,
+        seed=2,
+        optimizer_init_model_state=optimizer_init_state,
+    )
+    restored = service.restore_latest(template)
+    next_state, metrics = step(restored.train_state, place_batch(_batch(offset=16, batch_size=4), plan))
+    service.close()
+
+    assert {assignment.backend for assignment in optimizer.route_assignments} == {"adamw", "dion2"}
+    assert restored.metadata["optimizer"] == "muon"
+    assert _trees_equal(restored.train_state.opt_state, train_state.opt_state)
+    assert next_state.step == 2
+    assert next_state.tokens_seen == 32
+    assert metrics.token_count == 16
+
+
 def _advanced_state(built, optimizer):
     state = initialize_train_state(built.state, optimizer.transform, seed=1)
     next_state, _ = make_train_step(built.graph, optimizer)(state, _batch())
@@ -168,25 +224,31 @@ def _optimizer(model_state, metadata, *, optimizer_name: str = "adamw"):
     )
 
 
-def _tiny_spec() -> ModelSpec:
+def _tiny_spec(
+    *,
+    hidden_size: int = 8,
+    intermediate_size: int = 16,
+    num_heads: int = 2,
+    n_kv_heads: int = 1,
+) -> ModelSpec:
     return ModelSpec(
         name="decoder",
         variant="tiny",
         vocab_size=16,
-        hidden_size=8,
-        intermediate_size=16,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
         num_layers=1,
-        num_heads=2,
-        n_kv_heads=1,
+        num_heads=num_heads,
+        n_kv_heads=n_kv_heads,
         max_seq_len=4,
         compute_dtype="float32",
     )
 
 
-def _batch(*, offset: int = 0) -> Batch:
-    input_ids = (jnp.arange(8, dtype=jnp.int32).reshape(2, 4) + offset) % 16
+def _batch(*, offset: int = 0, batch_size: int = 2) -> Batch:
+    input_ids = (jnp.arange(batch_size * 4, dtype=jnp.int32).reshape(batch_size, 4) + offset) % 16
     target_ids = (input_ids + 1) % 16
-    return Batch(input_ids=input_ids, target_ids=target_ids, loss_mask=jnp.ones((2, 4), dtype=jnp.bool_))
+    return Batch(input_ids=input_ids, target_ids=target_ids, loss_mask=jnp.ones((batch_size, 4), dtype=jnp.bool_))
 
 
 def _dataset_state(*, token_offset: int, next_record_index: int) -> DataPipelineState:
@@ -217,6 +279,14 @@ def _dataset_state(*, token_offset: int, next_record_index: int) -> DataPipeline
 
 def _trees_equal(left, right) -> bool:
     return all(
-        jnp.array_equal(left_leaf, right_leaf)
+        np.array_equal(_leaf_array(left_leaf), _leaf_array(right_leaf))
         for left_leaf, right_leaf in zip(jax.tree.leaves(left), jax.tree.leaves(right), strict=True)
     )
+
+
+def _leaf_array(value) -> np.ndarray:
+    value = jax.device_get(value)
+    try:
+        return np.asarray(value)
+    except TypeError:
+        return np.asarray(jax.random.key_data(value))

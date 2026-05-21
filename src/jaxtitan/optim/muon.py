@@ -15,6 +15,7 @@ MUON_NESTEROV = True
 MUON_NS_STEPS = 5
 MUON_NS_EPS = 1e-7
 MUON_NS_COEFFICIENTS = (3.4445, -4.7750, 2.0315)
+MUON_NS_PRECISION = "bfloat16"
 MUON_RMS_MATCH_SCALE = 0.2
 MUON_SCALE_MODE = "match_rms_adamw"
 
@@ -76,13 +77,12 @@ def zeropower_via_newton_schulz(value: jax.Array) -> jax.Array:
     if len(value.shape) != 2:
         raise ValueError(f"Muon Newton-Schulz expects rank-2 arrays, got shape {value.shape}")
     original_dtype = value.dtype
-    x = value.astype(jnp.float32)
-    x = x / (jnp.linalg.norm(x) + jnp.asarray(MUON_NS_EPS, dtype=jnp.float32))
+    x = value.astype(jnp.bfloat16)
+    x = x / jnp.maximum(jnp.linalg.norm(x), jnp.asarray(MUON_NS_EPS, dtype=x.dtype))
     transposed = x.shape[0] > x.shape[1]
     if transposed:
         x = x.T
-    x = x.astype(jnp.bfloat16)
-    a, b, c = (jnp.asarray(coeff, dtype=jnp.bfloat16) for coeff in MUON_NS_COEFFICIENTS)
+    a, b, c = MUON_NS_COEFFICIENTS
     for _ in range(MUON_NS_STEPS):
         xx_t = x @ x.T
         update = b * xx_t + c * (xx_t @ xx_t)
@@ -101,6 +101,7 @@ def muon_policy_constants() -> dict[str, Any]:
         "newton_schulz_steps": MUON_NS_STEPS,
         "newton_schulz_eps": MUON_NS_EPS,
         "newton_schulz_coefficients": list(MUON_NS_COEFFICIENTS),
+        "newton_schulz_precision": MUON_NS_PRECISION,
         "scale_mode": MUON_SCALE_MODE,
         "rms_match_scale": MUON_RMS_MATCH_SCALE,
     }

@@ -186,6 +186,46 @@ def test_load_config_rejects_zero2_without_fsdp_axis(tmp_path: Path) -> None:
         load_config(config_path)
 
 
+@pytest.mark.parametrize("mode", ["fsdp", "zero2"])
+def test_load_config_allows_muon_when_fsdp_axis_is_noop(tmp_path: Path, mode: str) -> None:
+    config_path = tmp_path / f"{mode}.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "adamw"', 'name = "muon"', 1)
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "fsdp"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 1]")
+        + f'\n[parallelism]\nmode = "{mode}"\n'
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.optimizer.name == "muon"
+    assert spec.parallelism.mode == mode
+
+
+@pytest.mark.parametrize("mode", ["fsdp", "zero2"])
+def test_load_config_accepts_muon_with_real_fsdp_axis(tmp_path: Path, mode: str) -> None:
+    config_path = tmp_path / f"{mode}-muon.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "adamw"', 'name = "muon"', 1)
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "fsdp"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 4]")
+        + f'\n[parallelism]\nmode = "{mode}"\n'
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.optimizer.name == "muon"
+    assert spec.parallelism.mode == mode
+
+
+def test_load_config_rejects_public_dion2_optimizer_name(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad-dion2.toml"
+    config_path.write_text(MINIMAL_CONFIG.replace('name = "adamw"', 'name = "dion2"', 1))
+
+    with pytest.raises(ConfigError, match="optimizer.name"):
+        load_config(config_path)
+
+
 def test_load_config_rejects_fallback_schedule_for_non_muon(tmp_path: Path) -> None:
     config_path = tmp_path / "bad.toml"
     config_path.write_text(

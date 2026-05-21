@@ -16,6 +16,7 @@ import optax
 
 from jaxtitan.errors import ContractError
 from jaxtitan.models import ParamMetadata
+from jaxtitan.optim.dion2 import dion2_policy_constants, dion2_transform
 from jaxtitan.optim.muon import muon_policy_constants, muon_transform
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
 
@@ -24,6 +25,7 @@ ADAMW_B1 = 0.9
 ADAMW_B2 = 0.999
 ADAMW_EPS = 1e-8
 _SUPPORTED_RUNTIME_BACKENDS = {"adamw", "muon"}
+_INTERNAL_RUNTIME_BACKENDS = {"dion2"}
 # Next optimizer backends to evaluate after Muon has run artifacts: Aurora, Scion, and SOAP.
 _MUON_TAGS = frozenset(
     {
@@ -66,6 +68,10 @@ class RouteAssignment:
     backend: str
     weight_decay: bool
     fallback_reason: str | None = None
+    requested_backend: str | None = None
+    auto_resolved: bool = False
+    resolution_reason: str | None = None
+    matrix_axis: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +132,8 @@ def build_optimizer(
         )
 
     metadata = tuple(metadata)
-    assignments = _route_assignments(spec, metadata)
+    params_by_path = _params_by_metadata_path(model_state)
+    assignments = _route_assignments(spec, metadata, params_by_path)
     schedule = build_lr_schedule(spec.schedule)
     adamw_fallback_schedule = None
     if spec.adamw_fallback_schedule is not None:
@@ -186,26 +193,50 @@ def describe_optimizer(spec: OptimizerSpec) -> str:
 def optimizer_policy_summary(
     spec: OptimizerSpec,
     assignments: Iterable[RouteAssignment] | None = None,
+    *,
+    parallelism_mode: str | None = None,
+    fsdp_axis_size: int | None = None,
 ) -> dict[str, Any]:
     """Return a stable optimizer policy payload for artifacts and compatibility checks."""
 
     assignments = None if assignments is None else tuple(assignments)
+    auto_routing_active = _auto_routing_active(
+        spec,
+        assignments=assignments,
+        parallelism_mode=parallelism_mode,
+        fsdp_axis_size=fsdp_axis_size,
+    )
     payload = {
         "name": spec.name,
+        "requested_name": spec.name,
         "schedule": _schedule_payload(spec.schedule),
         "adamw_fallback_schedule": None
         if spec.adamw_fallback_schedule is None
         else _schedule_payload(spec.adamw_fallback_schedule),
         "supported_runtime_backends": sorted(_SUPPORTED_RUNTIME_BACKENDS),
+        "internal_runtime_backends": sorted(_INTERNAL_RUNTIME_BACKENDS),
+        "distributed_policy": _distributed_policy_payload(spec.name),
         "adamw": {
             "b1": ADAMW_B1,
             "b2": ADAMW_B2,
             "eps": ADAMW_EPS,
+            "distributed_policy": "elementwise_shard_safe",
         },
         "muon": {
             **muon_policy_constants(),
+            "distributed_policy": "replicated_or_auto_dion2_when_sharded",
+            "distributed_matrix_update": "auto_dion2",
             "hidden_matrix_tags": sorted(_MUON_TAGS),
             "fallback_tags": ["embedding", "lm_head", *sorted(_NORM_TAGS)],
+        },
+        "dion2": {
+            **dion2_policy_constants(),
+            "distributed_policy": "fsdp_sharded_matrix",
+            "auto_selected_for": "sharded_muon_matrix_routes",
+        },
+        "auto_routing": {
+            "muon_sharded_matrix_backend": "dion2",
+            "active": auto_routing_active,
         },
         "route_counts": None,
         "fallback_counts": None,
@@ -224,8 +255,13 @@ def optimizer_policy_summary(
                     "path": list(assignment.path),
                     "tag": assignment.tag,
                     "backend": assignment.backend,
+                    "requested_backend": assignment.requested_backend,
                     "weight_decay": assignment.weight_decay,
                     "fallback_reason": assignment.fallback_reason,
+                    "distributed_policy": _route_distributed_policy(assignment.backend),
+                    "auto_resolved": assignment.auto_resolved,
+                    "resolution_reason": assignment.resolution_reason,
+                    "matrix_axis": assignment.matrix_axis,
                 }
             )
         payload["route_counts"] = dict(sorted(route_counts.items()))
@@ -234,7 +270,28 @@ def optimizer_policy_summary(
     return payload
 
 
-def _route_assignments(spec: OptimizerSpec, metadata: tuple[ParamMetadata, ...]) -> tuple[RouteAssignment, ...]:
+def _auto_routing_active(
+    spec: OptimizerSpec,
+    *,
+    assignments: tuple[RouteAssignment, ...] | None,
+    parallelism_mode: str | None,
+    fsdp_axis_size: int | None,
+) -> bool:
+    if assignments is not None:
+        return any(assignment.auto_resolved for assignment in assignments)
+    return bool(
+        spec.name == "muon"
+        and parallelism_mode in {"zero2", "fsdp"}
+        and fsdp_axis_size is not None
+        and fsdp_axis_size > 1
+    )
+
+
+def _route_assignments(
+    spec: OptimizerSpec,
+    metadata: tuple[ParamMetadata, ...],
+    params_by_path: dict[tuple[str, ...], Any],
+) -> tuple[RouteAssignment, ...]:
     known_tags = {item.tag for item in metadata}
     known_paths = set()
     for item in metadata:
@@ -257,7 +314,11 @@ def _route_assignments(spec: OptimizerSpec, metadata: tuple[ParamMetadata, ...])
     assignments = []
     for item in metadata:
         rule = routes_by_tag.get(item.tag)
-        backend = _default_backend(spec, item) if rule is None else rule.transform
+        requested_backend = _default_backend(spec, item) if rule is None else rule.transform
+        leaf = params_by_path.get(item.path)
+        if leaf is None:
+            raise ContractError(f"optimizer metadata is missing model parameter path {'.'.join(item.path)!r}")
+        backend, matrix_axis, resolution_reason = _resolve_backend(requested_backend, item, leaf)
         weight_decay = True if rule is None else rule.weight_decay
         _validate_route(item, backend)
         assignments.append(
@@ -267,9 +328,43 @@ def _route_assignments(spec: OptimizerSpec, metadata: tuple[ParamMetadata, ...])
                 backend=backend,
                 weight_decay=weight_decay,
                 fallback_reason=_fallback_reason(spec, item, backend, rule is not None),
+                requested_backend=requested_backend,
+                auto_resolved=backend != requested_backend,
+                resolution_reason=resolution_reason,
+                matrix_axis=matrix_axis,
             )
         )
     return tuple(assignments)
+
+
+def _distributed_policy_payload(name: str) -> dict[str, str]:
+    if name == "adamw":
+        return {
+            "optimizer_state": "elementwise_shard_safe",
+            "gradient_update": "elementwise_shard_safe",
+            "zero2_fsdp": "supported",
+        }
+    if name == "muon":
+        return {
+            "optimizer_state": "replicated_muon_or_sharded_dion2",
+            "gradient_update": "muon_when_replicated_dion2_when_sharded",
+            "zero2_fsdp": "auto_dion2",
+        }
+    return {
+        "optimizer_state": "unknown",
+        "gradient_update": "unknown",
+        "zero2_fsdp": "unsupported",
+    }
+
+
+def _route_distributed_policy(backend: str) -> str:
+    if backend == "adamw":
+        return "elementwise_shard_safe"
+    if backend == "muon":
+        return "replicated_full_matrix_only"
+    if backend == "dion2":
+        return "fsdp_sharded_matrix"
+    return "unknown"
 
 
 def _adamw_transform(
@@ -306,6 +401,26 @@ def _muon_primary_transforms(
         assignments,
         lambda assignment: assignment.backend == "muon" and not assignment.weight_decay,
     )
+    dion2_row_decay_mask = _mask_from_assignments(
+        params,
+        assignments,
+        lambda assignment: assignment.backend == "dion2" and assignment.matrix_axis == 0 and assignment.weight_decay,
+    )
+    dion2_row_no_decay_mask = _mask_from_assignments(
+        params,
+        assignments,
+        lambda assignment: assignment.backend == "dion2" and assignment.matrix_axis == 0 and not assignment.weight_decay,
+    )
+    dion2_col_decay_mask = _mask_from_assignments(
+        params,
+        assignments,
+        lambda assignment: assignment.backend == "dion2" and assignment.matrix_axis == 1 and assignment.weight_decay,
+    )
+    dion2_col_no_decay_mask = _mask_from_assignments(
+        params,
+        assignments,
+        lambda assignment: assignment.backend == "dion2" and assignment.matrix_axis == 1 and not assignment.weight_decay,
+    )
     adamw_mask = _mask_from_assignments(params, assignments, lambda assignment: assignment.backend == "adamw")
     adamw_decay_mask = _mask_from_assignments(
         params,
@@ -325,6 +440,38 @@ def _muon_primary_transforms(
             optax.masked(
                 muon_transform(schedule, weight_decay=0.0),
                 muon_no_decay_mask,
+                mask_compatible_extra_args=True,
+            )
+        )
+    if _mask_any(dion2_row_decay_mask):
+        transforms.append(
+            optax.masked(
+                dion2_transform(schedule, weight_decay=spec.weight_decay, select_axis=0),
+                dion2_row_decay_mask,
+                mask_compatible_extra_args=True,
+            )
+        )
+    if _mask_any(dion2_row_no_decay_mask):
+        transforms.append(
+            optax.masked(
+                dion2_transform(schedule, weight_decay=0.0, select_axis=0),
+                dion2_row_no_decay_mask,
+                mask_compatible_extra_args=True,
+            )
+        )
+    if _mask_any(dion2_col_decay_mask):
+        transforms.append(
+            optax.masked(
+                dion2_transform(schedule, weight_decay=spec.weight_decay, select_axis=1),
+                dion2_col_decay_mask,
+                mask_compatible_extra_args=True,
+            )
+        )
+    if _mask_any(dion2_col_no_decay_mask):
+        transforms.append(
+            optax.masked(
+                dion2_transform(schedule, weight_decay=0.0, select_axis=1),
+                dion2_col_no_decay_mask,
                 mask_compatible_extra_args=True,
             )
         )
@@ -354,10 +501,21 @@ def _default_backend(spec: OptimizerSpec, item: ParamMetadata) -> str:
     return spec.name
 
 
+def _resolve_backend(requested_backend: str, item: ParamMetadata, leaf: Any) -> tuple[str, int | None, str | None]:
+    if requested_backend != "muon" or item.tag not in _MUON_TAGS:
+        return requested_backend, None, None
+    matrix_axis = _fsdp_matrix_axis(leaf)
+    if matrix_axis is None:
+        return "muon", None, None
+    return "dion2", matrix_axis, "fsdp_sharded_optimizer_state"
+
+
 def _validate_route(item: ParamMetadata, backend: str) -> None:
-    if backend == "muon" and len(item.shape) != 2:
+    if backend in {"muon", "dion2"} and len(item.shape) != 2:
+        display_backend = {"muon": "Muon", "dion2": "Dion2"}.get(backend, backend)
         raise ContractError(
-            f"Muon route for parameter {'.'.join(item.path)!r} requires a rank-2 matrix, got shape {item.shape}"
+            f"{display_backend} route for parameter {'.'.join(item.path)!r} requires a rank-2 matrix, "
+            f"got shape {item.shape}"
         )
     if item.tag in _MUON_TAGS and len(item.shape) != 2:
         raise ContractError(
@@ -391,6 +549,24 @@ def _validate_assignment_paths(params: PyTree, assignments: tuple[RouteAssignmen
         raise ContractError(f"optimizer metadata is missing model parameter path {'.'.join(missing[0])!r}")
     if extra:
         raise ContractError(f"optimizer metadata has stale parameter path {'.'.join(extra[0])!r}")
+
+
+def _params_by_metadata_path(params: PyTree) -> dict[tuple[str, ...], Any]:
+    return {_metadata_path_from_jax_path(path): value for path, value in jax.tree_util.tree_flatten_with_path(params)[0]}
+
+
+def _fsdp_matrix_axis(leaf: Any) -> int | None:
+    sharding = getattr(leaf, "sharding", None)
+    spec = getattr(sharding, "spec", None)
+    if spec is None:
+        return None
+    axes = tuple(spec)
+    fsdp_axes = [idx for idx, axis in enumerate(axes) if axis == "fsdp"]
+    if not fsdp_axes:
+        return None
+    if len(fsdp_axes) != 1:
+        raise ContractError(f"Muon matrix route expects at most one fsdp-sharded parameter axis, got {spec}")
+    return fsdp_axes[0]
 
 
 def _mask_from_assignments(
