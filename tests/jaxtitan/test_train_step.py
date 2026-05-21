@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
+from flax import nnx
 
 from jaxtitan.batch import Batch
 from jaxtitan.errors import ContractError
@@ -24,6 +25,7 @@ from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec, TrinitySpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
 from jaxtitan.specs.parallelism import ParallelismSpec
+from jaxtitan.specs.run import TrainingLossSpec
 from jaxtitan.steps import initialize_train_state, make_train_step, train_step
 
 FAKE_DEVICE_COUNT = 4
@@ -119,6 +121,15 @@ def test_train_step_updates_trinity_moe_model_with_adamw() -> None:
     assert _trees_changed(state.model, next_state.model)
     assert _trees_changed(state.opt_state, next_state.opt_state)
     assert metrics.token_count == 8
+    assert metrics.router_expert_counts.shape == (1, 3)
+    assert metrics.router_importance.shape == (1, 3)
+    assert jnp.sum(metrics.router_expert_counts) == 2 * 4 * 2
+    assert float(jax.device_get(jnp.sum(metrics.router_importance))) == pytest.approx(2 * 4 * 1.25, abs=1e-2)
+    assert metrics.router_dead_experts_count >= 0
+    assert metrics.router_experts_active_mean <= 3
+    assert metrics.router_mean_importance_entropy is not None
+    assert metrics.smebu_bias_norm is None
+    assert metrics.smebu_momentum_norm is None
     assert math.isfinite(float(jax.device_get(metrics.loss_sum)))
 
 
@@ -238,7 +249,112 @@ def test_train_step_aux_loss_changes_objective_without_changing_lm_metrics(monke
     assert aux_metrics.token_count == plain_metrics.token_count == 6
     assert aux_metrics.aux_loss > 0
     assert aux_metrics.objective > plain_metrics.objective
+    assert aux_metrics.total_loss == aux_metrics.objective
     assert next_aux.model < next_plain.model
+
+
+def test_train_step_z_loss_changes_objective_without_changing_lm_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_apply_model_output(_graph, params, input_ids):
+        logits = jnp.broadcast_to(jnp.stack([params, -params]), (*input_ids.shape, 2))
+        return ModelOutput(logits=logits)
+
+    monkeypatch.setattr(train_module, "apply_model_output", fake_apply_model_output)
+    optimizer = OptimizerBuildResult(
+        transform=optax.sgd(0.1),
+        schedule=lambda step: jnp.asarray(0.1, dtype=jnp.float32),
+        adamw_fallback_schedule=None,
+        route_assignments=(),
+        description="sgd",
+    )
+    initial_model = jnp.asarray(0.25, dtype=jnp.float32)
+    plain_state = initialize_train_state(initial_model, optimizer.transform, seed=1)
+    z_state = initialize_train_state(initial_model, optimizer.transform, seed=1)
+    batch = Batch(
+        input_ids=jnp.zeros((2, 3), dtype=jnp.int32),
+        target_ids=jnp.zeros((2, 3), dtype=jnp.int32),
+        loss_mask=jnp.ones((2, 3), dtype=jnp.bool_),
+    )
+
+    _next_plain, plain_metrics = make_train_step("plain", optimizer)(plain_state, batch)
+    _next_z, z_metrics = make_train_step(
+        "plain",
+        optimizer,
+        loss=TrainingLossSpec(z_loss_weight=0.1),
+    )(z_state, batch)
+
+    assert jnp.allclose(z_metrics.loss_sum, plain_metrics.loss_sum)
+    assert z_metrics.token_count == plain_metrics.token_count == 6
+    assert z_metrics.z_loss > 0
+    assert z_metrics.total_loss > plain_metrics.total_loss
+
+
+def test_smebu_updates_expert_bias_and_momentum_after_train_step() -> None:
+    spec = _tiny_trinity_spec(
+        num_layers=2,
+        initial_dense_layers=1,
+        moe={
+            "num_experts": 3,
+            "top_k": 2,
+            "balance": {
+                "name": "smebu",
+                "load_lr": 1e-2,
+                "momentum": 0.5,
+                "clamp": 2.0,
+                "sequence_aux_loss_weight": 1e-4,
+            },
+        },
+    )
+    built = build_model(spec, seed=0)
+    optimizer = _optimizer(built.state, built.metadata)
+    state = initialize_train_state(
+        built.state,
+        optimizer.transform,
+        seed=1,
+        moe_balance_spec=spec.trinity.moe.balance,
+    )
+    bias_path = next(item.path for item in built.metadata if item.tag == "moe_expert_bias")
+
+    next_state, metrics = make_train_step(built.graph, optimizer)(state, _batch(batch_size=2, seq_len=4, vocab_size=16))
+
+    assert next_state.moe_balance is not None
+    bias = _state_value_by_path(next_state.model, bias_path)
+    momentum = next_state.moe_balance.layers[0].momentum
+    assert not jnp.allclose(momentum, jnp.zeros_like(momentum))
+    assert jnp.allclose(bias, momentum, atol=1e-6)
+    assert metrics.moe_aux_loss > 0
+    assert metrics.router_max_vio is not None
+    assert metrics.smebu_bias_norm is not None
+    assert metrics.smebu_momentum_norm is not None
+
+
+def test_smebu_gradient_accumulation_aggregates_counts_once_per_step() -> None:
+    spec = _tiny_trinity_spec(
+        num_layers=2,
+        initial_dense_layers=1,
+        moe={"num_experts": 3, "top_k": 2, "balance": {"name": "smebu", "load_lr": 1e-2}},
+    )
+    built = build_model(spec, seed=0)
+    optimizer = _optimizer(built.state, built.metadata)
+    initial_state = initialize_train_state(
+        built.state,
+        optimizer.transform,
+        seed=1,
+        moe_balance_spec=spec.trinity.moe.balance,
+    )
+    batch = _batch(batch_size=2, seq_len=4, vocab_size=16)
+    accumulated_batch = Batch(
+        input_ids=np.stack([batch.input_ids, batch.input_ids]),
+        target_ids=np.stack([batch.target_ids, batch.target_ids]),
+        loss_mask=np.ones((2, 2, 4), dtype=np.bool_),
+    )
+
+    next_accum, metrics = make_train_step(built.graph, optimizer)(initial_state, accumulated_batch)
+    after_first, single_metrics = make_train_step(built.graph, optimizer)(initial_state, batch)
+
+    assert metrics.token_count == 16
+    assert jnp.allclose(metrics.router_expert_counts, single_metrics.router_expert_counts * 2)
+    assert jnp.allclose(metrics.router_importance, single_metrics.router_importance * 2)
+    assert jnp.allclose(next_accum.moe_balance.layers[0].momentum, after_first.moe_balance.layers[0].momentum)
 
 
 def test_train_step_rejects_bad_batch_shapes_before_compile() -> None:
@@ -848,6 +964,13 @@ def _trees_close(left, right, *, rtol: float = 1e-5, atol: float = 1e-5) -> bool
 
 def _scalar_int(value) -> int:
     return int(np.asarray(jax.device_get(value)).item())
+
+
+def _state_value_by_path(state, target_path: tuple[str, ...]):
+    for path, variable in nnx.to_flat_state(state):
+        if tuple(str(part) for part in path) == target_path:
+            return variable.get_value()
+    raise AssertionError(f"state path {'.'.join(target_path)} not found")
 
 
 def _rng_equal(left, right) -> bool:

@@ -116,6 +116,14 @@ class RunSummary:
     data_document_refill_size: int | None = None
     final_batch_het: float | None = None
     avg_batch_het: float | None = None
+    moe_balance_policy: str | None = None
+    z_loss_weight: float | None = None
+    final_moe_router_layers: list[dict[str, Any]] | None = None
+    final_router_max_vio: float | None = None
+    final_router_mean_load_cv: float | None = None
+    final_router_dead_experts_count: float | None = None
+    final_router_mean_importance_cv: float | None = None
+    final_router_mean_importance_entropy: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +172,8 @@ def run_training(
                 "data_pipeline_prefetch": spec.data.prefetch,
                 "data_document_buffer_size": spec.data.document_buffer_size,
                 "data_document_refill_size": spec.data.document_refill_size,
+                "moe_balance_policy": _moe_balance_name(spec),
+                "z_loss_weight": spec.training.loss.z_loss_weight,
             }
         )
         summary = _run_training_initialized(spec, writer, resume=resume, progress=progress)
@@ -200,7 +210,15 @@ def run_training(
                 "data_pipeline_prefetch": summary.data_pipeline_prefetch,
                 "data_document_buffer_size": summary.data_document_buffer_size,
                 "data_document_refill_size": summary.data_document_refill_size,
-            }
+            "moe_balance_policy": summary.moe_balance_policy,
+            "z_loss_weight": summary.z_loss_weight,
+            "final_moe_router_layers": summary.final_moe_router_layers,
+            "final_router_max_vio": summary.final_router_max_vio,
+            "final_router_mean_load_cv": summary.final_router_mean_load_cv,
+            "final_router_dead_experts_count": summary.final_router_dead_experts_count,
+            "final_router_mean_importance_cv": summary.final_router_mean_importance_cv,
+            "final_router_mean_importance_entropy": summary.final_router_mean_importance_entropy,
+        }
         )
         writer.write_summary(asdict(summary))
         return summary
@@ -252,6 +270,7 @@ def _run_training_initialized(
         optimizer.transform,
         seed=runtime_spec.seed,
         optimizer_init_model_state=optimizer_init_state,
+        moe_balance_spec=_moe_balance_spec(runtime_spec),
     )
     expected_train_shape = (
         runtime_spec.training.gradient_accumulation_steps,
@@ -266,6 +285,7 @@ def _run_training_initialized(
         state_template=train_state,
         donate_state=True,
         expected_batch_shape=expected_train_shape,
+        loss=runtime_spec.training.loss,
     )
     eval_spec = _validation_eval_spec(runtime_spec)
     eval_step = None if eval_spec is None else make_eval_step(
@@ -524,6 +544,14 @@ def _run_training_initialized(
             data_document_refill_size=data_pipeline_summary.get("document_refill_size"),
             final_batch_het=diagnostic_summary["final_batch_het"],
             avg_batch_het=diagnostic_summary["avg_batch_het"],
+            moe_balance_policy=runtime_summary["model"]["moe_balance"]["name"],
+            z_loss_weight=runtime_summary["training"]["loss"]["z_loss_weight"],
+            final_moe_router_layers=last_row.get("moe_router_layers"),
+            final_router_max_vio=last_row["router_max_vio"],
+            final_router_mean_load_cv=last_row["router_mean_load_cv"],
+            final_router_dead_experts_count=last_row["router_dead_experts_count"],
+            final_router_mean_importance_cv=last_row["router_mean_importance_cv"],
+            final_router_mean_importance_entropy=last_row["router_mean_importance_entropy"],
         )
         if progress is not None:
             progress("completed", {"summary": summary})
@@ -557,6 +585,18 @@ def _validation_eval_spec(spec: RunSpec) -> EvalSpec | None:
     if eval_spec.name != "validation":
         raise ContractError(f"runtime supports only eval name 'validation', got {eval_spec.name!r}")
     return eval_spec
+
+
+def _moe_balance_spec(spec: RunSpec) -> Any | None:
+    trinity = spec.model.trinity
+    if trinity is None or trinity.moe is None:
+        return None
+    return trinity.moe.balance
+
+
+def _moe_balance_name(spec: RunSpec) -> str:
+    balance = _moe_balance_spec(spec)
+    return "none" if balance is None else balance.name
 
 
 def _build_train_data_pipeline(spec: RunSpec) -> TrainingDataPipeline:
@@ -783,10 +823,29 @@ def _metrics_row(
         "loss_sum": loss_sum,
         "token_count": token_count,
         "loss": loss_sum / token_count,
+        "lm_loss": loss_sum / token_count,
         "lr": _scalar_float(metrics.lr),
         "grad_norm": _optional_scalar_float(metrics.grad_norm),
         "param_norm": _optional_scalar_float(metrics.param_norm),
         "update_norm": _optional_scalar_float(metrics.update_norm),
+        "total_loss": _optional_scalar_float(metrics.total_loss),
+        "z_loss": _optional_scalar_float(metrics.z_loss),
+        "moe_aux_loss": _optional_scalar_float(metrics.moe_aux_loss),
+        "aux_loss": _optional_scalar_float(metrics.aux_loss),
+        "router_max_vio": _optional_scalar_float(metrics.router_max_vio),
+        "router_load_min": _optional_scalar_float(metrics.router_load_min),
+        "router_load_max": _optional_scalar_float(metrics.router_load_max),
+        "router_load_entropy": _optional_scalar_float(metrics.router_load_entropy),
+        "router_mean_load_cv": _optional_scalar_float(metrics.router_mean_load_cv),
+        "router_std_load_cv": _optional_scalar_float(metrics.router_std_load_cv),
+        "router_mean_load_entropy": _optional_scalar_float(metrics.router_mean_load_entropy),
+        "router_min_load_entropy": _optional_scalar_float(metrics.router_min_load_entropy),
+        "router_dead_experts_count": _optional_scalar_float(metrics.router_dead_experts_count),
+        "router_experts_active_mean": _optional_scalar_float(metrics.router_experts_active_mean),
+        "router_mean_importance_cv": _optional_scalar_float(metrics.router_mean_importance_cv),
+        "router_mean_importance_entropy": _optional_scalar_float(metrics.router_mean_importance_entropy),
+        "smebu_bias_norm": _optional_scalar_float(metrics.smebu_bias_norm),
+        "smebu_momentum_norm": _optional_scalar_float(metrics.smebu_momentum_norm),
         "microbatch_loss_mean": _optional_scalar_float(metrics.microbatch_loss_mean),
         "microbatch_loss_max": _optional_scalar_float(metrics.microbatch_loss_max),
         "batch_het": _optional_scalar_float(metrics.batch_het),
@@ -796,6 +855,9 @@ def _metrics_row(
         "examples": provenance.examples,
         "target_tokens": provenance.target_tokens,
     }
+    router_layers = _router_layers_payload(metrics.router_expert_counts, metrics.router_importance)
+    if router_layers is not None:
+        row["moe_router_layers"] = router_layers
     row.update(_document_metric_fields(provenance.row_doc_ids))
     if runtime_spec is not None and context is not None:
         data_axis_size = context.data_axis_size
@@ -945,6 +1007,25 @@ def _train_sync_target(train_state: TrainState, metrics: Any) -> tuple[Any, ...]
         metrics.overflow,
         metrics.objective,
         metrics.aux_loss,
+        metrics.z_loss,
+        metrics.moe_aux_loss,
+        metrics.total_loss,
+        metrics.router_expert_counts,
+        metrics.router_importance,
+        metrics.router_max_vio,
+        metrics.router_load_min,
+        metrics.router_load_max,
+        metrics.router_load_entropy,
+        metrics.router_mean_load_cv,
+        metrics.router_std_load_cv,
+        metrics.router_mean_load_entropy,
+        metrics.router_min_load_entropy,
+        metrics.router_dead_experts_count,
+        metrics.router_experts_active_mean,
+        metrics.router_mean_importance_cv,
+        metrics.router_mean_importance_entropy,
+        metrics.smebu_bias_norm,
+        metrics.smebu_momentum_norm,
         metrics.microbatch_loss_mean,
         metrics.microbatch_loss_max,
         metrics.batch_het,
@@ -956,6 +1037,74 @@ def _train_sync_target(train_state: TrainState, metrics: Any) -> tuple[Any, ...]
 
 def _optional_scalar_float(value: Any) -> float | None:
     return None if value is None else _scalar_float(value)
+
+
+def _router_layers_payload(counts: Any, importance: Any) -> list[dict[str, Any]] | None:
+    if counts is None or importance is None:
+        return None
+    counts_array = np.asarray(jax.device_get(counts), dtype=np.float64)
+    importance_array = np.asarray(jax.device_get(importance), dtype=np.float64)
+    if counts_array.ndim != 2 or counts_array.shape[0] == 0:
+        return None
+    rows = []
+    for layer_index, (layer_counts, layer_importance) in enumerate(
+        zip(counts_array, importance_array, strict=True)
+    ):
+        load_percent = _percent_distribution(layer_counts)
+        importance_percent = _percent_distribution(layer_importance)
+        rows.append(
+            {
+                "layer_index": layer_index,
+                "total_assignments": float(np.sum(layer_counts)),
+                "expert_counts": [int(value) for value in layer_counts.tolist()],
+                "load_min": _quantile(load_percent, 0.0),
+                "load_p10": _quantile(load_percent, 0.10),
+                "load_p50": _quantile(load_percent, 0.50),
+                "load_p90": _quantile(load_percent, 0.90),
+                "load_max": _quantile(load_percent, 1.0),
+                "load_cv": _cv(layer_counts),
+                "load_entropy": _entropy(layer_counts),
+                "experts_active": int(np.count_nonzero(layer_counts > 0.0)),
+                "importance": [float(value) for value in layer_importance.tolist()],
+                "importance_min": _quantile(importance_percent, 0.0),
+                "importance_p10": _quantile(importance_percent, 0.10),
+                "importance_p50": _quantile(importance_percent, 0.50),
+                "importance_p90": _quantile(importance_percent, 0.90),
+                "importance_max": _quantile(importance_percent, 1.0),
+                "importance_cv": _cv(layer_importance),
+                "importance_entropy": _entropy(layer_importance),
+            }
+        )
+    return rows
+
+
+def _percent_distribution(values: np.ndarray) -> np.ndarray:
+    total = float(np.sum(values))
+    if total <= 0.0:
+        return np.zeros_like(values, dtype=np.float64)
+    return values / total * 100.0
+
+
+def _quantile(values: np.ndarray, q: float) -> float:
+    if values.size == 0:
+        return 0.0
+    return float(np.quantile(values, q))
+
+
+def _cv(values: np.ndarray) -> float:
+    mean = float(np.mean(values))
+    if mean <= 0.0:
+        return 0.0
+    return float(np.std(values) / mean * 100.0)
+
+
+def _entropy(values: np.ndarray) -> float:
+    total = float(np.sum(values))
+    if total <= 0.0:
+        return 0.0
+    probabilities = values / total
+    probabilities = probabilities[probabilities > 0.0]
+    return float(-np.sum(probabilities * np.log(probabilities)))
 
 
 def _scalar_float(value: Any) -> float:

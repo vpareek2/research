@@ -197,6 +197,45 @@ def test_trinity_moe_expert_bias_round_trips_and_stays_fixed(tmp_path) -> None:
     assert jnp.array_equal(_state_value_by_path(restored.train_state.model, bias_path), jnp.zeros((3,), dtype=jnp.float32))
 
 
+def test_smebu_balance_state_and_expert_bias_round_trip(tmp_path) -> None:
+    spec = _tiny_trinity_spec(
+        num_layers=2,
+        initial_dense_layers=1,
+        moe={
+            "num_experts": 3,
+            "top_k": 2,
+            "balance": {"name": "smebu", "load_lr": 1e-2},
+        },
+    )
+    built = build_model(spec, seed=0)
+    optimizer = _optimizer(built.state, built.metadata)
+    train_state = initialize_train_state(
+        built.state,
+        optimizer.transform,
+        seed=1,
+        moe_balance_spec=spec.trinity.moe.balance,
+    )
+    train_state, _metrics = make_train_step(built.graph, optimizer)(train_state, _batch())
+    dataset_state = _dataset_state(token_offset=8, next_record_index=2)
+    host_state = HostState(dataset=dataset_state, last_checkpoint_step=1, wallclock_start_ns=123, run_id="smoke")
+    service = LocalOrbaxCheckpointService(tmp_path / "run", max_to_keep=2)
+    service.save(1, train_state, dataset_state, host_state, {"step": 1, "model": "trinity-smebu"})
+
+    template = initialize_train_state(
+        built.state,
+        optimizer.transform,
+        seed=2,
+        moe_balance_spec=spec.trinity.moe.balance,
+    )
+    restored = service.restore_latest(template)
+    service.close()
+
+    bias_path = next(item.path for item in built.metadata if item.tag == "moe_expert_bias")
+    assert restored.train_state.moe_balance is not None
+    assert _trees_equal(restored.train_state.moe_balance, train_state.moe_balance)
+    assert _trees_equal(_state_value_by_path(restored.train_state.model, bias_path), _state_value_by_path(train_state.model, bias_path))
+
+
 def test_auto_dion2_optimizer_state_round_trips_and_can_continue(tmp_path) -> None:
     require_fake_devices()
     built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)

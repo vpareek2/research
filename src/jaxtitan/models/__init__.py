@@ -13,7 +13,7 @@ from jaxtitan.models.decoder import (
     dtype_from_name,
     prefill_model,
 )
-from jaxtitan.models.output import AuxLoss, AuxMetric, ModelOutput
+from jaxtitan.models.output import AuxLoss, AuxMetric, ModelOutput, RouterStats
 from jaxtitan.models.trinity import TrinityModel
 
 __all__ = [
@@ -24,6 +24,7 @@ __all__ = [
     "ModelBuildResult",
     "ParamMetadata",
     "ParamLayout",
+    "RouterStats",
     "apply_model",
     "apply_model_output",
     "build_model",

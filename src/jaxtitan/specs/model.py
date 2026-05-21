@@ -10,6 +10,38 @@ _DTYPE_NAMES = {"float32", "bfloat16"}
 _REMAT_POLICIES = {"none", "block"}
 _TRINITY_NORM_POLICIES = {"afmoe_dual", "depth_scaled_sandwich"}
 _TRINITY_EMBEDDING_SCALES = {"sqrt_hidden"}
+_MOE_BALANCE_POLICIES = {"none", "smebu"}
+
+
+@dataclass(frozen=True, slots=True)
+class MoeBalanceSpec:
+    """MoE load-balancing policy contract."""
+
+    name: str = "none"
+    load_lr: float = 5e-4
+    momentum: float = 0.5
+    clamp: float = 2.0
+    sequence_aux_loss_weight: float = 1e-4
+
+    def __post_init__(self) -> None:
+        if self.name not in _MOE_BALANCE_POLICIES:
+            raise ContractError(
+                "model.trinity.moe.balance.name must be one of "
+                f"{sorted(_MOE_BALANCE_POLICIES)}, got {self.name!r}"
+            )
+        for field_name in ("load_lr", "momentum", "clamp"):
+            value = getattr(self, field_name)
+            if not isinstance(value, int | float) or isinstance(value, bool) or value <= 0.0:
+                raise ContractError(f"model.trinity.moe.balance.{field_name} must be positive, got {value!r}")
+        if (
+            not isinstance(self.sequence_aux_loss_weight, int | float)
+            or isinstance(self.sequence_aux_loss_weight, bool)
+            or self.sequence_aux_loss_weight < 0.0
+        ):
+            raise ContractError(
+                "model.trinity.moe.balance.sequence_aux_loss_weight must be non-negative, "
+                f"got {self.sequence_aux_loss_weight!r}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,8 +53,15 @@ class TrinityMoeSpec:
     expert_intermediate_size: int | None = None
     num_shared_experts: int = 0
     route_scale: float = 1.0
+    balance: MoeBalanceSpec | Mapping[str, Any] = MoeBalanceSpec()
 
     def __post_init__(self) -> None:
+        balance = self.balance
+        if isinstance(balance, Mapping):
+            balance = MoeBalanceSpec(**dict(balance))
+            object.__setattr__(self, "balance", balance)
+        elif not isinstance(balance, MoeBalanceSpec):
+            raise ContractError("model.trinity.moe.balance must be a MoeBalanceSpec or mapping")
         for field_name in ("num_experts", "top_k"):
             value = getattr(self, field_name)
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:

@@ -16,6 +16,7 @@ from jaxtitan.models.components import (
     TrinityMoEBlock,
     full_sequence_attention_mask,
 )
+from jaxtitan.models.components.moe import _sequence_balance_loss
 from jaxtitan.specs.model import ModelSpec, TrinityMoeSpec, TrinitySpec
 
 
@@ -231,6 +232,19 @@ def test_sigmoid_top_k_router_uses_bias_for_selection_and_unbiased_scores_for_we
     assert jnp.allclose(jnp.sum(routed.weights, axis=-1), jnp.asarray([[1.5]], dtype=jnp.float32))
 
 
+def test_sequence_balance_loss_matches_manual_calculation() -> None:
+    expert_ids = jnp.asarray([[[0, 1], [1, 2]]], dtype=jnp.int32)
+    scores = jnp.asarray([[[0.2, 0.5, 0.3], [0.4, 0.1, 0.5]]], dtype=jnp.float32)
+
+    actual = _sequence_balance_loss(expert_ids, scores, top_k=2)
+
+    selected_counts = jnp.asarray([[1.0, 2.0, 1.0]], dtype=jnp.float32)
+    f_i = (3 / (2 * 2)) * selected_counts
+    p_i = jnp.mean(scores / jnp.sum(scores, axis=-1, keepdims=True), axis=1)
+    expected = jnp.sum(f_i * p_i)
+    assert jnp.allclose(actual, expected)
+
+
 def test_expert_swiglu_matches_manual_selected_expert_calculation() -> None:
     experts = ExpertSwiGLU(
         hidden_size=2,
@@ -290,6 +304,32 @@ def test_sparse_moe_adds_shared_expert_output() -> None:
     actual = moe(x)
 
     assert jnp.allclose(actual, moe.shared_experts(x))
+
+
+def test_trinity_moe_output_emits_router_stats_and_aux_loss_when_balanced() -> None:
+    result = build_model(
+        _tiny_trinity_spec(
+            num_layers=2,
+            initial_dense_layers=1,
+            moe={"num_experts": 3, "top_k": 2, "balance": {"name": "smebu"}},
+        ),
+        seed=0,
+    )
+    input_ids = jnp.arange(8, dtype=jnp.int32).reshape(2, 4)
+
+    output = apply_model_output(result.graph, result.state, input_ids)
+
+    assert isinstance(output, ModelOutput)
+    assert output.logits.shape == (2, 4, 32)
+    assert len(output.router_stats) == 1
+    assert len(output.aux_losses) == 1
+    stats = output.router_stats[0]
+    assert stats.expert_counts.shape == (3,)
+    assert stats.importance.shape == (3,)
+    assert jnp.sum(stats.expert_counts) == 2 * 4 * 2
+    assert float(jax.device_get(jnp.sum(stats.importance))) == pytest.approx(2 * 4, abs=1e-2)
+    assert stats.max_vio.shape == ()
+    assert output.aux_losses[0].name == "moe_sequence_balance"
 
 
 def test_model_parameter_dtype_follows_spec() -> None:

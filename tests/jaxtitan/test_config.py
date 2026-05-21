@@ -162,7 +162,48 @@ route_scale = 1.5
     assert spec.model.trinity.moe.expert_intermediate_size == spec.model.intermediate_size
     assert spec.model.trinity.moe.num_shared_experts == 2
     assert spec.model.trinity.moe.route_scale == 1.5
+    assert spec.model.trinity.moe.balance.name == "none"
+    assert spec.training.loss.z_loss_weight == 0.0
     assert spec.model.trinity.norm_policy == "afmoe_dual"
+
+
+def test_load_config_accepts_trinity_moe_balance_and_training_loss(tmp_path: Path) -> None:
+    config_path = tmp_path / "trinity-moe-balance.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 4
+top_k = 2
+
+[model.trinity.moe.balance]
+name = "smebu"
+load_lr = 0.0007
+momentum = 0.6
+clamp = 3.0
+sequence_aux_loss_weight = 0.0002
+
+[training.loss]
+z_loss_weight = 0.000001
+"""
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.model.trinity is not None
+    assert spec.model.trinity.moe is not None
+    balance = spec.model.trinity.moe.balance
+    assert balance.name == "smebu"
+    assert balance.load_lr == pytest.approx(7e-4)
+    assert balance.momentum == pytest.approx(0.6)
+    assert balance.clamp == pytest.approx(3.0)
+    assert balance.sequence_aux_loss_weight == pytest.approx(2e-4)
+    assert spec.training.loss.z_loss_weight == pytest.approx(1e-6)
 
 
 def test_load_config_rejects_missing_trinity_section(tmp_path: Path) -> None:
@@ -231,6 +272,11 @@ top_k = 3
         ("num_shared_experts", "-1", "num_shared_experts"),
         ("route_scale", "0.0", "route_scale"),
         ("route_scale", '"large"', "route_scale"),
+        ("balance.name", '"unknown"', "balance.name"),
+        ("balance.load_lr", "0.0", "balance.load_lr"),
+        ("balance.momentum", "0.0", "balance.momentum"),
+        ("balance.clamp", "0.0", "balance.clamp"),
+        ("balance.sequence_aux_loss_weight", "-1.0", "sequence_aux_loss_weight"),
     ],
 )
 def test_load_config_rejects_invalid_afmoe_fields(tmp_path: Path, field: str, value: str, message: str) -> None:
@@ -251,6 +297,20 @@ top_k = 2
     )
 
     with pytest.raises(ConfigError, match=message):
+        load_config(config_path)
+
+
+def test_load_config_rejects_invalid_training_loss(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad-loss.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG
+        + """
+[training.loss]
+z_loss_weight = -1.0
+"""
+    )
+
+    with pytest.raises(ConfigError, match="z_loss_weight"):
         load_config(config_path)
 
 

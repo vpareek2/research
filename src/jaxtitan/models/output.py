@@ -23,12 +23,29 @@ class AuxMetric:
 
 
 @struct.dataclass
+class RouterStats:
+    """Compact MoE routing statistics emitted by a layer."""
+
+    name: str = struct.field(pytree_node=False)
+    layer_index: int = struct.field(pytree_node=False)
+    expert_counts: Any
+    importance: Any
+    total_assignments: Any
+    load_min: Any
+    load_max: Any
+    load_mean: Any
+    max_vio: Any
+    load_entropy: Any
+
+
+@struct.dataclass
 class ModelOutput:
     """Full-sequence model output consumed by train and eval steps."""
 
     logits: Any
     aux_losses: tuple[AuxLoss, ...] = ()
     aux_metrics: tuple[AuxMetric, ...] = ()
+    router_stats: tuple[RouterStats, ...] = ()
 
 
 def ensure_model_output(value: Any) -> ModelOutput:

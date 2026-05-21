@@ -12,11 +12,13 @@ from jaxtitan.config.schema import (
     TomlEvalSection,
     TomlGenerationSection,
     TomlMeshSection,
+    TomlMoeBalanceSection,
     TomlModelSection,
     TomlOptimizerSection,
     TomlParallelismSection,
     TomlRunSection,
     TomlScheduleSection,
+    TomlTrainingLossSection,
     TomlTrainingSection,
     TomlTrinityMoeSection,
     TomlTrinitySection,
@@ -166,12 +168,29 @@ def _trinity_moe_section(raw: Mapping[str, Any]) -> TomlTrinityMoeSection:
     route_scale = raw.get("route_scale", 1.0)
     if not isinstance(route_scale, int | float) or isinstance(route_scale, bool):
         raise ConfigError("model.trinity.moe.route_scale must be numeric")
+    balance_raw = raw.get("balance", {})
     return TomlTrinityMoeSection(
         num_experts=_required_int(raw, "num_experts", "model.trinity.moe"),
         top_k=_required_int(raw, "top_k", "model.trinity.moe"),
         expert_intermediate_size=_optional_int(raw, "expert_intermediate_size", "model.trinity.moe"),
         num_shared_experts=_optional_int_with_default(raw, "num_shared_experts", "model.trinity.moe", default=0),
         route_scale=float(route_scale),
+        balance=_moe_balance_section(_ensure_mapping(balance_raw, "model.trinity.moe.balance")),
+    )
+
+
+def _moe_balance_section(raw: Mapping[str, Any]) -> TomlMoeBalanceSection:
+    return TomlMoeBalanceSection(
+        name=_optional_str(raw, "name", "model.trinity.moe.balance", default="none"),
+        load_lr=_optional_float_with_default(raw, "load_lr", "model.trinity.moe.balance", default=5e-4),
+        momentum=_optional_float_with_default(raw, "momentum", "model.trinity.moe.balance", default=0.5),
+        clamp=_optional_float_with_default(raw, "clamp", "model.trinity.moe.balance", default=2.0),
+        sequence_aux_loss_weight=_optional_float_with_default(
+            raw,
+            "sequence_aux_loss_weight",
+            "model.trinity.moe.balance",
+            default=1e-4,
+        ),
     )
 
 
@@ -215,6 +234,7 @@ def _data_section(raw: Mapping[str, Any]) -> TomlDataSection:
 
 
 def _training_section(raw: Mapping[str, Any]) -> TomlTrainingSection:
+    loss_raw = raw.get("loss", {})
     return TomlTrainingSection(
         seq_len=_required_int(raw, "seq_len", "training"),
         global_batch_size=_required_int(raw, "global_batch_size", "training"),
@@ -225,6 +245,13 @@ def _training_section(raw: Mapping[str, Any]) -> TomlTrainingSection:
         checkpoint_every_steps=int(raw.get("checkpoint_every_steps", 1000)),
         eval_every_steps=_optional_int(raw, "eval_every_steps", "training"),
         grad_clip_norm=_optional_float(raw, "grad_clip_norm", "training"),
+        loss=_training_loss_section(_ensure_mapping(loss_raw, "training.loss")),
+    )
+
+
+def _training_loss_section(raw: Mapping[str, Any]) -> TomlTrainingLossSection:
+    return TomlTrainingLossSection(
+        z_loss_weight=_optional_float_with_default(raw, "z_loss_weight", "training.loss", default=0.0),
     )
 
 
@@ -311,7 +338,14 @@ def _optional_float(raw: Mapping[str, Any], key: str, section: str) -> float | N
     value = raw.get(key)
     if value is None:
         return None
-    if not isinstance(value, int | float):
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        raise ConfigError(f"{section}.{key} must be numeric")
+    return float(value)
+
+
+def _optional_float_with_default(raw: Mapping[str, Any], key: str, section: str, *, default: float) -> float:
+    value = raw.get(key, default)
+    if not isinstance(value, int | float) or isinstance(value, bool):
         raise ConfigError(f"{section}.{key} must be numeric")
     return float(value)
 

@@ -1,6 +1,6 @@
 """TOML-facing config schema dataclasses."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -12,12 +12,22 @@ class TomlRunSection:
 
 
 @dataclass(frozen=True, slots=True)
+class TomlMoeBalanceSection:
+    name: str = "none"
+    load_lr: float = 5e-4
+    momentum: float = 0.5
+    clamp: float = 2.0
+    sequence_aux_loss_weight: float = 1e-4
+
+
+@dataclass(frozen=True, slots=True)
 class TomlTrinityMoeSection:
     num_experts: int
     top_k: int
     expert_intermediate_size: int | None = None
     num_shared_experts: int = 0
     route_scale: float = 1.0
+    balance: TomlMoeBalanceSection = field(default_factory=TomlMoeBalanceSection)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +97,11 @@ class TomlDataSection:
 
 
 @dataclass(frozen=True, slots=True)
+class TomlTrainingLossSection:
+    z_loss_weight: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
 class TomlTrainingSection:
     seq_len: int
     global_batch_size: int
@@ -97,6 +112,7 @@ class TomlTrainingSection:
     checkpoint_every_steps: int = 1000
     eval_every_steps: int | None = None
     grad_clip_norm: float | None = None
+    loss: TomlTrainingLossSection = field(default_factory=TomlTrainingLossSection)
 
 
 @dataclass(frozen=True, slots=True)

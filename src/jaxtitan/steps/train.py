@@ -12,8 +12,16 @@ from jaxtitan.metrics import StepMetrics
 from jaxtitan.mesh import ShardingPlan, gradient_shardings_like, replicated_shardings_like
 from jaxtitan.models import apply_model_output
 from jaxtitan.optim import OptimizerBuildResult, OptimizerTransform
+from jaxtitan.specs.model import MoeBalanceSpec
+from jaxtitan.specs.run import TrainingLossSpec
 from jaxtitan.state import RngState, TrainState
 from jaxtitan.steps.eval import causal_lm_loss
+from jaxtitan.steps.moe_balance import (
+    apply_moe_balance_update,
+    initialize_moe_balance_state,
+    router_counts_from_stats,
+    router_importance_from_stats,
+)
 
 
 def initialize_train_state(
@@ -22,6 +30,7 @@ def initialize_train_state(
     seed: int,
     *,
     optimizer_init_model_state: Any | None = None,
+    moe_balance_spec: MoeBalanceSpec | None = None,
 ) -> TrainState:
     """Initialize explicit train state from model state and an optimizer transform."""
 
@@ -36,6 +45,7 @@ def initialize_train_state(
         opt_state=optimizer_transform.init(init_model_state),
         rng=RngState(train=train_key, data=data_key, eval=eval_key, sample=sample_key),
         schedule_state=None,
+        moe_balance=initialize_moe_balance_state(model_state, moe_balance_spec),
     )
 
 
@@ -58,9 +68,12 @@ def make_train_step(
     state_template: TrainState | None = None,
     donate_state: bool = False,
     expected_batch_shape: tuple[int, int, int] | None = None,
+    loss: TrainingLossSpec | None = None,
 ) -> Callable[[TrainState, Batch], tuple[TrainState, StepMetrics]]:
     """Create a compiled train callable bound to a static graph and optimizer."""
 
+    loss = TrainingLossSpec() if loss is None else loss
+    z_loss_weight = float(loss.z_loss_weight)
     if sharding is not None and state_template is None:
         raise ContractError("state_template is required when compiling train step with explicit shardings")
     state_sharding = None if sharding is None else replicated_shardings_like(state_template, sharding)
@@ -78,27 +91,14 @@ def make_train_step(
             sharding.batch.accumulated_target_ids,
             sharding.batch.accumulated_loss_mask,
         )
-        out_shardings = (
-            state_sharding,
-            sharding.metrics,
-            sharding.metrics,
-            sharding.metrics,
-            sharding.metrics,
-            sharding.metrics,
-            sharding.metrics,
-            sharding.metrics,
-            sharding.metrics,
-            sharding.metrics,
-            sharding.metrics,
-            sharding.metrics,
-        )
+        out_shardings = (state_sharding, *([sharding.metrics] * 30))
 
     def _compiled_impl(
         state: TrainState,
         input_ids: Any,
         target_ids: Any,
         loss_mask: Any,
-    ) -> tuple[TrainState, Any, Any, Any, Any, Any, Any, Any, Any, Any, Any, Any]:
+    ) -> tuple[Any, ...]:
         grad_zero = jax.tree.map(jnp.zeros_like, state.model)
 
         def microbatch_grad(params: Any, micro_input_ids: Any, micro_target_ids: Any, micro_loss_mask: Any):
@@ -106,46 +106,95 @@ def make_train_step(
                 output = apply_model_output(graph, loss_params, micro_input_ids)
                 loss = causal_lm_loss(output.logits, micro_target_ids, micro_loss_mask)
                 aux_loss = _aux_loss_value(output.aux_losses)
-                objective_sum = loss.loss_sum + aux_loss * loss.token_count.astype(jnp.float32)
-                return objective_sum, (loss.loss_sum, loss.token_count, aux_loss)
+                moe_aux_loss = _aux_loss_value(output.aux_losses, name_prefix="moe_")
+                z_loss_sum = _z_loss_sum(output.logits, micro_loss_mask) * jnp.asarray(
+                    z_loss_weight,
+                    dtype=jnp.float32,
+                )
+                objective_sum = loss.loss_sum + z_loss_sum + aux_loss * loss.token_count.astype(jnp.float32)
+                router_counts = router_counts_from_stats(output.router_stats, state.moe_balance)
+                router_importance = router_importance_from_stats(output.router_stats, state.moe_balance)
+                return objective_sum, (
+                    loss.loss_sum,
+                    loss.token_count,
+                    aux_loss,
+                    moe_aux_loss,
+                    z_loss_sum,
+                    router_counts,
+                    router_importance,
+                )
 
-            (objective_sum, (loss_sum, token_count, aux_loss)), grads = jax.value_and_grad(
-                objective_sum_fn,
-                has_aux=True,
-            )(params)
-            return loss_sum, token_count, aux_loss, objective_sum, grads
-
-        def accumulate(carry: tuple[Any, Any, Any, Any], micro: tuple[Any, Any, Any]):
-            grad_accum, loss_sum_accum, token_count_accum, objective_sum_accum = carry
-            micro_input_ids, micro_target_ids, micro_loss_mask = micro
-            loss_sum, token_count, aux_loss, objective_sum, grads = microbatch_grad(
-                state.model,
-                micro_input_ids,
-                micro_target_ids,
-                micro_loss_mask,
+            (
+                objective_sum,
+                (loss_sum, token_count, aux_loss, moe_aux_loss, z_loss_sum, router_counts, router_importance),
+            ), grads = jax.value_and_grad(objective_sum_fn, has_aux=True)(params)
+            return (
+                loss_sum,
+                token_count,
+                aux_loss,
+                moe_aux_loss,
+                z_loss_sum,
+                router_counts,
+                router_importance,
+                objective_sum,
+                grads,
             )
+
+        def accumulate(carry: tuple[Any, ...], micro: tuple[Any, Any, Any]):
+            (
+                grad_accum,
+                loss_sum_accum,
+                token_count_accum,
+                objective_sum_accum,
+                aux_sum_accum,
+                moe_aux_sum_accum,
+                z_loss_sum_accum,
+            ) = carry
+            micro_input_ids, micro_target_ids, micro_loss_mask = micro
+            (
+                loss_sum,
+                token_count,
+                aux_loss,
+                moe_aux_loss,
+                z_loss_sum,
+                router_counts,
+                router_importance,
+                objective_sum,
+                grads,
+            ) = microbatch_grad(state.model, micro_input_ids, micro_target_ids, micro_loss_mask)
             return (
                 jax.tree.map(lambda total, grad: total + grad, grad_accum, grads),
                 loss_sum_accum + loss_sum,
                 token_count_accum + token_count,
                 objective_sum_accum + objective_sum,
-            ), (loss_sum, token_count)
+                aux_sum_accum + aux_loss * token_count.astype(jnp.float32),
+                moe_aux_sum_accum + moe_aux_loss * token_count.astype(jnp.float32),
+                z_loss_sum_accum + z_loss_sum,
+            ), (loss_sum, token_count, router_counts, router_importance)
 
         (
             grad_sum,
             loss_sum,
             token_count,
             objective_sum,
-        ), (micro_loss_sums, micro_token_counts) = jax.lax.scan(
+            aux_sum,
+            moe_aux_sum,
+            z_loss_sum,
+        ), (micro_loss_sums, micro_token_counts, micro_router_counts, micro_router_importance) = jax.lax.scan(
             accumulate,
             (
                 grad_zero,
                 jnp.asarray(0.0, dtype=jnp.float32),
                 jnp.asarray(0, dtype=jnp.int32),
                 jnp.asarray(0.0, dtype=jnp.float32),
+                jnp.asarray(0.0, dtype=jnp.float32),
+                jnp.asarray(0.0, dtype=jnp.float32),
+                jnp.asarray(0.0, dtype=jnp.float32),
             ),
             (input_ids, target_ids, loss_mask),
         )
+        router_counts = jnp.sum(micro_router_counts, axis=0)
+        router_importance = jnp.sum(micro_router_importance, axis=0)
         grad_denominator = jnp.asarray(token_count, dtype=jnp.float32)
         grads = jax.tree.map(lambda grad: grad / grad_denominator, grad_sum)
         if gradient_sharding is not None:
@@ -154,6 +203,11 @@ def make_train_step(
         if gradient_sharding is not None:
             updates = _constrain_like(updates, gradient_sharding)
         next_model = jax.tree.map(lambda param, update: param + update, state.model, updates)
+        next_model, next_moe_balance, moe_balance_metrics = apply_moe_balance_update(
+            next_model,
+            state.moe_balance,
+            router_counts,
+        )
         next_step = state.step + jnp.asarray(1, dtype=state.step.dtype)
         next_tokens_seen = state.tokens_seen + token_count.astype(state.tokens_seen.dtype)
         next_state = state.replace(
@@ -161,6 +215,7 @@ def make_train_step(
             tokens_seen=next_tokens_seen,
             model=next_model,
             opt_state=next_opt_state,
+            moe_balance=next_moe_balance,
         )
         lr = optimizer.schedule(state.step)
         grad_norm = _tree_l2_norm(grads)
@@ -171,7 +226,11 @@ def make_train_step(
         microbatch_loss_max = jnp.max(micro_losses)
         batch_het = microbatch_loss_max - microbatch_loss_mean
         objective = objective_sum / grad_denominator
-        aux_loss = objective - (loss_sum / grad_denominator)
+        aux_loss = aux_sum / grad_denominator
+        moe_aux_loss = moe_aux_sum / grad_denominator
+        z_loss = z_loss_sum / grad_denominator
+        total_loss = objective
+        router_diagnostics = _router_diagnostics(router_counts, router_importance)
         return (
             next_state,
             loss_sum,
@@ -182,9 +241,28 @@ def make_train_step(
             update_norm,
             objective,
             aux_loss,
+            z_loss,
+            moe_aux_loss,
+            total_loss,
             microbatch_loss_mean,
             microbatch_loss_max,
             batch_het,
+            router_counts,
+            router_importance,
+            router_diagnostics["max_vio"],
+            router_diagnostics["load_min"],
+            router_diagnostics["load_max"],
+            router_diagnostics["load_entropy"],
+            router_diagnostics["mean_load_cv"],
+            router_diagnostics["std_load_cv"],
+            router_diagnostics["mean_load_entropy"],
+            router_diagnostics["min_load_entropy"],
+            router_diagnostics["dead_experts_count"],
+            router_diagnostics["experts_active_mean"],
+            router_diagnostics["mean_importance_cv"],
+            router_diagnostics["mean_importance_entropy"],
+            moe_balance_metrics.bias_norm,
+            moe_balance_metrics.momentum_norm,
         )
 
     _compiled = jax.jit(
@@ -206,15 +284,36 @@ def make_train_step(
             update_norm,
             objective,
             aux_loss,
+            z_loss,
+            moe_aux_loss,
+            total_loss,
             microbatch_loss_mean,
             microbatch_loss_max,
             batch_het,
+            router_expert_counts,
+            router_importance,
+            router_max_vio,
+            router_load_min,
+            router_load_max,
+            router_load_entropy,
+            router_mean_load_cv,
+            router_std_load_cv,
+            router_mean_load_entropy,
+            router_min_load_entropy,
+            router_dead_experts_count,
+            router_experts_active_mean,
+            router_mean_importance_cv,
+            router_mean_importance_entropy,
+            smebu_bias_norm,
+            smebu_momentum_norm,
         ) = _compiled(
             state,
             _ensure_accumulation_axis(batch.input_ids),
             _ensure_accumulation_axis(batch.target_ids),
             _ensure_accumulation_axis(batch.loss_mask),
         )
+        router_active = router_expert_counts.shape[0] > 0
+        balance_active = state.moe_balance is not None
         metrics = StepMetrics(
             loss_sum=loss_sum,
             token_count=token_count,
@@ -225,6 +324,25 @@ def make_train_step(
             overflow=None,
             objective=objective,
             aux_loss=aux_loss,
+            z_loss=z_loss,
+            moe_aux_loss=moe_aux_loss,
+            total_loss=total_loss,
+            router_expert_counts=None if not router_active else router_expert_counts,
+            router_importance=None if not router_active else router_importance,
+            router_max_vio=None if not router_active else router_max_vio,
+            router_load_min=None if not router_active else router_load_min,
+            router_load_max=None if not router_active else router_load_max,
+            router_load_entropy=None if not router_active else router_load_entropy,
+            router_mean_load_cv=None if not router_active else router_mean_load_cv,
+            router_std_load_cv=None if not router_active else router_std_load_cv,
+            router_mean_load_entropy=None if not router_active else router_mean_load_entropy,
+            router_min_load_entropy=None if not router_active else router_min_load_entropy,
+            router_dead_experts_count=None if not router_active else router_dead_experts_count,
+            router_experts_active_mean=None if not router_active else router_experts_active_mean,
+            router_mean_importance_cv=None if not router_active else router_mean_importance_cv,
+            router_mean_importance_entropy=None if not router_active else router_mean_importance_entropy,
+            smebu_bias_norm=None if not balance_active else smebu_bias_norm,
+            smebu_momentum_norm=None if not balance_active else smebu_momentum_norm,
             aux_metrics=(),
             microbatch_loss_mean=microbatch_loss_mean,
             microbatch_loss_max=microbatch_loss_max,
@@ -266,11 +384,78 @@ def _constrain_like(tree: Any, shardings: Any) -> Any:
     return jax.tree.map(lambda leaf, sharding: jax.lax.with_sharding_constraint(leaf, sharding), tree, shardings)
 
 
-def _aux_loss_value(aux_losses: Any):
+def _aux_loss_value(aux_losses: Any, *, name_prefix: str | None = None):
     total = jnp.asarray(0.0, dtype=jnp.float32)
     for aux_loss in aux_losses:
-        total = total + jnp.asarray(aux_loss.value, dtype=jnp.float32) * jnp.asarray(aux_loss.weight, dtype=jnp.float32)
+        if name_prefix is not None and not aux_loss.name.startswith(name_prefix):
+            continue
+        total = total + jnp.asarray(aux_loss.value, dtype=jnp.float32) * jnp.asarray(
+            aux_loss.weight,
+            dtype=jnp.float32,
+        )
     return total
+
+
+def _z_loss_sum(logits: Any, loss_mask: Any):
+    log_z = jax.nn.logsumexp(jnp.asarray(logits, dtype=jnp.float32), axis=-1)
+    mask = jnp.asarray(loss_mask, dtype=jnp.bool_)
+    return jnp.sum(jnp.where(mask, jnp.square(log_z), 0.0))
+
+
+def _router_diagnostics(counts: Any, importance: Any) -> dict[str, Any]:
+    counts = jnp.asarray(counts, dtype=jnp.float32)
+    importance = jnp.asarray(importance, dtype=jnp.float32)
+    zero = jnp.asarray(0.0, dtype=jnp.float32)
+    if counts.shape[0] == 0 or counts.shape[1] == 0:
+        return {
+            "max_vio": zero,
+            "load_min": zero,
+            "load_max": zero,
+            "load_entropy": zero,
+            "mean_load_cv": zero,
+            "std_load_cv": zero,
+            "mean_load_entropy": zero,
+            "min_load_entropy": zero,
+            "dead_experts_count": zero,
+            "experts_active_mean": zero,
+            "mean_importance_cv": zero,
+            "mean_importance_entropy": zero,
+        }
+    layer_totals = jnp.sum(counts, axis=-1)
+    layer_means = layer_totals / jnp.asarray(counts.shape[-1], dtype=jnp.float32)
+    load_min = jnp.min(counts)
+    load_max = jnp.max(counts)
+    max_vio = jnp.max((jnp.max(counts, axis=-1) - layer_means) / jnp.maximum(layer_means, 1e-6))
+    load_entropy = _row_entropy(counts)
+    importance_entropy = _row_entropy(importance)
+    load_cv = _row_cv(counts)
+    importance_cv = _row_cv(importance)
+    return {
+        "max_vio": max_vio,
+        "load_min": load_min,
+        "load_max": load_max,
+        "load_entropy": jnp.mean(load_entropy),
+        "mean_load_cv": jnp.mean(load_cv),
+        "std_load_cv": jnp.std(load_cv),
+        "mean_load_entropy": jnp.mean(load_entropy),
+        "min_load_entropy": jnp.min(load_entropy),
+        "dead_experts_count": jnp.sum(counts <= 0.0),
+        "experts_active_mean": jnp.mean(jnp.sum(counts > 0.0, axis=-1).astype(jnp.float32)),
+        "mean_importance_cv": jnp.mean(importance_cv),
+        "mean_importance_entropy": jnp.mean(importance_entropy),
+    }
+
+
+def _row_cv(values: Any) -> Any:
+    means = jnp.mean(values, axis=-1)
+    return jnp.where(means > 0.0, jnp.std(values, axis=-1) / means * 100.0, 0.0)
+
+
+def _row_entropy(values: Any) -> Any:
+    totals = jnp.sum(values, axis=-1, keepdims=True)
+    probabilities = values / jnp.maximum(totals, jnp.asarray(1e-6, dtype=jnp.float32))
+    safe_probabilities = jnp.where(probabilities > 0.0, probabilities, 1.0)
+    return -jnp.sum(jnp.where(probabilities > 0.0, probabilities * jnp.log(safe_probabilities), 0.0), axis=-1)
 
 
 def _tree_l2_norm(tree: Any):

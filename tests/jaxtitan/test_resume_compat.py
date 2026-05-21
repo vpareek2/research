@@ -46,6 +46,7 @@ def test_resume_fingerprint_ignores_safe_runtime_controls(tmp_path: Path, prepar
         {"seq_len": 2},
         {"global_batch_size": 1},
         {"gradient_accumulation_steps": 2},
+        {"z_loss_weight": 1e-6},
         {"data_order": "shuffle", "shuffle_seed": 123},
         {"worker_count": 1},
         {"worker_buffer_size": 2},
@@ -112,6 +113,21 @@ def test_resume_fingerprint_changes_for_document_buffer_policy(tmp_path: Path, p
     )
 
     assert build_resume_compat(base).runtime_fingerprint != build_resume_compat(changed).runtime_fingerprint
+
+
+def test_resume_fingerprint_changes_for_moe_balance_policy(tmp_path: Path, prepared_dataset_factory) -> None:
+    manifest = _manifest(prepared_dataset_factory, "moe-balance")
+    fixed_bias = _runtime_spec(tmp_path, manifest, trinity_moe_balance_name="none")
+    smebu = _runtime_spec(tmp_path, manifest, trinity_moe_balance_name="smebu")
+    changed_aux_weight = _runtime_spec(
+        tmp_path,
+        manifest,
+        trinity_moe_balance_name="smebu",
+        sequence_aux_loss_weight=2e-4,
+    )
+
+    assert build_resume_compat(fixed_bias).runtime_fingerprint != build_resume_compat(smebu).runtime_fingerprint
+    assert build_resume_compat(smebu).runtime_fingerprint != build_resume_compat(changed_aux_weight).runtime_fingerprint
 
 
 def test_resume_metadata_contains_compatibility_payload(tmp_path: Path, prepared_dataset_factory) -> None:
@@ -244,6 +260,7 @@ def _config_text(
     seed: int = 11,
     hidden_size: int = 8,
     intermediate_size: int = 16,
+    num_layers: int = 1,
     num_heads: int = 2,
     n_kv_heads: int = 1,
     remat: str = "none",
@@ -256,6 +273,7 @@ def _config_text(
     seq_len: int = 4,
     global_batch_size: int = 2,
     gradient_accumulation_steps: int = 1,
+    z_loss_weight: float = 0.0,
     target_tokens: int = 128,
     log_every_steps: int = 1,
     checkpoint_every_steps: int = 10,
@@ -269,11 +287,32 @@ def _config_text(
     prefetch: bool = False,
     document_buffer_size: int | None = None,
     document_refill_size: int | None = None,
+    trinity_moe_balance_name: str | None = None,
+    sequence_aux_loss_weight: float = 1e-4,
 ) -> str:
     total_steps_line = "" if total_steps is None else f"total_steps = {total_steps}\n"
     shuffle_seed_line = "" if shuffle_seed is None else f"shuffle_seed = {shuffle_seed}\n"
     document_buffer_size_line = "" if document_buffer_size is None else f"document_buffer_size = {document_buffer_size}\n"
     document_refill_size_line = "" if document_refill_size is None else f"document_refill_size = {document_refill_size}\n"
+    model_name = "decoder"
+    trinity_block = ""
+    if trinity_moe_balance_name is not None:
+        model_name = "trinity"
+        num_layers = 2
+        trinity_block = f"""
+[model.trinity]
+initial_dense_layers = 1
+local_window = 4
+local_layers_per_global = 1
+
+[model.trinity.moe]
+num_experts = 3
+top_k = 2
+
+[model.trinity.moe.balance]
+name = "{trinity_moe_balance_name}"
+sequence_aux_loss_weight = {sequence_aux_loss_weight}
+"""
     return f"""
 [run]
 id = "smoke"
@@ -281,17 +320,18 @@ seed = {seed}
 output_dir = "runs"
 
 [model]
-name = "decoder"
+name = "{model_name}"
 variant = "tiny"
 vocab_size = 64
 hidden_size = {hidden_size}
 intermediate_size = {intermediate_size}
-num_layers = 1
+num_layers = {num_layers}
 num_heads = {num_heads}
 n_kv_heads = {n_kv_heads}
 max_seq_len = 4
 compute_dtype = "float32"
 remat = "{remat}"
+{trinity_block}
 
 [optimizer]
 name = "{optimizer_name}"
@@ -318,6 +358,9 @@ target_tokens = {target_tokens}
 precision = "{precision}"
 log_every_steps = {log_every_steps}
 checkpoint_every_steps = {checkpoint_every_steps}
+
+[training.loss]
+z_loss_weight = {z_loss_weight}
 
 [mesh]
 axis_names = [{", ".join(f'"{name}"' for name in axis_names)}]

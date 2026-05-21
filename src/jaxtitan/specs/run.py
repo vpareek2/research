@@ -1,6 +1,7 @@
 """Run-level specs."""
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -58,6 +59,23 @@ class ArtifactSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class TrainingLossSpec:
+    """Training objective loss controls."""
+
+    z_loss_weight: float = 0.0
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.z_loss_weight, int | float)
+            or isinstance(self.z_loss_weight, bool)
+            or self.z_loss_weight < 0.0
+        ):
+            raise ContractError(
+                f"training.loss.z_loss_weight must be non-negative, got {self.z_loss_weight!r}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class TrainingSpec:
     """Static training contract."""
 
@@ -70,8 +88,13 @@ class TrainingSpec:
     checkpoint_every_steps: int = 1000
     eval_every_steps: int | None = None
     grad_clip_norm: float | None = None
+    loss: TrainingLossSpec = field(default_factory=TrainingLossSpec)
 
     def __post_init__(self) -> None:
+        if isinstance(self.loss, Mapping):
+            object.__setattr__(self, "loss", TrainingLossSpec(**self.loss))
+        elif not isinstance(self.loss, TrainingLossSpec):
+            raise ContractError("training.loss must be a TrainingLossSpec or mapping")
         if self.precision not in _PRECISION_NAMES:
             raise ContractError(f"training.precision must be one of {sorted(_PRECISION_NAMES)}, got {self.precision!r}")
         for field_name in (

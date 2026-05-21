@@ -15,6 +15,7 @@ from jaxtitan.models.components.init import truncated_normal_init
 from jaxtitan.models.components.norm import build_rms_norm
 from jaxtitan.models.components.position import precompute_rope
 from jaxtitan.models.execution import apply_layer
+from jaxtitan.models.output import ModelOutput
 from jaxtitan.specs.model import ModelSpec, TrinitySpec
 
 
@@ -65,7 +66,7 @@ class TrinityModel(nnx.Module):
             rngs=rngs,
         )
 
-    def __call__(self, input_ids: Any) -> jax.Array:
+    def __call__(self, input_ids: Any) -> ModelOutput:
         input_ids = jnp.asarray(input_ids)
         if input_ids.ndim != 2:
             raise ContractError(f"input_ids must have shape [batch, seq], got {input_ids.shape}")
@@ -80,10 +81,29 @@ class TrinityModel(nnx.Module):
             theta=self.spec.rope_theta,
             dtype=x.dtype,
         )
-        for kind, layer in zip(self.layer_attention, self.layers, strict=True):
+        aux_losses = []
+        router_stats = []
+        for layer_index, (kind, layer) in enumerate(zip(self.layer_attention, self.layers, strict=True)):
             context = FullAttentionContext(cos=None, sin=None) if kind == "global" else FullAttentionContext(cos=cos, sin=sin)
-            x = apply_layer(layer, x, context, remat=self.spec.remat)
-        return self.lm_head(self.norm(x))
+            if hasattr(layer, "forward_with_output"):
+                def layer_call(hidden, layer_context, *, current_layer=layer, current_index=layer_index):
+                    return current_layer.forward_with_output(hidden, layer_context, current_index)
+
+                x, layer_aux_losses, layer_router_stats = apply_layer(
+                    layer_call,
+                    x,
+                    context,
+                    remat=self.spec.remat,
+                )
+                aux_losses.extend(layer_aux_losses)
+                router_stats.extend(layer_router_stats)
+            else:
+                x = apply_layer(layer, x, context, remat=self.spec.remat)
+        return ModelOutput(
+            logits=self.lm_head(self.norm(x)),
+            aux_losses=tuple(aux_losses),
+            router_stats=tuple(router_stats),
+        )
 
     def prefill(self, input_ids: Any, positions: Any, attention_mask: Any, cache: Any) -> tuple[jax.Array, jax.Array, Any]:
         input_ids = jnp.asarray(input_ids)

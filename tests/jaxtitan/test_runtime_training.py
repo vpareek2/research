@@ -776,6 +776,57 @@ def test_run_training_stops_after_crossing_target_token_count(
     assert summary.target_tokens == 10
 
 
+def test_run_training_writes_moe_router_layer_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "moe-router-diagnostics",
+        shard_token_groups=(tuple(range(0, 40)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            model_name="trinity",
+            num_layers=2,
+            trinity_moe_balance_name="none",
+        )
+    )
+
+    summary = run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    metrics = _jsonl(run_dir / "metrics" / "train.jsonl")
+    final = json.loads((run_dir / "summaries" / "final.json").read_text())
+    row = metrics[-1]
+    layers = row["moe_router_layers"]
+
+    assert summary.final_moe_router_layers == layers
+    assert len(layers) == 1
+    assert layers[0]["layer_index"] == 0
+    assert layers[0]["total_assignments"] == 2 * 4 * 2
+    assert sum(layers[0]["expert_counts"]) == 2 * 4 * 2
+    assert sum(layers[0]["importance"]) == pytest.approx(2 * 4)
+    assert layers[0]["experts_active"] <= 3
+    assert layers[0]["load_p10"] <= layers[0]["load_p50"] <= layers[0]["load_p90"]
+    assert layers[0]["importance_p10"] <= layers[0]["importance_p50"] <= layers[0]["importance_p90"]
+    assert row["router_dead_experts_count"] >= 0
+    assert row["router_mean_load_cv"] == pytest.approx(layers[0]["load_cv"])
+    assert row["router_mean_importance_entropy"] == pytest.approx(layers[0]["importance_entropy"])
+    assert row["smebu_bias_norm"] is None
+    assert row["smebu_momentum_norm"] is None
+    assert final["final_moe_router_layers"] == layers
+    assert final["final_router_mean_load_cv"] == row["router_mean_load_cv"]
+    assert final["final_router_dead_experts_count"] == row["router_dead_experts_count"]
+    assert final["final_router_mean_importance_cv"] == row["router_mean_importance_cv"]
+
+
 def test_run_training_records_failure_when_dataset_exhausts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1598,8 +1649,10 @@ def _training_config(
     log_every_steps: int,
     checkpoint_every_steps: int = 10,
     seed: int = 7,
+    model_name: str = "decoder",
     hidden_size: int = 8,
     intermediate_size: int = 16,
+    num_layers: int = 1,
     num_heads: int = 2,
     n_kv_heads: int = 1,
     remat: str = "none",
@@ -1626,6 +1679,7 @@ def _training_config(
     prefetch: bool = False,
     document_buffer_size: int | None = None,
     document_refill_size: int | None = None,
+    trinity_moe_balance_name: str | None = None,
 ) -> str:
     total_steps_line = "" if total_steps is None else f"total_steps = {total_steps}\n"
     validation_manifest_line = (
@@ -1649,6 +1703,22 @@ name = "validation"
 every_steps = 1
 num_batches = 1
 """
+    trinity_block = ""
+    if model_name == "trinity":
+        balance_name = "none" if trinity_moe_balance_name is None else trinity_moe_balance_name
+        trinity_block = f"""
+[model.trinity]
+initial_dense_layers = 1
+local_window = {seq_len}
+local_layers_per_global = 1
+
+[model.trinity.moe]
+num_experts = 3
+top_k = 2
+
+[model.trinity.moe.balance]
+name = "{balance_name}"
+"""
     return f"""
 [run]
 id = "loop"
@@ -1656,17 +1726,18 @@ seed = {seed}
 output_dir = "runs"
 
 [model]
-name = "decoder"
+name = "{model_name}"
 variant = "tiny"
 vocab_size = 64
 hidden_size = {hidden_size}
 intermediate_size = {intermediate_size}
-num_layers = 1
+num_layers = {num_layers}
 num_heads = {num_heads}
 n_kv_heads = {n_kv_heads}
 max_seq_len = 4
 compute_dtype = "float32"
 remat = "{remat}"
+{trinity_block}
 
 [optimizer]
 name = "{optimizer_name}"

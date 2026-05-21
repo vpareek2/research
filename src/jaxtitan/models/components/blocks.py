@@ -181,9 +181,22 @@ class TrinityMoEBlock(nnx.Module):
         self.ffn_post_norm = build_rms_norm(spec, rngs=rngs, scale_init_value=post_scale)
 
     def __call__(self, x: jax.Array, context: FullAttentionContext) -> jax.Array:
+        return self.forward_with_output(x, context, -1)[0]
+
+    def forward_with_output(
+        self,
+        x: jax.Array,
+        context: FullAttentionContext,
+        layer_index: int,
+    ) -> tuple[jax.Array, tuple[Any, ...], tuple[Any, ...]]:
         x = x + self.attn_post_norm(self.attn(self.attn_pre_norm(x), context))
-        x = x + self.ffn_post_norm(self.mlp(self.ffn_pre_norm(x)))
-        return x
+        mlp_out, aux_losses, router_stats = self.mlp.forward_with_output(
+            self.ffn_pre_norm(x),
+            name=f"layers.{layer_index}.mlp",
+            layer_index=layer_index,
+        )
+        x = x + self.ffn_post_norm(mlp_out)
+        return x, aux_losses, router_stats
 
     def prefill(
         self,

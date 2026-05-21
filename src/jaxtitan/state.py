@@ -29,6 +29,7 @@ class TrainState:
     opt_state: PyTree
     rng: RngState
     schedule_state: PyTree | None = None
+    moe_balance: PyTree | None = None
 
 
 @dataclass(frozen=True, slots=True)

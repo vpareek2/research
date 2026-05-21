@@ -76,6 +76,7 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
             "gradient_accumulation_steps": spec.training.gradient_accumulation_steps,
             "eval_every_steps": spec.training.eval_every_steps,
             "grad_clip_norm": spec.training.grad_clip_norm,
+            "loss": _normalize(spec.training.loss),
         },
     }
     payload = _normalize(payload)

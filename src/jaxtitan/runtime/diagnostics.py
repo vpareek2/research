@@ -134,6 +134,20 @@ def peak_flops_for_device(device_name: str | None) -> float | None:
     return None
 
 
+def _moe_balance_payload(spec: ModelSpec) -> dict[str, Any]:
+    trinity = spec.trinity
+    if trinity is None or trinity.moe is None:
+        return {"name": "none"}
+    balance = trinity.moe.balance
+    return {
+        "name": balance.name,
+        "load_lr": balance.load_lr,
+        "momentum": balance.momentum,
+        "clamp": balance.clamp,
+        "sequence_aux_loss_weight": balance.sequence_aux_loss_weight,
+    }
+
+
 def build_runtime_diagnostics(
     spec: RunSpec,
     context: Any,
@@ -209,6 +223,12 @@ def build_runtime_diagnostics(
             "effective_global_batch_size": effective_global_batch_size,
             "gradient_accumulation_steps": spec.training.gradient_accumulation_steps,
             "remat": spec.model.remat,
+            "moe_balance": _moe_balance_payload(spec.model),
+        },
+        "training": {
+            "loss": {
+                "z_loss_weight": spec.training.loss.z_loss_weight,
+            },
         },
         "optimizer": optimizer_policy_summary(
             spec.optimizer,

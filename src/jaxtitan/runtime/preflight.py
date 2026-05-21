@@ -36,6 +36,7 @@ from jaxtitan.runtime.training import (
     _build_train_data_pipeline,
     _build_validation_eval_data,
     _metrics_row,
+    _moe_balance_spec,
     _next_accumulated_train_batch,
     _train_sync_target,
     _validation_eval_row,
@@ -89,6 +90,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
         optimizer.transform,
         seed=runtime_spec.seed,
         optimizer_init_model_state=optimizer_init_state,
+        moe_balance_spec=_moe_balance_spec(runtime_spec),
     )
     expected_train_shape = (
         runtime_spec.training.gradient_accumulation_steps,
@@ -103,6 +105,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
         state_template=train_state,
         donate_state=True,
         expected_batch_shape=expected_train_shape,
+        loss=runtime_spec.training.loss,
     )
 
     timer = PhaseTimer()
@@ -227,6 +230,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
             "param_dtype": runtime_spec.model.param_dtype,
             "compute_dtype": runtime_spec.model.compute_dtype,
             "remat": runtime_spec.model.remat,
+            "moe_balance": runtime_diagnostics.payload["model"]["moe_balance"],
         },
         "optimizer": {
             "name": runtime_spec.optimizer.name,
@@ -252,6 +256,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
             "micro_tokens_per_step": micro_tokens,
             "effective_tokens_per_step": batch_tokens,
             "gradient_accumulation_steps": runtime_spec.training.gradient_accumulation_steps,
+            "z_loss_weight": runtime_spec.training.loss.z_loss_weight,
             "data_axis_size": context.data_axis_size,
             "per_device_batch_size": runtime_spec.training.global_batch_size // context.data_axis_size,
             "per_device_target_tokens": batch_tokens // context.data_axis_size,
@@ -260,6 +265,10 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
             "checkpoint_every_steps": runtime_spec.training.checkpoint_every_steps,
             "compile": "passed",
             "first_step_loss": train_row["loss"],
+            "first_step_total_loss": train_row["total_loss"],
+            "first_step_z_loss": train_row["z_loss"],
+            "first_step_moe_aux_loss": train_row["moe_aux_loss"],
+            "first_step_router_max_vio": train_row["router_max_vio"],
             "first_step_train_tokens_per_sec": train_row["train_tokens_per_sec"],
             "first_step_mfu": train_row["mfu"],
         },
