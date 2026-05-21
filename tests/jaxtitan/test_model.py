@@ -5,6 +5,7 @@ from flax import nnx
 
 from jaxtitan.errors import ContractError
 from jaxtitan.models import apply_model, build_model, count_parameters, dtype_from_name
+from jaxtitan.models.components import DecoderBlock, DecoderSwiGLU, GroupedQueryAttention
 from jaxtitan.specs.model import ModelSpec
 
 
@@ -78,6 +79,16 @@ def test_block_remat_matches_plain_forward_and_metadata() -> None:
 
     assert remat.metadata == plain.metadata
     assert jnp.allclose(remat_logits, plain_logits, rtol=1e-6, atol=1e-6)
+
+
+def test_decoder_recipe_assembles_reusable_components() -> None:
+    result = build_model(_tiny_spec(), seed=0)
+    model = nnx.merge(result.graph, result.state)
+    layer = model.layers[0]
+
+    assert isinstance(layer, DecoderBlock)
+    assert isinstance(layer.attn, GroupedQueryAttention)
+    assert isinstance(layer.mlp, DecoderSwiGLU)
 
 
 def test_model_parameter_dtype_follows_spec() -> None:
