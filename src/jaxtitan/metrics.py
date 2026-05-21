@@ -41,6 +41,10 @@ class StepMetrics:
     router_mean_importance_entropy: ArrayScalar | None = None
     smebu_bias_norm: ArrayScalar | None = None
     smebu_momentum_norm: ArrayScalar | None = None
+    optimizer_group_specs: Any = ()
+    optimizer_group_grad_norms: ArrayScalar | None = None
+    optimizer_group_update_norms: ArrayScalar | None = None
+    optimizer_group_param_norms: ArrayScalar | None = None
     aux_metrics: Any = ()
     microbatch_loss_mean: ArrayScalar | None = None
     microbatch_loss_max: ArrayScalar | None = None

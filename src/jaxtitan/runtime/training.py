@@ -124,6 +124,14 @@ class RunSummary:
     final_router_dead_experts_count: float | None = None
     final_router_mean_importance_cv: float | None = None
     final_router_mean_importance_entropy: float | None = None
+    final_optimizer_groups: list[dict[str, Any]] | None = None
+    final_optimizer_grad_norm_max_group: str | None = None
+    final_optimizer_update_norm_max_group: str | None = None
+    final_optimizer_update_param_ratio_max: float | None = None
+    final_optimizer_update_param_ratio_mean: float | None = None
+    final_optimizer_groups_with_zero_grad: int | None = None
+    final_optimizer_groups_with_zero_update: int | None = None
+    final_optimizer_route_backend_counts: dict[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,15 +218,23 @@ def run_training(
                 "data_pipeline_prefetch": summary.data_pipeline_prefetch,
                 "data_document_buffer_size": summary.data_document_buffer_size,
                 "data_document_refill_size": summary.data_document_refill_size,
-            "moe_balance_policy": summary.moe_balance_policy,
-            "z_loss_weight": summary.z_loss_weight,
-            "final_moe_router_layers": summary.final_moe_router_layers,
-            "final_router_max_vio": summary.final_router_max_vio,
-            "final_router_mean_load_cv": summary.final_router_mean_load_cv,
-            "final_router_dead_experts_count": summary.final_router_dead_experts_count,
-            "final_router_mean_importance_cv": summary.final_router_mean_importance_cv,
-            "final_router_mean_importance_entropy": summary.final_router_mean_importance_entropy,
-        }
+                "moe_balance_policy": summary.moe_balance_policy,
+                "z_loss_weight": summary.z_loss_weight,
+                "final_moe_router_layers": summary.final_moe_router_layers,
+                "final_router_max_vio": summary.final_router_max_vio,
+                "final_router_mean_load_cv": summary.final_router_mean_load_cv,
+                "final_router_dead_experts_count": summary.final_router_dead_experts_count,
+                "final_router_mean_importance_cv": summary.final_router_mean_importance_cv,
+                "final_router_mean_importance_entropy": summary.final_router_mean_importance_entropy,
+                "final_optimizer_groups": summary.final_optimizer_groups,
+                "final_optimizer_grad_norm_max_group": summary.final_optimizer_grad_norm_max_group,
+                "final_optimizer_update_norm_max_group": summary.final_optimizer_update_norm_max_group,
+                "final_optimizer_update_param_ratio_max": summary.final_optimizer_update_param_ratio_max,
+                "final_optimizer_update_param_ratio_mean": summary.final_optimizer_update_param_ratio_mean,
+                "final_optimizer_groups_with_zero_grad": summary.final_optimizer_groups_with_zero_grad,
+                "final_optimizer_groups_with_zero_update": summary.final_optimizer_groups_with_zero_update,
+                "final_optimizer_route_backend_counts": summary.final_optimizer_route_backend_counts,
+            }
         )
         writer.write_summary(asdict(summary))
         return summary
@@ -552,6 +568,14 @@ def _run_training_initialized(
             final_router_dead_experts_count=last_row["router_dead_experts_count"],
             final_router_mean_importance_cv=last_row["router_mean_importance_cv"],
             final_router_mean_importance_entropy=last_row["router_mean_importance_entropy"],
+            final_optimizer_groups=last_row.get("optimizer_groups"),
+            final_optimizer_grad_norm_max_group=last_row.get("optimizer_grad_norm_max_group"),
+            final_optimizer_update_norm_max_group=last_row.get("optimizer_update_norm_max_group"),
+            final_optimizer_update_param_ratio_max=last_row.get("optimizer_update_param_ratio_max"),
+            final_optimizer_update_param_ratio_mean=last_row.get("optimizer_update_param_ratio_mean"),
+            final_optimizer_groups_with_zero_grad=last_row.get("optimizer_groups_with_zero_grad"),
+            final_optimizer_groups_with_zero_update=last_row.get("optimizer_groups_with_zero_update"),
+            final_optimizer_route_backend_counts=last_row.get("optimizer_route_backend_counts"),
         )
         if progress is not None:
             progress("completed", {"summary": summary})
@@ -858,6 +882,15 @@ def _metrics_row(
     router_layers = _router_layers_payload(metrics.router_expert_counts, metrics.router_importance)
     if router_layers is not None:
         row["moe_router_layers"] = router_layers
+    optimizer_groups = _optimizer_groups_payload(
+        metrics.optimizer_group_specs,
+        metrics.optimizer_group_grad_norms,
+        metrics.optimizer_group_update_norms,
+        metrics.optimizer_group_param_norms,
+    )
+    row.update(_optimizer_health_fields(optimizer_groups))
+    if optimizer_groups is not None:
+        row["optimizer_groups"] = optimizer_groups
     row.update(_document_metric_fields(provenance.row_doc_ids))
     if runtime_spec is not None and context is not None:
         data_axis_size = context.data_axis_size
@@ -1004,6 +1037,9 @@ def _train_sync_target(train_state: TrainState, metrics: Any) -> tuple[Any, ...]
         metrics.grad_norm,
         metrics.param_norm,
         metrics.update_norm,
+        metrics.optimizer_group_grad_norms,
+        metrics.optimizer_group_update_norms,
+        metrics.optimizer_group_param_norms,
         metrics.overflow,
         metrics.objective,
         metrics.aux_loss,
@@ -1037,6 +1073,77 @@ def _train_sync_target(train_state: TrainState, metrics: Any) -> tuple[Any, ...]
 
 def _optional_scalar_float(value: Any) -> float | None:
     return None if value is None else _scalar_float(value)
+
+
+def _optimizer_groups_payload(
+    specs: Any,
+    grad_norms: Any,
+    update_norms: Any,
+    param_norms: Any,
+) -> list[dict[str, Any]] | None:
+    if not specs or grad_norms is None or update_norms is None or param_norms is None:
+        return None
+    grad_array = np.asarray(jax.device_get(grad_norms), dtype=np.float64)
+    update_array = np.asarray(jax.device_get(update_norms), dtype=np.float64)
+    param_array = np.asarray(jax.device_get(param_norms), dtype=np.float64)
+    rows = []
+    for idx, spec in enumerate(specs):
+        param_norm = float(param_array[idx])
+        grad_norm = float(grad_array[idx])
+        update_norm = float(update_array[idx])
+        rows.append(
+            {
+                "group": spec["group"],
+                "tag": spec["tag"],
+                "backend": spec["backend"],
+                "parameter_count": int(spec["parameter_count"]),
+                "leaf_count": int(spec["leaf_count"]),
+                "grad_norm": grad_norm,
+                "update_norm": update_norm,
+                "param_norm": param_norm,
+                "grad_param_ratio": _safe_ratio(grad_norm, param_norm),
+                "update_param_ratio": _safe_ratio(update_norm, param_norm),
+                "weight_decay_enabled_count": int(spec["weight_decay_enabled_count"]),
+                "auto_resolved_count": int(spec["auto_resolved_count"]),
+            }
+        )
+    return rows
+
+
+def _optimizer_health_fields(groups: list[dict[str, Any]] | None) -> dict[str, Any]:
+    empty = {
+        "optimizer_grad_norm_max_group": None,
+        "optimizer_update_norm_max_group": None,
+        "optimizer_update_param_ratio_max": None,
+        "optimizer_update_param_ratio_mean": None,
+        "optimizer_groups_with_zero_grad": None,
+        "optimizer_groups_with_zero_update": None,
+        "optimizer_route_backend_counts": None,
+    }
+    if not groups:
+        return empty
+    max_grad = max(groups, key=lambda item: item["grad_norm"])
+    max_update = max(groups, key=lambda item: item["update_norm"])
+    ratios = [float(item["update_param_ratio"]) for item in groups]
+    backend_counts: dict[str, int] = {}
+    for item in groups:
+        backend = item["backend"]
+        backend_counts[backend] = backend_counts.get(backend, 0) + int(item["leaf_count"])
+    return {
+        "optimizer_grad_norm_max_group": max_grad["group"],
+        "optimizer_update_norm_max_group": max_update["group"],
+        "optimizer_update_param_ratio_max": max(ratios),
+        "optimizer_update_param_ratio_mean": float(np.mean(ratios)),
+        "optimizer_groups_with_zero_grad": sum(1 for item in groups if item["grad_norm"] <= 0.0),
+        "optimizer_groups_with_zero_update": sum(1 for item in groups if item["update_norm"] <= 0.0),
+        "optimizer_route_backend_counts": dict(sorted(backend_counts.items())),
+    }
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    if denominator <= 0.0:
+        return 0.0
+    return numerator / denominator
 
 
 def _router_layers_payload(counts: Any, importance: Any) -> list[dict[str, Any]] | None:

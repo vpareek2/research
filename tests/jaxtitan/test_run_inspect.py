@@ -46,6 +46,10 @@ def test_inspect_run_reports_summary_checkpoints_and_recent_metrics(
     assert payload["diagnostics"]["data_pipeline"]["worker_buffer_size"] == 1
     assert payload["diagnostics"]["data_pipeline"]["document_aware"] is False
     assert payload["diagnostics"]["data_pipeline"]["document_count"] is None
+    assert payload["router_health"] is None
+    assert payload["optimizer_health"]["group_count"] > 0
+    optimizer_leaf_count = sum(group["leaf_count"] for group in payload["recent_train_metrics"][-1]["optimizer_groups"])
+    assert payload["optimizer_health"]["route_backend_counts"] == {"adamw": optimizer_leaf_count}
     assert payload["recent_train_metrics"][-1]["step"] == 2
     assert payload["recent_eval_metrics"][-1]["eval_name"] == "validation"
     assert "run: loop" in text
@@ -55,6 +59,7 @@ def test_inspect_run_reports_summary_checkpoints_and_recent_metrics(
     assert "documents=False" in text
     assert "mode=replicated_data_parallel" in text
     assert "artifacts=single_host" in text
+    assert "optimizer health:" in text
     assert "best checkpoint:" in text
     assert json.loads(run_inspection_to_json(inspection))["run_id"] == "loop"
 
@@ -95,6 +100,37 @@ def test_inspect_run_reports_document_pipeline_metadata(
     assert payload["diagnostics"]["data_pipeline"]["document_buffer_size"] == 3
     assert payload["recent_train_metrics"][-1]["document_aware"] is True
     assert "documents=True count=4" in text
+
+
+def test_inspect_run_reports_moe_router_and_optimizer_health(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("inspect-moe", shard_token_groups=(tuple(range(0, 50)),), train_tokens=25)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            model_name="trinity",
+            num_layers=2,
+            trinity_moe_balance_name="none",
+        )
+    )
+    run_training(config_path)
+
+    inspection = inspect_run(tmp_path / "runs" / "loop")
+    payload = inspection.payload
+    text = format_run_inspection(inspection)
+
+    assert payload["router_health"]["layer_count"] == 1
+    assert payload["router_health"]["worst_layer"]["layer_index"] == 0
+    assert payload["optimizer_health"]["group_count"] > 0
+    assert any(group["tag"] == "moe_router" for group in payload["recent_train_metrics"][-1]["optimizer_groups"])
+    assert "router health:" in text
+    assert "optimizer health:" in text
 
 
 def test_inspect_run_missing_required_artifact_fails(
@@ -192,10 +228,29 @@ def _training_config(
     document_buffer_size: int | None = None,
     document_refill_size: int | None = None,
     target_tokens: int = 16,
+    model_name: str = "decoder",
+    num_layers: int = 1,
+    trinity_moe_balance_name: str | None = None,
 ) -> str:
     shuffle_seed_line = "" if shuffle_seed is None else f"shuffle_seed = {shuffle_seed}\n"
     document_buffer_size_line = "" if document_buffer_size is None else f"document_buffer_size = {document_buffer_size}\n"
     document_refill_size_line = "" if document_refill_size is None else f"document_refill_size = {document_refill_size}\n"
+    trinity_block = ""
+    if model_name == "trinity":
+        balance_name = "none" if trinity_moe_balance_name is None else trinity_moe_balance_name
+        trinity_block = f"""
+[model.trinity]
+initial_dense_layers = 1
+local_window = 4
+local_layers_per_global = 1
+
+[model.trinity.moe]
+num_experts = 3
+top_k = 2
+
+[model.trinity.moe.balance]
+name = "{balance_name}"
+"""
     return f"""
 [run]
 id = "loop"
@@ -203,16 +258,17 @@ seed = 7
 output_dir = "runs"
 
 [model]
-name = "decoder"
+name = "{model_name}"
 variant = "tiny"
 vocab_size = 64
 hidden_size = 8
 intermediate_size = 16
-num_layers = 1
+num_layers = {num_layers}
 num_heads = 2
 n_kv_heads = 1
 max_seq_len = 4
 compute_dtype = "float32"
+{trinity_block}
 
 [optimizer]
 name = "adamw"

@@ -91,7 +91,11 @@ def make_train_step(
             sharding.batch.accumulated_target_ids,
             sharding.batch.accumulated_loss_mask,
         )
-        out_shardings = (state_sharding, *([sharding.metrics] * 30))
+        out_shardings = (state_sharding, *([sharding.metrics] * 33))
+    optimizer_group_templates, optimizer_group_index_by_path = _optimizer_group_templates(
+        optimizer.route_assignments,
+    )
+    optimizer_group_count = len(optimizer_group_templates)
 
     def _compiled_impl(
         state: TrainState,
@@ -221,6 +225,13 @@ def make_train_step(
         grad_norm = _tree_l2_norm(grads)
         param_norm = _tree_l2_norm(next_model)
         update_norm = _tree_l2_norm(updates)
+        group_grad_norms, group_update_norms, group_param_norms = _optimizer_group_norms(
+            grads,
+            updates,
+            next_model,
+            optimizer_group_index_by_path,
+            optimizer_group_count,
+        )
         micro_losses = micro_loss_sums / micro_token_counts.astype(jnp.float32)
         microbatch_loss_mean = jnp.mean(micro_losses)
         microbatch_loss_max = jnp.max(micro_losses)
@@ -239,6 +250,9 @@ def make_train_step(
             grad_norm,
             param_norm,
             update_norm,
+            group_grad_norms,
+            group_update_norms,
+            group_param_norms,
             objective,
             aux_loss,
             z_loss,
@@ -282,6 +296,9 @@ def make_train_step(
             grad_norm,
             param_norm,
             update_norm,
+            optimizer_group_grad_norms,
+            optimizer_group_update_norms,
+            optimizer_group_param_norms,
             objective,
             aux_loss,
             z_loss,
@@ -314,6 +331,11 @@ def make_train_step(
         )
         router_active = router_expert_counts.shape[0] > 0
         balance_active = state.moe_balance is not None
+        optimizer_group_specs = _optimizer_group_specs_for_model(
+            next_state.model,
+            optimizer.route_assignments,
+            optimizer_group_templates,
+        )
         metrics = StepMetrics(
             loss_sum=loss_sum,
             token_count=token_count,
@@ -321,6 +343,10 @@ def make_train_step(
             grad_norm=grad_norm,
             param_norm=param_norm,
             update_norm=update_norm,
+            optimizer_group_specs=optimizer_group_specs,
+            optimizer_group_grad_norms=optimizer_group_grad_norms,
+            optimizer_group_update_norms=optimizer_group_update_norms,
+            optimizer_group_param_norms=optimizer_group_param_norms,
             overflow=None,
             objective=objective,
             aux_loss=aux_loss,
@@ -382,6 +408,119 @@ def _ensure_accumulation_axis(value: Any) -> Any:
 
 def _constrain_like(tree: Any, shardings: Any) -> Any:
     return jax.tree.map(lambda leaf, sharding: jax.lax.with_sharding_constraint(leaf, sharding), tree, shardings)
+
+
+def _optimizer_group_templates(
+    assignments: Any,
+) -> tuple[tuple[dict[str, Any], ...], dict[tuple[str, ...], int]]:
+    assignments = tuple(assignments)
+    if not assignments:
+        return (), {}
+    groups: list[dict[str, Any]] = []
+    group_by_key: dict[tuple[str, str], int] = {}
+    group_index_by_path: dict[tuple[str, ...], int] = {}
+    for assignment in assignments:
+        key = (assignment.tag, assignment.backend)
+        group_index = group_by_key.get(key)
+        if group_index is None:
+            group_index = len(groups)
+            group_by_key[key] = group_index
+            groups.append(
+                {
+                    "group": f"{assignment.tag}:{assignment.backend}",
+                    "tag": assignment.tag,
+                    "backend": assignment.backend,
+                    "weight_decay_enabled_count": 0,
+                    "auto_resolved_count": 0,
+                }
+            )
+        if assignment.weight_decay:
+            groups[group_index]["weight_decay_enabled_count"] += 1
+        if assignment.auto_resolved:
+            groups[group_index]["auto_resolved_count"] += 1
+        group_index_by_path[assignment.path] = group_index
+    return tuple(groups), group_index_by_path
+
+
+def _optimizer_group_specs_for_model(
+    model: Any,
+    assignments: Any,
+    templates: tuple[dict[str, Any], ...],
+) -> tuple[dict[str, Any], ...]:
+    assignments = tuple(assignments)
+    if not assignments:
+        return ()
+    assignments_by_path = {assignment.path: assignment for assignment in assignments}
+    group_by_key = {(template["tag"], template["backend"]): idx for idx, template in enumerate(templates)}
+    leaf_counts = [0 for _template in templates]
+    parameter_counts = [0 for _template in templates]
+    model_paths = set()
+    for path, leaf in jax.tree_util.tree_flatten_with_path(model)[0]:
+        metadata_path = _metadata_path_from_jax_path(path)
+        model_paths.add(metadata_path)
+        assignment = assignments_by_path.get(metadata_path)
+        if assignment is None:
+            raise ContractError(f"optimizer diagnostics missing route for model parameter {'.'.join(metadata_path)!r}")
+        group_index = group_by_key[(assignment.tag, assignment.backend)]
+        leaf_counts[group_index] += 1
+        parameter_counts[group_index] += int(jnp.size(leaf))
+    assignment_paths = set(assignments_by_path)
+    missing = sorted(assignment_paths - model_paths)
+    if missing:
+        raise ContractError(f"optimizer diagnostics route has stale parameter path {'.'.join(missing[0])!r}")
+    specs = []
+    for idx, template in enumerate(templates):
+        specs.append(
+            {
+                **template,
+                "leaf_count": leaf_counts[idx],
+                "parameter_count": parameter_counts[idx],
+            }
+        )
+    return tuple(specs)
+
+
+def _optimizer_group_norms(
+    grads: Any,
+    updates: Any,
+    params: Any,
+    group_index_by_path: dict[tuple[str, ...], int],
+    group_count: int,
+) -> tuple[Any, Any, Any]:
+    if group_count == 0:
+        empty = jnp.zeros((0,), dtype=jnp.float32)
+        return empty, empty, empty
+    grad_squares = jnp.zeros((group_count,), dtype=jnp.float32)
+    update_squares = jnp.zeros((group_count,), dtype=jnp.float32)
+    param_squares = jnp.zeros((group_count,), dtype=jnp.float32)
+    grad_pairs = jax.tree_util.tree_flatten_with_path(grads)[0]
+    update_leaves = jax.tree.leaves(updates)
+    param_leaves = jax.tree.leaves(params)
+    for (path, grad), update, param in zip(grad_pairs, update_leaves, param_leaves, strict=True):
+        metadata_path = _metadata_path_from_jax_path(path)
+        group_index = group_index_by_path.get(metadata_path)
+        if group_index is None:
+            raise ContractError(f"optimizer diagnostics missing route for gradient {'.'.join(metadata_path)!r}")
+        grad_squares = grad_squares.at[group_index].add(_leaf_square_norm(grad))
+        update_squares = update_squares.at[group_index].add(_leaf_square_norm(update))
+        param_squares = param_squares.at[group_index].add(_leaf_square_norm(param))
+    return jnp.sqrt(grad_squares), jnp.sqrt(update_squares), jnp.sqrt(param_squares)
+
+
+def _leaf_square_norm(value: Any) -> Any:
+    return jnp.sum(jnp.square(jnp.asarray(value, dtype=jnp.float32)))
+
+
+def _metadata_path_from_jax_path(path: Any) -> tuple[str, ...]:
+    parts = []
+    for key in path:
+        name = getattr(key, "key", None)
+        if name is None:
+            name = getattr(key, "name", None)
+        if name == "value":
+            continue
+        parts.append(str(name))
+    return tuple(parts)
 
 
 def _aux_loss_value(aux_losses: Any, *, name_prefix: str | None = None):

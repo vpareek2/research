@@ -102,6 +102,16 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert metrics[-1]["microbatch_loss_mean"] == pytest.approx(metrics[-1]["loss"])
     assert metrics[-1]["microbatch_loss_max"] == pytest.approx(metrics[-1]["loss"])
     assert metrics[-1]["batch_het"] == pytest.approx(0.0)
+    assert metrics[-1]["optimizer_groups"]
+    assert sum(group["leaf_count"] for group in metrics[-1]["optimizer_groups"]) == diagnostics["model"]["parameter_leaves"]
+    assert sum(group["parameter_count"] for group in metrics[-1]["optimizer_groups"]) == diagnostics["model"]["parameters"]
+    assert metrics[-1]["optimizer_grad_norm_max_group"]
+    assert metrics[-1]["optimizer_update_norm_max_group"]
+    assert metrics[-1]["optimizer_update_param_ratio_max"] >= 0.0
+    assert metrics[-1]["optimizer_update_param_ratio_mean"] >= 0.0
+    assert metrics[-1]["optimizer_groups_with_zero_grad"] >= 0
+    assert metrics[-1]["optimizer_groups_with_zero_update"] >= 0
+    assert metrics[-1]["optimizer_route_backend_counts"] == {"adamw": diagnostics["model"]["parameter_leaves"]}
     assert metrics[-1]["data_sec"] >= 0.0
     assert metrics[-1]["placement_sec"] >= 0.0
     assert metrics[-1]["train_dispatch_sec"] >= 0.0
@@ -128,6 +138,14 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert final["final_mfu"] == metrics[-1]["mfu"]
     assert final["final_batch_het"] == pytest.approx(metrics[-1]["batch_het"])
     assert final["avg_batch_het"] == pytest.approx(sum(row["batch_het"] for row in metrics) / len(metrics))
+    assert final["final_optimizer_groups"] == metrics[-1]["optimizer_groups"]
+    assert final["final_optimizer_grad_norm_max_group"] == metrics[-1]["optimizer_grad_norm_max_group"]
+    assert final["final_optimizer_update_norm_max_group"] == metrics[-1]["optimizer_update_norm_max_group"]
+    assert final["final_optimizer_update_param_ratio_max"] == metrics[-1]["optimizer_update_param_ratio_max"]
+    assert final["final_optimizer_update_param_ratio_mean"] == metrics[-1]["optimizer_update_param_ratio_mean"]
+    assert final["final_optimizer_groups_with_zero_grad"] == metrics[-1]["optimizer_groups_with_zero_grad"]
+    assert final["final_optimizer_groups_with_zero_update"] == metrics[-1]["optimizer_groups_with_zero_update"]
+    assert final["final_optimizer_route_backend_counts"] == metrics[-1]["optimizer_route_backend_counts"]
     assert final["device_kind"] == diagnostics["performance"]["device_kind"]
     assert final["device_count"] == diagnostics["performance"]["device_count"]
     assert final["runtime_diagnostics_path"] == "diagnostics/runtime.json"
@@ -177,6 +195,7 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert events[-1]["gradient_accumulation_steps"] == 1
     assert events[-1]["effective_global_batch_size"] == 2
     assert events[-1]["effective_tokens_per_step"] == 8
+    assert events[-1]["final_optimizer_route_backend_counts"] == metrics[-1]["optimizer_route_backend_counts"]
     assert diagnostics["jax"]["backend"]
     assert diagnostics["packages"]["jaxtitan"]
     assert diagnostics["packages"]["grain"]
@@ -821,10 +840,16 @@ def test_run_training_writes_moe_router_layer_diagnostics(
     assert row["router_mean_importance_entropy"] == pytest.approx(layers[0]["importance_entropy"])
     assert row["smebu_bias_norm"] is None
     assert row["smebu_momentum_norm"] is None
+    optimizer_groups = row["optimizer_groups"]
+    tags = {group["tag"] for group in optimizer_groups}
+    assert {"moe_router", "moe_expert_bias", "moe_gate", "moe_up", "moe_down"}.issubset(tags)
+    assert row["optimizer_route_backend_counts"]["adamw"] == sum(group["leaf_count"] for group in optimizer_groups)
     assert final["final_moe_router_layers"] == layers
     assert final["final_router_mean_load_cv"] == row["router_mean_load_cv"]
     assert final["final_router_dead_experts_count"] == row["router_dead_experts_count"]
     assert final["final_router_mean_importance_cv"] == row["router_mean_importance_cv"]
+    assert final["final_optimizer_groups"] == optimizer_groups
+    assert final["final_optimizer_route_backend_counts"] == row["optimizer_route_backend_counts"]
 
 
 def test_run_training_records_failure_when_dataset_exhausts(

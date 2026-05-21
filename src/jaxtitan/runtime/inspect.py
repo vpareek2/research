@@ -27,6 +27,8 @@ def inspect_run(run_dir: str | Path) -> RunInspection:
     diagnostics = _read_optional_json(run_dir / "diagnostics" / "runtime.json", "runtime diagnostics")
     index = load_checkpoint_index(run_dir)
     _validate_checkpoint_paths(run_dir, raw_index)
+    recent_train_metrics = _read_recent_jsonl(run_dir / "metrics" / "train.jsonl")
+    recent_eval_metrics = _read_recent_jsonl(run_dir / "metrics" / "eval.jsonl")
 
     latest = index.latest_record
     best = index.best_record
@@ -48,8 +50,10 @@ def inspect_run(run_dir: str | Path) -> RunInspection:
         "best_checkpoint": None if best is None else _checkpoint_summary(run_dir, best),
         "checkpoints": [_checkpoint_summary(run_dir, record) for record in index.records],
         "diagnostics": _diagnostics_summary(diagnostics),
-        "recent_train_metrics": _read_recent_jsonl(run_dir / "metrics" / "train.jsonl"),
-        "recent_eval_metrics": _read_recent_jsonl(run_dir / "metrics" / "eval.jsonl"),
+        "router_health": _router_health(final, recent_train_metrics),
+        "optimizer_health": _optimizer_health(final, recent_train_metrics),
+        "recent_train_metrics": recent_train_metrics,
+        "recent_eval_metrics": recent_eval_metrics,
     }
     return RunInspection(payload=payload)
 
@@ -100,6 +104,26 @@ def format_run_inspection(inspection: RunInspection) -> str:
                 f"workers={data_pipeline['worker_count']} prefetch={data_pipeline['prefetch']} "
                 f"documents={data_pipeline['document_aware']} count={data_pipeline['document_count']}"
             )
+    router_health = payload["router_health"]
+    if router_health is not None:
+        worst = router_health["worst_layer"]
+        lines.append(
+            "router health: "
+            f"layers={router_health['layer_count']} worst_layer={worst['layer_index']} "
+            f"load_cv={worst['load_cv']} dead_experts={router_health['dead_experts_count']} "
+            f"importance_cv={worst['importance_cv']}"
+        )
+    optimizer_health = payload["optimizer_health"]
+    if optimizer_health is not None:
+        lines.append(
+            "optimizer health: "
+            f"groups={optimizer_health['group_count']} "
+            f"max_update_ratio={optimizer_health['update_param_ratio_max']} "
+            f"group={optimizer_health['update_param_ratio_max_group']} "
+            f"zero_grad={optimizer_health['groups_with_zero_grad']} "
+            f"zero_update={optimizer_health['groups_with_zero_update']} "
+            f"backends={optimizer_health['route_backend_counts']}"
+        )
     latest = payload["latest_checkpoint"]
     best = payload["best_checkpoint"]
     lines.append(f"latest checkpoint: {_format_checkpoint_ref(latest)}")
@@ -139,6 +163,84 @@ def _format_checkpoint_ref(record: Mapping[str, Any] | None) -> str:
     eval_loss = record["eval_loss"]
     suffix = "" if eval_loss is None else f" eval_loss={eval_loss}"
     return f"step={record['step']} path={record['checkpoint_path']}{suffix}"
+
+
+def _router_health(final: Mapping[str, Any], recent_train_metrics: list[dict[str, Any]]) -> dict[str, Any] | None:
+    last_row = recent_train_metrics[-1] if recent_train_metrics else {}
+    layers = final.get("final_moe_router_layers") or last_row.get("moe_router_layers")
+    if not isinstance(layers, list) or not layers:
+        return None
+    worst = max(layers, key=lambda item: _float_or_zero(item.get("load_cv")) if isinstance(item, Mapping) else 0.0)
+    if not isinstance(worst, Mapping):
+        return None
+    return {
+        "layer_count": len(layers),
+        "dead_experts_count": final.get("final_router_dead_experts_count", last_row.get("router_dead_experts_count")),
+        "mean_load_cv": final.get("final_router_mean_load_cv", last_row.get("router_mean_load_cv")),
+        "mean_importance_cv": final.get("final_router_mean_importance_cv", last_row.get("router_mean_importance_cv")),
+        "mean_importance_entropy": final.get(
+            "final_router_mean_importance_entropy",
+            last_row.get("router_mean_importance_entropy"),
+        ),
+        "worst_layer": {
+            "layer_index": worst.get("layer_index"),
+            "load_cv": worst.get("load_cv"),
+            "load_entropy": worst.get("load_entropy"),
+            "experts_active": worst.get("experts_active"),
+            "importance_cv": worst.get("importance_cv"),
+            "importance_entropy": worst.get("importance_entropy"),
+        },
+    }
+
+
+def _optimizer_health(final: Mapping[str, Any], recent_train_metrics: list[dict[str, Any]]) -> dict[str, Any] | None:
+    last_row = recent_train_metrics[-1] if recent_train_metrics else {}
+    groups = final.get("final_optimizer_groups") or last_row.get("optimizer_groups")
+    if not isinstance(groups, list) or not groups:
+        return None
+    worst_update = max(
+        groups,
+        key=lambda item: _float_or_zero(item.get("update_param_ratio")) if isinstance(item, Mapping) else 0.0,
+    )
+    if not isinstance(worst_update, Mapping):
+        return None
+    return {
+        "group_count": len(groups),
+        "update_param_ratio_max_group": worst_update.get("group"),
+        "update_param_ratio_max": final.get(
+            "final_optimizer_update_param_ratio_max",
+            last_row.get("optimizer_update_param_ratio_max"),
+        ),
+        "update_param_ratio_mean": final.get(
+            "final_optimizer_update_param_ratio_mean",
+            last_row.get("optimizer_update_param_ratio_mean"),
+        ),
+        "groups_with_zero_grad": final.get(
+            "final_optimizer_groups_with_zero_grad",
+            last_row.get("optimizer_groups_with_zero_grad"),
+        ),
+        "groups_with_zero_update": final.get(
+            "final_optimizer_groups_with_zero_update",
+            last_row.get("optimizer_groups_with_zero_update"),
+        ),
+        "route_backend_counts": final.get(
+            "final_optimizer_route_backend_counts",
+            last_row.get("optimizer_route_backend_counts"),
+        ),
+        "worst_update_ratio_group": {
+            "group": worst_update.get("group"),
+            "tag": worst_update.get("tag"),
+            "backend": worst_update.get("backend"),
+            "update_param_ratio": worst_update.get("update_param_ratio"),
+            "grad_param_ratio": worst_update.get("grad_param_ratio"),
+        },
+    }
+
+
+def _float_or_zero(value: Any) -> float:
+    if isinstance(value, int | float):
+        return float(value)
+    return 0.0
 
 
 def _validate_checkpoint_paths(run_dir: Path, raw_index: Mapping[str, Any]) -> None:

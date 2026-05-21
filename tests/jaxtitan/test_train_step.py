@@ -19,7 +19,7 @@ from jaxtitan.mesh import (
     place_replicated,
 )
 from jaxtitan.models import AuxLoss, ModelOutput, build_model
-from jaxtitan.optim import OptimizerBuildResult, build_optimizer
+from jaxtitan.optim import OptimizerBuildResult, RouteAssignment, build_optimizer
 import jaxtitan.steps.train as train_module
 from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec, TrinitySpec
@@ -82,6 +82,7 @@ def test_train_step_updates_model_optimizer_state_and_metrics() -> None:
     assert math.isfinite(float(jax.device_get(metrics.grad_norm)))
     assert math.isfinite(float(jax.device_get(metrics.param_norm)))
     assert math.isfinite(float(jax.device_get(metrics.update_norm)))
+    _assert_optimizer_groups_cover(metrics, built.metadata)
 
 
 def test_train_step_updates_dense_trinity_model() -> None:
@@ -130,6 +131,8 @@ def test_train_step_updates_trinity_moe_model_with_adamw() -> None:
     assert metrics.router_mean_importance_entropy is not None
     assert metrics.smebu_bias_norm is None
     assert metrics.smebu_momentum_norm is None
+    tags = {group["tag"] for group in metrics.optimizer_group_specs}
+    assert {"moe_router", "moe_expert_bias", "moe_gate", "moe_up", "moe_down"}.issubset(tags)
     assert math.isfinite(float(jax.device_get(metrics.loss_sum)))
 
 
@@ -286,6 +289,64 @@ def test_train_step_z_loss_changes_objective_without_changing_lm_metrics(monkeyp
     assert z_metrics.token_count == plain_metrics.token_count == 6
     assert z_metrics.z_loss > 0
     assert z_metrics.total_loss > plain_metrics.total_loss
+
+
+def test_optimizer_group_diagnostics_report_zero_gradients_and_updates(monkeypatch: pytest.MonkeyPatch) -> None:
+    route = RouteAssignment(
+        path=("w",),
+        tag="synthetic",
+        backend="adamw",
+        weight_decay=True,
+    )
+    batch = Batch(
+        input_ids=jnp.zeros((2, 3), dtype=jnp.int32),
+        target_ids=jnp.zeros((2, 3), dtype=jnp.int32),
+        loss_mask=jnp.ones((2, 3), dtype=jnp.bool_),
+    )
+
+    def constant_output(_graph, _params, input_ids):
+        logits = jnp.zeros((*input_ids.shape, 2), dtype=jnp.float32)
+        return ModelOutput(logits=logits)
+
+    monkeypatch.setattr(train_module, "apply_model_output", constant_output)
+    zero_grad_optimizer = OptimizerBuildResult(
+        transform=optax.sgd(0.1),
+        schedule=lambda step: jnp.asarray(0.1, dtype=jnp.float32),
+        adamw_fallback_schedule=None,
+        route_assignments=(route,),
+        description="sgd",
+    )
+    zero_grad_state = initialize_train_state({"w": jnp.asarray([0.5], dtype=jnp.float32)}, zero_grad_optimizer.transform, seed=1)
+    _next_zero_grad, zero_grad_metrics = make_train_step("constant", zero_grad_optimizer)(zero_grad_state, batch)
+
+    assert zero_grad_metrics.optimizer_group_specs[0]["group"] == "synthetic:adamw"
+    assert np.allclose(np.asarray(jax.device_get(zero_grad_metrics.optimizer_group_grad_norms)), [0.0])
+    assert np.allclose(np.asarray(jax.device_get(zero_grad_metrics.optimizer_group_update_norms)), [0.0])
+
+    def parameter_output(_graph, params, input_ids):
+        logits = jnp.broadcast_to(jnp.stack([params["w"][0], -params["w"][0]]), (*input_ids.shape, 2))
+        return ModelOutput(logits=logits)
+
+    monkeypatch.setattr(train_module, "apply_model_output", parameter_output)
+    zero_update_optimizer = OptimizerBuildResult(
+        transform=optax.sgd(0.0),
+        schedule=lambda step: jnp.asarray(0.0, dtype=jnp.float32),
+        adamw_fallback_schedule=None,
+        route_assignments=(route,),
+        description="sgd",
+    )
+    zero_update_state = initialize_train_state(
+        {"w": jnp.asarray([0.5], dtype=jnp.float32)},
+        zero_update_optimizer.transform,
+        seed=1,
+    )
+    _next_zero_update, zero_update_metrics = make_train_step("parameter", zero_update_optimizer)(
+        zero_update_state,
+        batch,
+    )
+
+    assert float(jax.device_get(zero_update_metrics.optimizer_group_grad_norms[0])) > 0.0
+    assert float(jax.device_get(zero_update_metrics.optimizer_group_update_norms[0])) == pytest.approx(0.0)
 
 
 def test_smebu_updates_expert_bias_and_momentum_after_train_step() -> None:
@@ -960,6 +1021,20 @@ def _trees_close(left, right, *, rtol: float = 1e-5, atol: float = 1e-5) -> bool
         )
         for left_leaf, right_leaf in zip(jax.tree.leaves(left), jax.tree.leaves(right), strict=True)
     )
+
+
+def _assert_optimizer_groups_cover(metrics, metadata) -> None:
+    groups = metrics.optimizer_group_specs
+    assert groups
+    assert sum(group["leaf_count"] for group in groups) == len(metadata)
+    assert sum(group["parameter_count"] for group in groups) == sum(item.count for item in metadata)
+    group_grad_norms = np.asarray(jax.device_get(metrics.optimizer_group_grad_norms))
+    group_update_norms = np.asarray(jax.device_get(metrics.optimizer_group_update_norms))
+    group_param_norms = np.asarray(jax.device_get(metrics.optimizer_group_param_norms))
+    assert group_grad_norms.shape == group_update_norms.shape == group_param_norms.shape == (len(groups),)
+    assert np.sqrt(np.sum(np.square(group_grad_norms))) == pytest.approx(float(jax.device_get(metrics.grad_norm)))
+    assert np.sqrt(np.sum(np.square(group_update_norms))) == pytest.approx(float(jax.device_get(metrics.update_norm)))
+    assert np.sqrt(np.sum(np.square(group_param_norms))) == pytest.approx(float(jax.device_get(metrics.param_norm)))
 
 
 def _scalar_int(value) -> int:
