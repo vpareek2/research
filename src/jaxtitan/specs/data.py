@@ -7,6 +7,35 @@ from jaxtitan.errors import ContractError
 
 
 @dataclass(frozen=True, slots=True)
+class HFStreamingSpec:
+    """Hugging Face streaming source contract for runtime training."""
+
+    dataset: str
+    split: str
+    revision: str
+    name: str | None = None
+    data_dir: str | None = None
+    text_column: str = "text"
+    append_eot: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.dataset:
+            raise ContractError("data.hf_streaming.dataset must be a non-empty string")
+        if not self.split:
+            raise ContractError("data.hf_streaming.split must be a non-empty string")
+        if not self.revision:
+            raise ContractError("data.hf_streaming.revision must be a non-empty pinned revision")
+        if self.name is not None and not self.name:
+            raise ContractError("data.hf_streaming.name must be non-empty when provided")
+        if self.data_dir is not None and not self.data_dir:
+            raise ContractError("data.hf_streaming.data_dir must be non-empty when provided")
+        if not self.text_column:
+            raise ContractError("data.hf_streaming.text_column must be a non-empty string")
+        if not isinstance(self.append_eot, bool):
+            raise ContractError("data.hf_streaming.append_eot must be a boolean")
+
+
+@dataclass(frozen=True, slots=True)
 class ShardInfo:
     """Prepared token shard metadata."""
 
@@ -57,9 +86,11 @@ class DatasetManifest:
 class DataSpec:
     """Static data source contract for a run."""
 
-    train_manifest: Path
+    mode: str = "prepared"
+    train_manifest: Path | None = None
     tokenizer_id: str | None = None
     validation_manifest: Path | None = None
+    hf_streaming: HFStreamingSpec | None = None
     order: str = "sequential"
     shuffle_seed: int | None = None
     worker_count: int = 0
@@ -69,7 +100,22 @@ class DataSpec:
     document_refill_size: int | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "train_manifest", Path(self.train_manifest))
+        if self.mode not in {"prepared", "hf_streaming"}:
+            raise ContractError(f"data.mode must be 'prepared' or 'hf_streaming', got {self.mode!r}")
+        if self.mode == "prepared":
+            if self.train_manifest is None:
+                raise ContractError("data.train_manifest is required when data.mode='prepared'")
+            object.__setattr__(self, "train_manifest", Path(self.train_manifest))
+            if self.hf_streaming is not None:
+                raise ContractError("data.hf_streaming is only valid when data.mode='hf_streaming'")
+        else:
+            if self.train_manifest is not None:
+                object.__setattr__(self, "train_manifest", Path(self.train_manifest))
+                raise ContractError("data.train_manifest must be omitted when data.mode='hf_streaming'")
+            if self.hf_streaming is None:
+                raise ContractError("data.hf_streaming is required when data.mode='hf_streaming'")
+            if self.tokenizer_id is None:
+                raise ContractError("data.tokenizer_id is required when data.mode='hf_streaming'")
         if self.validation_manifest is not None:
             object.__setattr__(self, "validation_manifest", Path(self.validation_manifest))
         if self.tokenizer_id is not None and not self.tokenizer_id:
@@ -78,6 +124,17 @@ class DataSpec:
             raise ContractError(
                 f"data.order must be 'sequential', 'shuffle', or 'document_buffer', got {self.order!r}"
             )
+        if self.mode == "hf_streaming":
+            if self.order != "sequential":
+                raise ContractError("data.mode='hf_streaming' supports only data.order='sequential'")
+            if self.shuffle_seed is not None:
+                raise ContractError("data.shuffle_seed must be null or omitted when data.mode='hf_streaming'")
+            if self.worker_count != 0 or self.worker_buffer_size != 1 or self.prefetch:
+                raise ContractError(
+                    "data.mode='hf_streaming' requires worker_count=0, worker_buffer_size=1, and prefetch=false"
+                )
+            if self.document_buffer_size is not None or self.document_refill_size is not None:
+                raise ContractError("document buffer settings are not supported when data.mode='hf_streaming'")
         if self.order in {"shuffle", "document_buffer"} and self.shuffle_seed is None:
             raise ContractError(f"data.shuffle_seed is required when data.order={self.order!r}")
         if self.order == "sequential" and self.shuffle_seed is not None:

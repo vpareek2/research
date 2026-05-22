@@ -7,6 +7,7 @@ import pytest
 from jaxtitan.config import load_config, resolved_config_sha256, run_spec_to_json
 from jaxtitan.errors import ContractError
 from jaxtitan.services import initialize_run
+from jaxtitan.services.wandb import final_tables_for_wandb, normalize_metrics_for_wandb, wandb_run_id_for_manifest
 
 
 def test_initialize_run_creates_canonical_artifact_layout(
@@ -128,3 +129,64 @@ def test_resolved_config_artifact_matches_canonical_json(
     initialize_run(config_path)
 
     assert (tmp_path / "runs" / "smoke" / "config" / "resolved.json").read_text() == run_spec_to_json(spec) + "\n"
+
+
+def test_wandb_metric_normalization_namespaces_scalars_and_skips_nested_fields() -> None:
+    row = {
+        "step": 3,
+        "loss": 1.25,
+        "tokens_seen": 128,
+        "tokens_per_sec": 1000.0,
+        "router_mean_load_cv": 0.5,
+        "optimizer_groups_with_zero_grad": 1,
+        "optimizer_groups": [{"group": "attention_q:muon"}],
+        "moe_router_layers": [{"layer_index": 0}],
+        "status": "completed",
+        "nan": float("nan"),
+    }
+
+    payload = normalize_metrics_for_wandb(row, default_namespace="train")
+
+    assert payload == {
+        "train/loss": 1.25,
+        "data/tokens_seen": 128,
+        "perf/tokens_per_sec": 1000.0,
+        "router/router_mean_load_cv": 0.5,
+        "optimizer/optimizer_groups_with_zero_grad": 1,
+    }
+
+
+def test_wandb_final_tables_use_compact_nested_summaries() -> None:
+    fake_wandb = _FakeWandbModule()
+    summary = {
+        "final_optimizer_groups": [{"group": "lm_head:adamw", "grad_norm": 1.0}],
+        "final_moe_router_layers": [{"layer_index": 0, "load_cv": 2.0}],
+    }
+
+    tables = final_tables_for_wandb(summary, fake_wandb)
+
+    assert set(tables) == {"final/optimizer_groups", "final/moe_router_layers"}
+    assert tables["final/optimizer_groups"].columns == ["grad_norm", "group"]
+    assert tables["final/optimizer_groups"].data == [[1.0, "lm_head:adamw"]]
+    assert tables["final/moe_router_layers"].columns == ["layer_index", "load_cv"]
+    assert tables["final/moe_router_layers"].data == [[0, 2.0]]
+
+
+def test_wandb_run_id_is_deterministic_and_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minimal_config: str
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(minimal_config.replace('id = "smoke"', 'id = "smoke run"'))
+
+    manifest = initialize_run(config_path)
+
+    assert wandb_run_id_for_manifest(manifest) == wandb_run_id_for_manifest(manifest)
+    assert wandb_run_id_for_manifest(manifest).startswith("smoke-run-")
+
+
+class _FakeWandbModule:
+    class Table:
+        def __init__(self, *, columns, data) -> None:
+            self.columns = columns
+            self.data = data

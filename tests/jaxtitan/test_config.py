@@ -74,6 +74,12 @@ def test_load_config_resolves_minimal_toml(tmp_path: Path) -> None:
     assert spec.mesh.axis_names == ("data",)
     assert spec.parallelism.mode == "ddp"
     assert spec.artifacts.root == Path("runs")
+    assert spec.artifacts.wandb_enabled is False
+    assert spec.artifacts.wandb_project == "jaxtitan"
+    assert spec.artifacts.wandb_entity is None
+    assert spec.artifacts.wandb_group is None
+    assert spec.artifacts.wandb_tags == ()
+    assert spec.artifacts.wandb_mode == "online"
 
 
 def test_load_config_accepts_explicit_model_runtime_fields(tmp_path: Path) -> None:
@@ -349,6 +355,54 @@ peak_lr = 0.0006
     assert spec.optimizer.adamw_fallback_schedule.peak_lr == 0.0006
 
 
+def test_load_config_accepts_wandb_artifacts_section(tmp_path: Path) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG
+        + """
+[artifacts]
+wandb_enabled = true
+wandb_project = "small-lm"
+wandb_entity = "lab"
+wandb_group = "ablations"
+wandb_tags = ["smoke", "muon"]
+wandb_mode = "offline"
+"""
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.artifacts.wandb_enabled is True
+    assert spec.artifacts.wandb_project == "small-lm"
+    assert spec.artifacts.wandb_entity == "lab"
+    assert spec.artifacts.wandb_group == "ablations"
+    assert spec.artifacts.wandb_tags == ("smoke", "muon")
+    assert spec.artifacts.wandb_mode == "offline"
+
+
+@pytest.mark.parametrize(
+    ("artifact_block", "match"),
+    [
+        ('wandb_project = ""', "wandb_project"),
+        ('wandb_mode = "dryrun"', "wandb_mode"),
+        ('wandb_tags = ["ok", ""]', "wandb_tags"),
+        ('wandb_tags = "smoke"', "wandb_tags"),
+    ],
+)
+def test_load_config_rejects_invalid_wandb_artifacts(tmp_path: Path, artifact_block: str, match: str) -> None:
+    config_path = tmp_path / "bad-wandb.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG
+        + f"""
+[artifacts]
+{artifact_block}
+"""
+    )
+
+    with pytest.raises(ConfigError, match=match):
+        load_config(config_path)
+
+
 def test_load_config_accepts_explicit_parallelism_modes(tmp_path: Path) -> None:
     ddp_path = tmp_path / "ddp.toml"
     ddp_path.write_text(MINIMAL_CONFIG + "\n[parallelism]\nmode = \"ddp\"\n")
@@ -561,6 +615,145 @@ def test_load_config_accepts_document_buffer_policy(tmp_path: Path) -> None:
     assert spec.data.document_refill_size == 2
 
 
+def test_load_config_accepts_hf_streaming_data(tmp_path: Path) -> None:
+    config_path = tmp_path / "streaming.toml"
+    config_path.write_text(_streaming_config_text())
+
+    spec = load_config(config_path)
+
+    assert spec.data.mode == "hf_streaming"
+    assert spec.data.train_manifest is None
+    assert spec.data.tokenizer_id == "gpt2"
+    assert spec.data.order == "sequential"
+    assert spec.data.hf_streaming is not None
+    assert spec.data.hf_streaming.dataset == "HuggingFaceFW/fineweb"
+    assert spec.data.hf_streaming.name == "sample-10BT"
+    assert spec.data.hf_streaming.split == "train"
+    assert spec.data.hf_streaming.revision == "abc123"
+    assert spec.data.hf_streaming.text_column == "text"
+    assert spec.data.hf_streaming.append_eot is True
+
+
+def test_load_config_accepts_hf_streaming_with_prepared_validation_manifest(tmp_path: Path) -> None:
+    config_path = tmp_path / "streaming-eval.toml"
+    config_path.write_text(
+        _streaming_config_text(validation_manifest='validation_manifest = "data/val/manifest.json"')
+        + """
+[[evals]]
+name = "validation"
+every_steps = 10
+num_batches = 1
+"""
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.data.mode == "hf_streaming"
+    assert spec.data.validation_manifest == Path("data/val/manifest.json")
+    assert len(spec.evals) == 1
+
+
+@pytest.mark.parametrize(
+    ("data_section", "match"),
+    [
+        (
+            """
+[data]
+mode = "hf_streaming"
+tokenizer_id = "gpt2"
+order = "sequential"
+
+[data.hf_streaming]
+dataset = "HuggingFaceFW/fineweb"
+name = "sample-10BT"
+split = "train"
+text_column = "text"
+""",
+            "revision",
+        ),
+        (
+            """
+[data]
+mode = "hf_streaming"
+train_manifest = "data/train/manifest.json"
+tokenizer_id = "gpt2"
+order = "sequential"
+
+[data.hf_streaming]
+dataset = "HuggingFaceFW/fineweb"
+name = "sample-10BT"
+split = "train"
+revision = "abc123"
+text_column = "text"
+""",
+            "train_manifest",
+        ),
+        (
+            """
+[data]
+mode = "hf_streaming"
+tokenizer_id = "gpt2"
+order = "document_buffer"
+shuffle_seed = 1
+document_buffer_size = 4
+document_refill_size = 2
+
+[data.hf_streaming]
+dataset = "HuggingFaceFW/fineweb"
+name = "sample-10BT"
+split = "train"
+revision = "abc123"
+text_column = "text"
+""",
+            "hf_streaming",
+        ),
+        (
+            """
+[data]
+mode = "hf_streaming"
+tokenizer_id = "gpt2"
+order = "sequential"
+worker_count = 1
+
+[data.hf_streaming]
+dataset = "HuggingFaceFW/fineweb"
+name = "sample-10BT"
+split = "train"
+revision = "abc123"
+text_column = "text"
+""",
+            "worker_count",
+        ),
+    ],
+)
+def test_load_config_rejects_invalid_hf_streaming_data(
+    tmp_path: Path,
+    data_section: str,
+    match: str,
+) -> None:
+    config_path = tmp_path / "bad-streaming.toml"
+    config_path.write_text(_replace_data_section(MINIMAL_CONFIG, data_section))
+
+    with pytest.raises(ConfigError, match=match):
+        load_config(config_path)
+
+
+def test_load_config_rejects_hf_streaming_eval_without_validation_manifest(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad-streaming-eval.toml"
+    config_path.write_text(
+        _streaming_config_text()
+        + """
+[[evals]]
+name = "validation"
+every_steps = 10
+num_batches = 1
+"""
+    )
+
+    with pytest.raises(ConfigError, match="validation_manifest"):
+        load_config(config_path)
+
+
 @pytest.mark.parametrize(
     ("replacement", "match"),
     [
@@ -611,3 +804,30 @@ def test_run_spec_json_and_hashes_are_stable(tmp_path: Path) -> None:
     assert resolved_json == run_spec_to_json(spec)
     assert resolved_config_sha256(spec) == sha256(resolved_json.encode("utf-8")).hexdigest()
     assert source_config_sha256(config_path) == sha256(MINIMAL_CONFIG.encode("utf-8")).hexdigest()
+
+
+def _streaming_config_text(*, validation_manifest: str = "") -> str:
+    return _replace_data_section(
+        MINIMAL_CONFIG,
+        f"""
+[data]
+mode = "hf_streaming"
+tokenizer_id = "gpt2"
+{validation_manifest}
+order = "sequential"
+
+[data.hf_streaming]
+dataset = "HuggingFaceFW/fineweb"
+name = "sample-10BT"
+split = "train"
+revision = "abc123"
+text_column = "text"
+append_eot = true
+""",
+    )
+
+
+def _replace_data_section(config: str, replacement: str) -> str:
+    start = config.index("[data]")
+    end = config.index("[training]")
+    return config[:start] + replacement.strip() + "\n\n" + config[end:]

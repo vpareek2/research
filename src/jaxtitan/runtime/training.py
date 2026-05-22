@@ -15,10 +15,12 @@ from jaxtitan.batch import Batch
 from jaxtitan.config import load_config
 from jaxtitan.data import (
     DATA_PIPELINE_BACKEND,
+    HF_STREAMING_BACKEND,
     BatchProvenance,
     DataPipelineState,
     PreparedTokenGrainPipeline,
     TrainingDataPipeline,
+    build_hf_streaming_pipeline,
     build_prepared_token_pipeline,
 )
 from jaxtitan.errors import ContractError
@@ -48,7 +50,13 @@ from jaxtitan.runtime.diagnostics import (
     runtime_execution_mode,
 )
 from jaxtitan.runtime.resume import checkpoint_metadata, validate_resume_compat, validate_resume_metadata
-from jaxtitan.services import LocalArtifactWriter, LocalOrbaxCheckpointService, initialize_run
+from jaxtitan.services import (
+    ArtifactWriter,
+    LocalArtifactWriter,
+    LocalOrbaxCheckpointService,
+    build_artifact_writer,
+    initialize_run,
+)
 from jaxtitan.specs.eval import EvalSpec
 from jaxtitan.specs.run import RunSpec
 from jaxtitan.state import HostState, TrainState
@@ -157,10 +165,12 @@ def run_training(
     if resume:
         if not spec.dirs.run_dir.exists():
             raise ContractError(f"cannot resume missing run directory: {spec.dirs.run_dir}")
-        writer = LocalArtifactWriter(spec.dirs.run_dir)
+        local_writer = LocalArtifactWriter(spec.dirs.run_dir)
+        manifest = None
     else:
         manifest = initialize_run(config_path)
-        writer = LocalArtifactWriter(manifest.run_dir)
+        local_writer = LocalArtifactWriter(manifest.run_dir)
+    writer = build_artifact_writer(spec=spec, local=local_writer, manifest=manifest, resume=resume)
     try:
         writer.append_event(
             {
@@ -172,7 +182,7 @@ def run_training(
                 "artifact_writer": ARTIFACT_WRITER,
                 "model_remat": spec.model.remat,
                 "gradient_accumulation_steps": spec.training.gradient_accumulation_steps,
-                "data_pipeline_backend": DATA_PIPELINE_BACKEND,
+                "data_pipeline_backend": _data_pipeline_backend_name(spec),
                 "data_pipeline_order": spec.data.order,
                 "data_pipeline_shuffle_seed": spec.data.shuffle_seed,
                 "data_pipeline_worker_count": spec.data.worker_count,
@@ -247,11 +257,13 @@ def run_training(
             }
         )
         raise
+    finally:
+        writer.close()
 
 
 def _run_training_initialized(
     spec: RunSpec,
-    writer: LocalArtifactWriter,
+    writer: ArtifactWriter,
     *,
     resume: bool,
     progress: TrainingProgress | None,
@@ -279,6 +291,7 @@ def _run_training_initialized(
         optimizer=optimizer,
         sharding=sharding,
         data_pipeline=data.describe(),
+        wandb=getattr(writer, "wandb_metadata", None),
     )
     writer.write_runtime_diagnostics(runtime_diagnostics.payload)
     train_state = initialize_train_state(
@@ -386,10 +399,7 @@ def _run_training_initialized(
                         runtime_spec.training.gradient_accumulation_steps,
                     )
                 except StopIteration as exc:
-                    raise ContractError(
-                        "prepared train split ended before training.target_tokens was reached; "
-                        f"tokens_seen={_scalar_int(train_state.tokens_seen)} target_tokens={runtime_spec.training.target_tokens}"
-                    ) from exc
+                    raise ContractError(_data_exhausted_message(runtime_spec, data, train_state)) from exc
             with timer.phase("placement"):
                 placed_batch = place_accumulated_batch(batch, sharding)
             if not train_compiled and progress is not None:
@@ -624,6 +634,22 @@ def _moe_balance_name(spec: RunSpec) -> str:
 
 
 def _build_train_data_pipeline(spec: RunSpec) -> TrainingDataPipeline:
+    if spec.data.mode == "hf_streaming":
+        if spec.data.hf_streaming is None:
+            raise ContractError("data.hf_streaming is required when data.mode='hf_streaming'")
+        return build_hf_streaming_pipeline(
+            spec.data.hf_streaming,
+            tokenizer_id=spec.data.tokenizer_id,
+            seq_len=spec.training.seq_len,
+            batch_size=spec.training.global_batch_size,
+            order=spec.data.order,
+            shuffle_seed=spec.data.shuffle_seed,
+            worker_count=spec.data.worker_count,
+            worker_buffer_size=spec.data.worker_buffer_size,
+            prefetch=spec.data.prefetch,
+        )
+    if spec.data.train_manifest is None:
+        raise ContractError("data.train_manifest is required when data.mode='prepared'")
     return build_prepared_token_pipeline(
         spec.data.train_manifest,
         tokenizer_id=spec.data.tokenizer_id,
@@ -641,7 +667,11 @@ def _build_train_data_pipeline(spec: RunSpec) -> TrainingDataPipeline:
 
 
 def _build_validation_eval_data(spec: RunSpec) -> PreparedTokenGrainPipeline:
+    if spec.data.mode == "hf_streaming" and spec.data.validation_manifest is None:
+        raise ContractError("data.validation_manifest is required for eval when data.mode='hf_streaming'")
     manifest = spec.data.validation_manifest if spec.data.validation_manifest is not None else spec.data.train_manifest
+    if manifest is None:
+        raise ContractError("validation eval requires a prepared manifest")
     return PreparedTokenGrainPipeline.from_manifest(
         manifest,
         tokenizer_id=spec.data.tokenizer_id,
@@ -670,6 +700,18 @@ def _next_accumulated_train_batch(
         provenances.append(result.provenance)
         next_state = result.state
     return _stack_accumulated_batches(batches), next_state, _combine_provenance(provenances)
+
+
+def _data_pipeline_backend_name(spec: RunSpec) -> str:
+    return HF_STREAMING_BACKEND if spec.data.mode == "hf_streaming" else DATA_PIPELINE_BACKEND
+
+
+def _data_exhausted_message(spec: RunSpec, data: TrainingDataPipeline, train_state: TrainState) -> str:
+    prefix = "prepared train split" if spec.data.mode == "prepared" else f"{data.describe()['backend']} train data"
+    return (
+        f"{prefix} ended before training.target_tokens was reached; "
+        f"tokens_seen={_scalar_int(train_state.tokens_seen)} target_tokens={spec.training.target_tokens}"
+    )
 
 
 def _stack_accumulated_batches(batches: list[Batch]) -> Batch:
@@ -714,7 +756,7 @@ def _combine_provenance(provenances: list[BatchProvenance]) -> BatchProvenance:
 
 
 def run_validation_eval(
-    writer: LocalArtifactWriter,
+    writer: ArtifactWriter,
     spec: RunSpec,
     eval_spec: EvalSpec,
     eval_step: Any,
@@ -912,7 +954,7 @@ def _metrics_row(
                 "effective_tokens_per_step": provenance.target_tokens,
                 "global_target_tokens": provenance.target_tokens,
                 "per_device_target_tokens": provenance.target_tokens // data_axis_size,
-                "data_pipeline_backend": DATA_PIPELINE_BACKEND,
+                "data_pipeline_backend": _data_pipeline_backend_name(runtime_spec),
                 "data_order": runtime_spec.data.order,
                 "data_worker_count": runtime_spec.data.worker_count,
                 "data_prefetch": runtime_spec.data.prefetch,
@@ -942,7 +984,7 @@ def _document_metric_fields(row_doc_ids: tuple[int, ...] | None) -> dict[str, An
 
 def _save_checkpoint(
     checkpoint_service: LocalOrbaxCheckpointService,
-    writer: LocalArtifactWriter,
+    writer: ArtifactWriter,
     spec: RunSpec,
     train_state: TrainState,
     dataset_state: DataPipelineState,

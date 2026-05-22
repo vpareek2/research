@@ -890,6 +890,7 @@ def data_pipeline_state_to_dict(state: DataPipelineState) -> dict[str, Any]:
 
 
 def data_pipeline_state_from_mapping(raw: Mapping[str, Any]) -> DataPipelineState:
+    manifest_path = _optional_str(raw, "manifest_path", "data pipeline state")
     return DataPipelineState(
         schema_version=_required_int(raw, "schema_version", "data pipeline state"),
         backend=_required_str(raw, "backend", "data pipeline state"),
@@ -900,8 +901,8 @@ def data_pipeline_state_from_mapping(raw: Mapping[str, Any]) -> DataPipelineStat
         worker_count=_required_int(raw, "worker_count", "data pipeline state"),
         worker_buffer_size=_required_int(raw, "worker_buffer_size", "data pipeline state"),
         prefetch=_required_bool(raw, "prefetch", "data pipeline state"),
-        manifest_path=Path(_required_str(raw, "manifest_path", "data pipeline state")),
-        manifest_sha256=_required_str(raw, "manifest_sha256", "data pipeline state"),
+        manifest_path=None if manifest_path is None else Path(manifest_path),
+        manifest_sha256=_optional_str(raw, "manifest_sha256", "data pipeline state"),
         tokenizer_id=_required_str(raw, "tokenizer_id", "data pipeline state"),
         seq_len=_required_int(raw, "seq_len", "data pipeline state"),
         batch_size=_required_int(raw, "batch_size", "data pipeline state"),
@@ -911,7 +912,8 @@ def data_pipeline_state_from_mapping(raw: Mapping[str, Any]) -> DataPipelineStat
         epoch=_required_int(raw, "epoch", "data pipeline state"),
         sampler_summary=_required_str(raw, "sampler_summary", "data pipeline state"),
         source_summary=_required_str(raw, "source_summary", "data pipeline state"),
-        grain_state=dict(_require_mapping(raw.get("grain_state"), "data pipeline state.grain_state")),
+        grain_state=dict(_require_mapping(raw.get("grain_state", {}), "data pipeline state.grain_state")),
+        stream_state=dict(_require_mapping(raw.get("stream_state", {}), "data pipeline state.stream_state")),
     )
 
 

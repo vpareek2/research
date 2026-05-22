@@ -1,0 +1,21 @@
+[source]
+type = "hf"
+dataset = "roneneldan/TinyStories"
+split = "train"
+text_column = "text"
+streaming = true
+
+[tokenizer]
+name = "gpt2"
+append_eot = true
+
+[output]
+path = "data/tinystories_gpt2_smoke"
+max_tokens = 1000000
+val_fraction = 0.001
+shard_tokens = 128000000
+
+[tokenization]
+workers = "auto"
+batch_docs = 256
+queue_batches = 8

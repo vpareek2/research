@@ -7,7 +7,7 @@ from typing import Any
 
 from jaxtitan.config.validate import validate_run_spec
 from jaxtitan.errors import ConfigError, ContractError
-from jaxtitan.specs.data import DataSpec
+from jaxtitan.specs.data import DataSpec, HFStreamingSpec
 from jaxtitan.specs.eval import EvalSpec
 from jaxtitan.specs.generation import GenerationSpec
 from jaxtitan.specs.mesh import MeshSpec
@@ -73,10 +73,16 @@ def run_spec_from_resolved_mapping(raw: Mapping[str, Any]) -> RunSpec:
 
 def _data_spec(raw: Mapping[str, Any]) -> DataSpec:
     validation_manifest = raw.get("validation_manifest")
+    train_manifest = raw.get("train_manifest")
+    streaming_raw = raw.get("hf_streaming")
     return DataSpec(
-        train_manifest=Path(_required_str(raw, "train_manifest", "data")),
+        mode=str(raw.get("mode", "prepared")),
+        train_manifest=None if train_manifest is None else Path(_required_str(raw, "train_manifest", "data")),
         tokenizer_id=_optional_str(raw, "tokenizer_id", "data"),
         validation_manifest=None if validation_manifest is None else Path(_required_str(raw, "validation_manifest", "data")),
+        hf_streaming=None
+        if streaming_raw is None
+        else HFStreamingSpec(**dict(_require_mapping(streaming_raw, "data.hf_streaming"))),
         order=str(raw.get("order", "sequential")),
         shuffle_seed=_optional_int(raw, "shuffle_seed", "data"),
         worker_count=_optional_int_with_default(raw, "worker_count", "data", default=0),

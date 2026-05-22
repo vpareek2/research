@@ -226,6 +226,229 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert (run_dir / "checkpoints" / "000002").is_dir()
 
 
+def test_run_training_writes_hf_streaming_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _patch_hf_stream(monkeypatch, [{"text": "hello world " * 32}])
+    config_path = tmp_path / "streaming.toml"
+    config_path.write_text(_streaming_training_config(target_tokens=4))
+
+    summary = run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "streaming-loop"
+    metrics = _jsonl(run_dir / "metrics" / "train.jsonl")
+    final = json.loads((run_dir / "summaries" / "final.json").read_text())
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+    checkpoint_index = json.loads((run_dir / "checkpoints" / "index.json").read_text())
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+
+    assert summary.status == "completed"
+    assert summary.tokens_seen == 4
+    assert metrics[-1]["data_pipeline_backend"] == "hf_streaming"
+    assert metrics[-1]["data_order"] == "sequential"
+    assert metrics[-1]["token_start"] == 0
+    assert metrics[-1]["token_end"] == 4
+    assert metrics[-1]["target_tokens"] == 4
+    assert diagnostics["data_pipeline"]["backend"] == "hf_streaming"
+    assert diagnostics["data_pipeline"]["source"]["revision"] == "abc123"
+    assert diagnostics["data_pipeline"]["exact_resume"] is True
+    assert final["data_pipeline_backend"] == "hf_streaming"
+    assert checkpoint_index["latest_checkpoint_path"] == "checkpoints/000001"
+    assert manifest["data"]["mode"] == "hf_streaming"
+    assert manifest["data"]["hf_streaming"]["dataset"] == "mock/dataset"
+
+
+def test_run_training_resumes_hf_streaming_checkpoint_deterministically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    rows = [{"text": "alpha beta gamma delta epsilon " * 32}]
+    _patch_hf_stream(monkeypatch, rows)
+    config_path = tmp_path / "streaming.toml"
+    config_path.write_text(_streaming_training_config(target_tokens=4, checkpoint_every_steps=1))
+    first = run_training(config_path)
+    config_path.write_text(_streaming_training_config(target_tokens=8, checkpoint_every_steps=1))
+
+    resumed = run_training(config_path, resume=True)
+
+    run_dir = tmp_path / "runs" / "streaming-loop"
+    metrics = _jsonl(run_dir / "metrics" / "train.jsonl")
+    events = _jsonl(run_dir / "events.jsonl")
+    assert first.steps == 1
+    assert resumed.steps == 2
+    assert resumed.tokens_seen == 8
+    assert [row["step"] for row in metrics] == [1, 2]
+    assert metrics[-1]["token_start"] == 4
+    assert metrics[-1]["token_end"] == 8
+    resumed_event = next(event for event in events if event["type"] == "training_resumed")
+    assert resumed_event["dataset_token_offset"] == 4
+    assert resumed_event["runtime_fingerprint"]
+
+
+def test_run_training_wandb_mirror_logs_metrics_and_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_wandb = _FakeWandbModule()
+    monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
+    manifest = prepared_dataset_factory(
+        "wandb-loop",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            eval_every_steps=1,
+            artifacts_block=_wandb_artifacts_block(),
+        )
+    )
+
+    run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    metadata = json.loads((run_dir / "diagnostics" / "wandb.json").read_text())
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+    logged_payloads = [payload for payload, _step in fake_wandb.logs]
+
+    assert fake_wandb.init_calls[0]["project"] == "jaxtitan-test"
+    assert fake_wandb.init_calls[0]["entity"] == "test-entity"
+    assert fake_wandb.init_calls[0]["group"] == "unit"
+    assert fake_wandb.init_calls[0]["tags"] == ["fake", "runtime"]
+    assert fake_wandb.init_calls[0]["mode"] == "offline"
+    assert fake_wandb.init_calls[0]["resume"] == "allow"
+    assert metadata["wandb_run_id"] == fake_wandb.init_calls[0]["id"]
+    assert metadata["project"] == "jaxtitan-test"
+    assert diagnostics["wandb"]["wandb_run_id"] == metadata["wandb_run_id"]
+    assert any(payload.get("event/training_started") == 1 for payload in logged_payloads)
+    assert any("train/loss" in payload and "data/tokens_seen" in payload for payload in logged_payloads)
+    assert any("eval/loss" in payload for payload in logged_payloads)
+    assert any(payload.get("event/checkpoint_saved") == 1 for payload in logged_payloads)
+    assert any("final/optimizer_groups" in payload for payload in logged_payloads)
+    assert fake_wandb.finished is True
+
+
+def test_run_training_wandb_failure_writes_local_event_and_aborts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_wandb = _FakeWandbModule(fail_on_key="train/loss")
+    monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
+    manifest = prepared_dataset_factory(
+        "wandb-failure",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            artifacts_block=_wandb_artifacts_block(),
+        )
+    )
+
+    with pytest.raises(ContractError, match="W&B mirror failed during train_metrics"):
+        run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    events = _jsonl(run_dir / "events.jsonl")
+    assert any(event["type"] == "wandb_failed" and event["phase"] == "train_metrics" for event in events)
+    assert events[-1]["type"] == "training_failed"
+    assert not (run_dir / "summaries" / "final.json").exists()
+
+
+def test_run_training_wandb_resume_reuses_saved_run_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    first_wandb = _FakeWandbModule()
+    monkeypatch.setitem(sys.modules, "wandb", first_wandb)
+    manifest = prepared_dataset_factory(
+        "wandb-resume",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            artifacts_block=_wandb_artifacts_block(),
+        )
+    )
+    run_training(config_path)
+    metadata = json.loads((tmp_path / "runs" / "loop" / "diagnostics" / "wandb.json").read_text())
+    second_wandb = _FakeWandbModule()
+    monkeypatch.setitem(sys.modules, "wandb", second_wandb)
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            artifacts_block=_wandb_artifacts_block(),
+        )
+    )
+
+    run_training(config_path, resume=True)
+
+    assert second_wandb.init_calls[0]["id"] == metadata["wandb_run_id"]
+    assert second_wandb.init_calls[0]["resume"] == "must"
+
+
+def test_run_training_wandb_resume_requires_saved_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_wandb = _FakeWandbModule()
+    monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
+    manifest = prepared_dataset_factory(
+        "wandb-missing-metadata",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(manifest, target_tokens=8, log_every_steps=1, checkpoint_every_steps=1)
+    )
+    run_training(config_path)
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            artifacts_block=_wandb_artifacts_block(),
+        )
+    )
+
+    with pytest.raises(ContractError, match="diagnostics/wandb.json is missing"):
+        run_training(config_path, resume=True)
+
+    events = _jsonl(tmp_path / "runs" / "loop" / "events.jsonl")
+    assert events[-1]["type"] == "wandb_failed"
+    assert events[-1]["phase"] == "init"
+
+
 def test_run_training_records_muon_optimizer_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1705,6 +1928,7 @@ def _training_config(
     document_buffer_size: int | None = None,
     document_refill_size: int | None = None,
     trinity_moe_balance_name: str | None = None,
+    artifacts_block: str = "",
 ) -> str:
     total_steps_line = "" if total_steps is None else f"total_steps = {total_steps}\n"
     validation_manifest_line = (
@@ -1797,8 +2021,136 @@ axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 
 [parallelism]
 mode = "{parallelism_mode}"
+{artifacts_block}
 {eval_block}
 """
+
+
+class _FakeHFIterable:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self.rows = rows
+        self.index = 0
+
+    def __iter__(self) -> "_FakeHFIterable":
+        return self
+
+    def __next__(self) -> dict[str, object]:
+        if self.index >= len(self.rows):
+            raise StopIteration
+        row = self.rows[self.index]
+        self.index += 1
+        return row
+
+    def state_dict(self) -> dict[str, int]:
+        return {"index": self.index}
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        self.index = int(state.get("index", 0))
+
+
+def _patch_hf_stream(monkeypatch: pytest.MonkeyPatch, rows: list[dict[str, object]]) -> None:
+    monkeypatch.setattr("jaxtitan.data.streaming._load_hf_dataset", lambda _source: _FakeHFIterable(list(rows)))
+
+
+def _streaming_training_config(*, target_tokens: int, checkpoint_every_steps: int = 10) -> str:
+    return f"""
+[run]
+id = "streaming-loop"
+seed = 7
+output_dir = "runs"
+
+[model]
+name = "decoder"
+variant = "tiny"
+vocab_size = 50257
+hidden_size = 8
+intermediate_size = 16
+num_layers = 1
+num_heads = 2
+n_kv_heads = 1
+max_seq_len = 4
+compute_dtype = "float32"
+
+[optimizer]
+name = "adamw"
+weight_decay = 0.0
+
+[optimizer.schedule]
+name = "constant"
+peak_lr = 0.001
+
+[data]
+mode = "hf_streaming"
+tokenizer_id = "gpt2"
+order = "sequential"
+
+[data.hf_streaming]
+dataset = "mock/dataset"
+split = "train"
+revision = "abc123"
+text_column = "text"
+append_eot = true
+
+[training]
+seq_len = 4
+global_batch_size = 1
+target_tokens = {target_tokens}
+log_every_steps = 1
+checkpoint_every_steps = {checkpoint_every_steps}
+
+[mesh]
+axis_names = ["data"]
+axis_sizes = [1]
+
+[parallelism]
+mode = "ddp"
+"""
+
+
+def _wandb_artifacts_block() -> str:
+    return """
+[artifacts]
+wandb_enabled = true
+wandb_project = "jaxtitan-test"
+wandb_entity = "test-entity"
+wandb_group = "unit"
+wandb_tags = ["fake", "runtime"]
+wandb_mode = "offline"
+"""
+
+
+class _FakeWandbRun:
+    def __init__(self, parent: "_FakeWandbModule", run_id: str) -> None:
+        self.parent = parent
+        self.id = run_id
+        self.name = f"run-{run_id}"
+        self.url = f"https://wandb.test/{run_id}"
+        self.summary: dict[str, object] = {}
+
+    def log(self, payload: dict[str, object], *, step: int | None = None) -> None:
+        if self.parent.fail_on_key is not None and self.parent.fail_on_key in payload:
+            raise RuntimeError(f"fake W&B failure for {self.parent.fail_on_key}")
+        self.parent.logs.append((dict(payload), step))
+
+    def finish(self) -> None:
+        self.parent.finished = True
+
+
+class _FakeWandbModule:
+    def __init__(self, *, fail_on_key: str | None = None) -> None:
+        self.fail_on_key = fail_on_key
+        self.init_calls: list[dict[str, object]] = []
+        self.logs: list[tuple[dict[str, object], int | None]] = []
+        self.finished = False
+
+    def init(self, **kwargs: object) -> _FakeWandbRun:
+        self.init_calls.append(dict(kwargs))
+        return _FakeWandbRun(self, str(kwargs["id"]))
+
+    class Table:
+        def __init__(self, *, columns, data) -> None:
+            self.columns = columns
+            self.data = data
 
 
 def _jsonl(path: Path) -> list[dict]:

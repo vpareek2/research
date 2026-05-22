@@ -1,0 +1,22 @@
+[source]
+type = "hf"
+dataset = "HuggingFaceFW/fineweb"
+name = "sample-10BT"
+split = "train"
+text_column = "text"
+streaming = true
+
+[tokenizer]
+name = "gpt2"
+append_eot = true
+
+[output]
+path = "data/fineweb_sample_gpt2"
+max_tokens = 100000000
+val_fraction = 0.001
+shard_tokens = 128000000
+
+[tokenization]
+workers = "auto"
+batch_docs = 256
+queue_batches = 8

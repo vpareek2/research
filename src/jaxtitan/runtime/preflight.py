@@ -205,11 +205,12 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
             "fsdp_axis_size": context.fsdp_axis_size,
         },
         "data": {
+            "mode": runtime_spec.data.mode,
             "train_manifest": runtime_spec.data.train_manifest,
             "tokenizer_id": runtime_spec.data.tokenizer_id,
-            "train_split_start": train_data.split_start,
-            "train_split_end": train_data.split_end,
-            "train_split_tokens": train_data.split_end - train_data.split_start,
+            "train_split_start": None if runtime_spec.data.mode == "hf_streaming" else train_data.split_start,
+            "train_split_end": None if runtime_spec.data.mode == "hf_streaming" else train_data.split_end,
+            "train_split_tokens": None if runtime_spec.data.mode == "hf_streaming" else train_data.split_end - train_data.split_start,
             "pipeline": train_data.describe(),
             "first_batch": {
                 "token_start": train_provenance.token_start,
@@ -335,7 +336,7 @@ def format_preflight_report(report: PreflightReport) -> str:
         ),
         (
             "train data: "
-            f"manifest={data['train_manifest']} tokens={data['train_split_tokens']} "
+            f"mode={data['mode']} manifest={data['train_manifest']} tokens={data['train_split_tokens']} "
             f"first_batch={data['first_batch']['target_tokens']} "
             f"pipeline={data['pipeline']['backend']} order={data['pipeline']['order']} "
             f"documents={data['pipeline']['document_aware']} count={data['pipeline']['document_count']}"

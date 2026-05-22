@@ -1,6 +1,6 @@
 """Explicit dynamic state contracts."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -45,8 +45,8 @@ class DataPipelineState:
     worker_count: int
     worker_buffer_size: int
     prefetch: bool
-    manifest_path: Path
-    manifest_sha256: str
+    manifest_path: Path | None
+    manifest_sha256: str | None
     tokenizer_id: str
     seq_len: int
     batch_size: int
@@ -57,10 +57,13 @@ class DataPipelineState:
     sampler_summary: str
     source_summary: str
     grain_state: dict[str, Any]
+    stream_state: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "manifest_path", Path(self.manifest_path))
+        if self.manifest_path is not None:
+            object.__setattr__(self, "manifest_path", Path(self.manifest_path))
         object.__setattr__(self, "grain_state", dict(self.grain_state))
+        object.__setattr__(self, "stream_state", dict(self.stream_state))
 
 
 @dataclass(frozen=True, slots=True)

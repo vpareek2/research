@@ -25,6 +25,7 @@ def inspect_run(run_dir: str | Path) -> RunInspection:
     final = _read_required_json(run_dir / "summaries" / "final.json", "final summary")
     raw_index = _read_required_json(run_dir / "checkpoints" / "index.json", "checkpoint index")
     diagnostics = _read_optional_json(run_dir / "diagnostics" / "runtime.json", "runtime diagnostics")
+    wandb = _read_optional_json(run_dir / "diagnostics" / "wandb.json", "W&B metadata")
     index = load_checkpoint_index(run_dir)
     _validate_checkpoint_paths(run_dir, raw_index)
     recent_train_metrics = _read_recent_jsonl(run_dir / "metrics" / "train.jsonl")
@@ -50,6 +51,7 @@ def inspect_run(run_dir: str | Path) -> RunInspection:
         "best_checkpoint": None if best is None else _checkpoint_summary(run_dir, best),
         "checkpoints": [_checkpoint_summary(run_dir, record) for record in index.records],
         "diagnostics": _diagnostics_summary(diagnostics),
+        "wandb": _wandb_summary(wandb, diagnostics),
         "router_health": _router_health(final, recent_train_metrics),
         "optimizer_health": _optimizer_health(final, recent_train_metrics),
         "recent_train_metrics": recent_train_metrics,
@@ -104,6 +106,14 @@ def format_run_inspection(inspection: RunInspection) -> str:
                 f"workers={data_pipeline['worker_count']} prefetch={data_pipeline['prefetch']} "
                 f"documents={data_pipeline['document_aware']} count={data_pipeline['document_count']}"
             )
+    wandb = payload["wandb"]
+    if wandb is not None:
+        suffix = "" if wandb["url"] is None else f" url={wandb['url']}"
+        lines.append(
+            "wandb: "
+            f"project={wandb['project']} entity={wandb['entity']} mode={wandb['mode']} "
+            f"id={wandb['wandb_run_id']}{suffix}"
+        )
     router_health = payload["router_health"]
     if router_health is not None:
         worst = router_health["worst_layer"]
@@ -287,6 +297,33 @@ def _diagnostics_summary(raw: Mapping[str, Any] | None) -> dict[str, Any] | None
         "parallelism": None if parallelism is None else _parallelism_summary(parallelism),
         "sharding": sharding,
         "data_pipeline": None if data_pipeline is None else _data_pipeline_summary(data_pipeline),
+        "wandb": _wandb_summary_from_raw(raw.get("wandb")) if isinstance(raw.get("wandb"), Mapping) else None,
+    }
+
+
+def _wandb_summary(
+    raw: Mapping[str, Any] | None,
+    diagnostics: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if raw is not None:
+        return _wandb_summary_from_raw(raw)
+    if diagnostics is not None and isinstance(diagnostics.get("wandb"), Mapping):
+        return _wandb_summary_from_raw(diagnostics["wandb"])
+    return None
+
+
+def _wandb_summary_from_raw(raw: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": raw.get("enabled"),
+        "wandb_run_id": raw.get("wandb_run_id"),
+        "project": raw.get("project"),
+        "entity": raw.get("entity"),
+        "group": raw.get("group"),
+        "tags": raw.get("tags"),
+        "mode": raw.get("mode"),
+        "url": raw.get("url"),
+        "name": raw.get("name"),
+        "resume": raw.get("resume"),
     }
 
 

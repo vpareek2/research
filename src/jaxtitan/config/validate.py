@@ -35,3 +35,5 @@ def validate_run_spec(spec: RunSpec) -> None:
         raise ConfigError("parallelism.mode='ddp' requires mesh fsdp axis size to be 1")
     if spec.parallelism.mode in {"zero2", "fsdp"} and "fsdp" not in axis_sizes:
         raise ConfigError(f"parallelism.mode='{spec.parallelism.mode}' requires a mesh fsdp axis")
+    if spec.data.mode == "hf_streaming" and spec.evals and spec.data.validation_manifest is None:
+        raise ConfigError("data.validation_manifest is required for evals when data.mode='hf_streaming'")

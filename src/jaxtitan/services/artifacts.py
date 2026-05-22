@@ -29,11 +29,15 @@ class ArtifactWriter(Protocol):
 
     def write_runtime_diagnostics(self, diagnostics: Mapping[str, Any]) -> None: ...
 
+    def write_wandb_metadata(self, metadata: Mapping[str, Any]) -> None: ...
+
     def write_checkpoint_index(self, index: Mapping[str, Any]) -> None: ...
 
     def append_checkpoint_sample(self, step: int, row: Mapping[str, Any]) -> None: ...
 
     def write_summary(self, summary: Mapping[str, Any]) -> None: ...
+
+    def close(self) -> None: ...
 
 
 def initialize_run(config_path: str | Path) -> RunManifest:
@@ -42,7 +46,6 @@ def initialize_run(config_path: str | Path) -> RunManifest:
     source_path = Path(config_path)
     spec = load_config(source_path)
     source_toml = source_path.read_text()
-    dataset_manifest = validate_dataset_manifest(spec.data.train_manifest, tokenizer_id=spec.data.tokenizer_id)
     created_at = _utc_now()
     source_hash = source_config_sha256(source_path)
     resolved_hash = resolved_config_sha256(spec)
@@ -66,7 +69,7 @@ def initialize_run(config_path: str | Path) -> RunManifest:
             "summaries": "summaries",
         },
         run_dir=spec.dirs.run_dir,
-        data=dataset_manifest_summary(dataset_manifest),
+        data=_data_summary(spec),
     )
     LocalArtifactWriter.initialize(source_toml=source_toml, resolved=spec, manifest=manifest)
     return manifest
@@ -129,6 +132,9 @@ class LocalArtifactWriter:
     def write_runtime_diagnostics(self, diagnostics: Mapping[str, Any]) -> None:
         self._write_json(self.run_dir / "diagnostics" / "runtime.json", diagnostics)
 
+    def write_wandb_metadata(self, metadata: Mapping[str, Any]) -> None:
+        self._write_json(self.run_dir / "diagnostics" / "wandb.json", metadata)
+
     def write_checkpoint_index(self, index: Mapping[str, Any]) -> None:
         self._write_json(self.run_dir / "checkpoints" / "index.json", index)
 
@@ -139,6 +145,9 @@ class LocalArtifactWriter:
 
     def write_summary(self, summary: Mapping[str, Any]) -> None:
         self._write_json(self.run_dir / "summaries" / "final.json", summary)
+
+    def close(self) -> None:
+        return None
 
     def _create_layout(self) -> None:
         for path in (
@@ -162,6 +171,38 @@ class LocalArtifactWriter:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(_normalize(value), sort_keys=True, separators=(",", ":"))
+
+
+def _data_summary(spec: RunSpec) -> dict[str, Any]:
+    if spec.data.mode == "prepared":
+        if spec.data.train_manifest is None:
+            raise ContractError("data.train_manifest is required when data.mode='prepared'")
+        dataset_manifest = validate_dataset_manifest(spec.data.train_manifest, tokenizer_id=spec.data.tokenizer_id)
+        summary = dataset_manifest_summary(dataset_manifest)
+        summary["mode"] = "prepared"
+        return summary
+    if spec.data.mode == "hf_streaming":
+        if spec.data.hf_streaming is None:
+            raise ContractError("data.hf_streaming is required when data.mode='hf_streaming'")
+        source = spec.data.hf_streaming
+        return {
+            "mode": "hf_streaming",
+            "tokenizer_id": spec.data.tokenizer_id,
+            "train_manifest": None,
+            "validation_manifest": None
+            if spec.data.validation_manifest is None
+            else spec.data.validation_manifest.as_posix(),
+            "hf_streaming": {
+                "dataset": source.dataset,
+                "name": source.name,
+                "data_dir": source.data_dir,
+                "split": source.split,
+                "revision": source.revision,
+                "text_column": source.text_column,
+                "append_eot": source.append_eot,
+            },
+        }
+    raise ContractError(f"unsupported data.mode={spec.data.mode!r}")
 
 
 def _normalize(value: Any) -> Any:

@@ -244,9 +244,29 @@ def test_explicit_cosine_total_steps_allows_target_change(tmp_path: Path, prepar
     assert build_resume_compat(first).runtime_fingerprint == build_resume_compat(second).runtime_fingerprint
 
 
+def test_hf_streaming_data_identity_is_in_resume_fingerprint(tmp_path: Path, prepared_dataset_factory) -> None:
+    prepared = _runtime_spec(tmp_path, _manifest(prepared_dataset_factory, "prepared-vs-streaming"))
+    first = _streaming_runtime_spec(tmp_path, revision="abc123")
+    second = _streaming_runtime_spec(tmp_path, revision="def456")
+    first_payload = build_resume_compat(first).payload
+
+    assert first_payload["data"]["mode"] == "hf_streaming"
+    assert first_payload["data"]["train_manifest"] is None
+    assert first_payload["data"]["training_pipeline"]["backend"] == "hf_streaming"
+    assert first_payload["data"]["training_pipeline"]["source"]["revision"] == "abc123"
+    assert build_resume_compat(first).runtime_fingerprint != build_resume_compat(second).runtime_fingerprint
+    assert build_resume_compat(first).runtime_fingerprint != build_resume_compat(prepared).runtime_fingerprint
+
+
 def _runtime_spec(tmp_path: Path, train_manifest: Path, **kwargs):
     config_path = tmp_path / f"resume-{len(list(tmp_path.glob('resume-*.toml')))}.toml"
     config_path.write_text(_config_text(train_manifest, **kwargs))
+    return _with_runtime_schedule_steps(load_config(config_path))
+
+
+def _streaming_runtime_spec(tmp_path: Path, *, revision: str):
+    config_path = tmp_path / f"streaming-resume-{len(list(tmp_path.glob('streaming-resume-*.toml')))}.toml"
+    config_path.write_text(_streaming_config_text(revision=revision))
     return _with_runtime_schedule_steps(load_config(config_path))
 
 
@@ -368,6 +388,66 @@ axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 
 [parallelism]
 mode = "{parallelism_mode}"
+"""
+
+
+def _streaming_config_text(*, revision: str) -> str:
+    return f"""
+[run]
+id = "smoke"
+seed = 11
+output_dir = "runs"
+
+[model]
+name = "decoder"
+variant = "tiny"
+vocab_size = 50257
+hidden_size = 8
+intermediate_size = 16
+num_layers = 1
+num_heads = 2
+n_kv_heads = 1
+max_seq_len = 4
+compute_dtype = "float32"
+
+[optimizer]
+name = "adamw"
+weight_decay = 0.0
+
+[optimizer.schedule]
+name = "constant"
+peak_lr = 0.001
+
+[data]
+mode = "hf_streaming"
+tokenizer_id = "gpt2"
+order = "sequential"
+
+[data.hf_streaming]
+dataset = "mock/dataset"
+name = "mock-config"
+split = "train"
+revision = "{revision}"
+text_column = "text"
+append_eot = true
+
+[training]
+seq_len = 4
+global_batch_size = 2
+target_tokens = 128
+precision = "bf16"
+log_every_steps = 1
+checkpoint_every_steps = 10
+
+[training.loss]
+z_loss_weight = 0.0
+
+[mesh]
+axis_names = ["data"]
+axis_sizes = [1]
+
+[parallelism]
+mode = "ddp"
 """
 
 

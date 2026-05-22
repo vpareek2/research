@@ -10,7 +10,7 @@ from typing import Any
 import jax
 import numpy as np
 
-from jaxtitan.data import data_pipeline_compat_payload, dataset_manifest_sha256
+from jaxtitan.data import data_pipeline_compat_payload, dataset_manifest_sha256, hf_streaming_compat_payload
 from jaxtitan.errors import ContractError
 from jaxtitan.optim import optimizer_policy_summary
 from jaxtitan.services import CheckpointRestore
@@ -44,16 +44,34 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
         },
         "mesh": _normalize(spec.mesh),
         "parallelism": _normalize(spec.parallelism),
-        "data": {
+        "data": _data_compat_payload(spec),
+        "training": {
+            "precision": spec.training.precision,
+            "seq_len": spec.training.seq_len,
+            "global_batch_size": spec.training.global_batch_size,
+            "gradient_accumulation_steps": spec.training.gradient_accumulation_steps,
+            "eval_every_steps": spec.training.eval_every_steps,
+            "grad_clip_norm": spec.training.grad_clip_norm,
+            "loss": _normalize(spec.training.loss),
+        },
+    }
+    payload = _normalize(payload)
+    return ResumeCompatibility(payload=payload, runtime_fingerprint=_hash(payload))
+
+
+def _data_compat_payload(spec: RunSpec) -> dict[str, Any]:
+    validation_manifest = spec.data.validation_manifest
+    validation_manifest_sha256 = None if validation_manifest is None else dataset_manifest_sha256(validation_manifest)
+    if spec.data.mode == "prepared":
+        if spec.data.train_manifest is None:
+            raise ContractError("data.train_manifest is required when data.mode='prepared'")
+        return {
+            "mode": "prepared",
             "train_manifest": spec.data.train_manifest.as_posix(),
             "train_manifest_sha256": dataset_manifest_sha256(spec.data.train_manifest),
             "tokenizer_id": spec.data.tokenizer_id,
-            "validation_manifest": None
-            if spec.data.validation_manifest is None
-            else spec.data.validation_manifest.as_posix(),
-            "validation_manifest_sha256": None
-            if spec.data.validation_manifest is None
-            else dataset_manifest_sha256(spec.data.validation_manifest),
+            "validation_manifest": None if validation_manifest is None else validation_manifest.as_posix(),
+            "validation_manifest_sha256": validation_manifest_sha256,
             "training_pipeline": data_pipeline_compat_payload(
                 spec.data.train_manifest,
                 tokenizer_id=spec.data.tokenizer_id,
@@ -68,19 +86,25 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
                 document_buffer_size=spec.data.document_buffer_size,
                 document_refill_size=spec.data.document_refill_size,
             ),
-        },
-        "training": {
-            "precision": spec.training.precision,
-            "seq_len": spec.training.seq_len,
-            "global_batch_size": spec.training.global_batch_size,
-            "gradient_accumulation_steps": spec.training.gradient_accumulation_steps,
-            "eval_every_steps": spec.training.eval_every_steps,
-            "grad_clip_norm": spec.training.grad_clip_norm,
-            "loss": _normalize(spec.training.loss),
-        },
-    }
-    payload = _normalize(payload)
-    return ResumeCompatibility(payload=payload, runtime_fingerprint=_hash(payload))
+        }
+    if spec.data.mode == "hf_streaming":
+        if spec.data.hf_streaming is None or spec.data.tokenizer_id is None:
+            raise ContractError("data.hf_streaming and data.tokenizer_id are required when data.mode='hf_streaming'")
+        return {
+            "mode": "hf_streaming",
+            "train_manifest": None,
+            "train_manifest_sha256": None,
+            "tokenizer_id": spec.data.tokenizer_id,
+            "validation_manifest": None if validation_manifest is None else validation_manifest.as_posix(),
+            "validation_manifest_sha256": validation_manifest_sha256,
+            "training_pipeline": hf_streaming_compat_payload(
+                spec.data.hf_streaming,
+                tokenizer_id=spec.data.tokenizer_id,
+                seq_len=spec.training.seq_len,
+                batch_size=spec.training.global_batch_size,
+            ),
+        }
+    raise ContractError(f"unsupported data.mode={spec.data.mode!r}")
 
 
 def checkpoint_metadata(

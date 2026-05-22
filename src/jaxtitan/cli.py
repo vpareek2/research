@@ -28,11 +28,23 @@ def build_parser() -> argparse.ArgumentParser:
     data_parser = commands.add_parser("data", help="Inspect and validate prepared data artifacts.")
     data_commands = data_parser.add_subparsers(dest="data_command", required=True)
 
+    data_prepare_parser = data_commands.add_parser("prepare", help="Prepare a text dataset for training.")
+    data_prepare_parser.add_argument("path", help="Path to a Jaxtitan data-prepare TOML config.")
+    data_prepare_parser.add_argument("--overwrite", action="store_true", help="Replace an existing output directory.")
+    data_prepare_parser.add_argument("--json", action="store_true", help="Print prepared manifest summary JSON.")
+
     data_check_parser = data_commands.add_parser("check", help="Validate a prepared-token manifest.")
     data_check_parser.add_argument("path", help="Path to a prepared-token manifest JSON file.")
     data_check_parser.add_argument("--tokenizer", required=True, help="Expected tokenizer id.")
     data_check_parser.add_argument("--verify-checksums", action="store_true", help="Verify shard and token-byte checksums.")
     data_check_parser.add_argument("--json", action="store_true", help="Print validated manifest JSON.")
+
+    data_inspect_parser = data_commands.add_parser("inspect", help="Inspect a prepared-token manifest.")
+    data_inspect_parser.add_argument("path", help="Path to a prepared-token manifest JSON file.")
+    data_inspect_parser.add_argument("--tokenizer", help="Expected tokenizer id.")
+    data_inspect_parser.add_argument("--verify-checksums", action="store_true", help="Verify shard and token-byte checksums.")
+    data_inspect_parser.add_argument("--seq-len", type=int, help="Report record counts for this sequence length.")
+    data_inspect_parser.add_argument("--json", action="store_true", help="Print inspection JSON.")
 
     run_parser = commands.add_parser("run", help="Create and inspect local run artifacts.")
     run_commands = run_parser.add_subparsers(dest="run_command", required=True)
@@ -89,6 +101,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"valid: {spec.run_id}")
             return 0
 
+        if args.command == "data" and args.data_command == "prepare":
+            from jaxtitan.data import format_prepare_result, prepare_dataset, prepare_result_to_json
+
+            result = prepare_dataset(args.path, overwrite=args.overwrite, quiet=args.json)
+            if args.json:
+                print(prepare_result_to_json(result))
+            else:
+                print(format_prepare_result(result))
+            return 0
+
         if args.command == "data" and args.data_command == "check":
             from jaxtitan.data import prepared_dataset_manifest_to_json, validate_dataset_manifest
 
@@ -101,6 +123,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(prepared_dataset_manifest_to_json(manifest))
             else:
                 print(f"valid: {manifest.manifest_path} tokens={manifest.num_tokens}")
+            return 0
+
+        if args.command == "data" and args.data_command == "inspect":
+            from jaxtitan.data import data_inspection_to_json, format_data_inspection, inspect_dataset_manifest
+
+            inspection = inspect_dataset_manifest(
+                args.path,
+                tokenizer_id=args.tokenizer,
+                verify_checksums=args.verify_checksums,
+                seq_len=args.seq_len,
+            )
+            if args.json:
+                print(data_inspection_to_json(inspection))
+            else:
+                print(format_data_inspection(inspection))
             return 0
 
         if args.command == "run" and args.run_command == "init":

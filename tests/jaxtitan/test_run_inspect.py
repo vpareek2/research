@@ -133,6 +133,46 @@ def test_inspect_run_reports_moe_router_and_optimizer_health(
     assert "optimizer health:" in text
 
 
+def test_inspect_run_reports_wandb_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("inspect-wandb", shard_token_groups=(tuple(range(0, 50)),), train_tokens=25)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_training_config(manifest))
+    run_training(config_path)
+    wandb_metadata = {
+        "schema_version": 1,
+        "enabled": True,
+        "wandb_run_id": "loop-abc",
+        "project": "jaxtitan-test",
+        "entity": "team",
+        "group": "unit",
+        "tags": ["inspect"],
+        "mode": "offline",
+        "url": "https://wandb.test/loop-abc",
+        "name": "run-loop-abc",
+        "resume": "allow",
+    }
+    run_dir = tmp_path / "runs" / "loop"
+    (run_dir / "diagnostics" / "wandb.json").write_text(json.dumps(wandb_metadata))
+    runtime_path = run_dir / "diagnostics" / "runtime.json"
+    runtime = json.loads(runtime_path.read_text())
+    runtime["wandb"] = wandb_metadata
+    runtime_path.write_text(json.dumps(runtime))
+
+    inspection = inspect_run(run_dir)
+    payload = inspection.payload
+    text = format_run_inspection(inspection)
+
+    assert payload["wandb"]["wandb_run_id"] == "loop-abc"
+    assert payload["diagnostics"]["wandb"]["project"] == "jaxtitan-test"
+    assert "wandb: project=jaxtitan-test entity=team mode=offline id=loop-abc" in text
+    assert json.loads(run_inspection_to_json(inspection))["wandb"]["mode"] == "offline"
+
+
 def test_inspect_run_missing_required_artifact_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -11,6 +11,7 @@ from jaxtitan.config.schema import (
     TomlDataSection,
     TomlEvalSection,
     TomlGenerationSection,
+    TomlHFStreamingSection,
     TomlMeshSection,
     TomlMoeBalanceSection,
     TomlModelSection,
@@ -26,6 +27,7 @@ from jaxtitan.config.schema import (
 from jaxtitan.config.validate import validate_run_spec
 from jaxtitan.errors import ConfigError, ContractError
 from jaxtitan.specs.data import DataSpec
+from jaxtitan.specs.data import HFStreamingSpec
 from jaxtitan.specs.eval import EvalSpec
 from jaxtitan.specs.generation import GenerationSpec
 from jaxtitan.specs.mesh import MeshSpec
@@ -79,11 +81,26 @@ def run_spec_from_mapping(raw: Mapping[str, Any]) -> RunSpec:
                 if optimizer_section.adamw_fallback_schedule is None
                 else ScheduleSpec(**asdict(optimizer_section.adamw_fallback_schedule)),
             ),
-            data=DataSpec(**asdict(data_section)),
+            data=DataSpec(
+                mode=data_section.mode,
+                train_manifest=data_section.train_manifest,
+                tokenizer_id=data_section.tokenizer_id,
+                validation_manifest=data_section.validation_manifest,
+                hf_streaming=None
+                if data_section.hf_streaming is None
+                else HFStreamingSpec(**asdict(data_section.hf_streaming)),
+                order=data_section.order,
+                shuffle_seed=data_section.shuffle_seed,
+                worker_count=data_section.worker_count,
+                worker_buffer_size=data_section.worker_buffer_size,
+                prefetch=data_section.prefetch,
+                document_buffer_size=data_section.document_buffer_size,
+                document_refill_size=data_section.document_refill_size,
+            ),
             mesh=MeshSpec(axis_names=mesh_section.axis_names, axis_sizes=mesh_section.axis_sizes),
             training=TrainingSpec(**asdict(training_section)),
             parallelism=ParallelismSpec(**asdict(parallelism_section)),
-            artifacts=ArtifactSpec(root=run_section.output_dir, wandb_enabled=artifact_section.wandb_enabled),
+            artifacts=ArtifactSpec(root=run_section.output_dir, **asdict(artifact_section)),
             evals=tuple(EvalSpec(**asdict(section)) for section in eval_sections),
             generation=None if generation_section is None else GenerationSpec(**asdict(generation_section)),
         )
@@ -219,10 +236,16 @@ def _schedule_section(raw: Mapping[str, Any]) -> TomlScheduleSection:
 
 
 def _data_section(raw: Mapping[str, Any]) -> TomlDataSection:
+    mode = _optional_str(raw, "mode", "data", default="prepared")
+    streaming_raw = raw.get("hf_streaming")
     return TomlDataSection(
-        train_manifest=Path(_required_str(raw, "train_manifest", "data")),
+        mode=mode,
+        train_manifest=_optional_path(raw, "train_manifest", "data"),
         tokenizer_id=_optional_str(raw, "tokenizer_id", "data", default=None),
         validation_manifest=_optional_path(raw, "validation_manifest", "data"),
+        hf_streaming=None
+        if streaming_raw is None
+        else _hf_streaming_section(_ensure_mapping(streaming_raw, "data.hf_streaming")),
         order=_optional_str(raw, "order", "data", default="sequential"),
         shuffle_seed=_optional_int(raw, "shuffle_seed", "data"),
         worker_count=_optional_int_with_default(raw, "worker_count", "data", default=0),
@@ -230,6 +253,18 @@ def _data_section(raw: Mapping[str, Any]) -> TomlDataSection:
         prefetch=_optional_bool(raw, "prefetch", "data", default=False),
         document_buffer_size=_optional_int(raw, "document_buffer_size", "data"),
         document_refill_size=_optional_int(raw, "document_refill_size", "data"),
+    )
+
+
+def _hf_streaming_section(raw: Mapping[str, Any]) -> TomlHFStreamingSection:
+    return TomlHFStreamingSection(
+        dataset=_required_str(raw, "dataset", "data.hf_streaming"),
+        split=_required_str(raw, "split", "data.hf_streaming"),
+        revision=_required_str(raw, "revision", "data.hf_streaming"),
+        name=_optional_str(raw, "name", "data.hf_streaming", default=None),
+        data_dir=_optional_str(raw, "data_dir", "data.hf_streaming", default=None),
+        text_column=_optional_str(raw, "text_column", "data.hf_streaming", default="text"),
+        append_eot=_optional_bool(raw, "append_eot", "data.hf_streaming", default=True),
     )
 
 
@@ -267,7 +302,14 @@ def _parallelism_section(raw: Mapping[str, Any]) -> TomlParallelismSection:
 
 
 def _artifact_section(raw: Mapping[str, Any]) -> TomlArtifactSection:
-    return TomlArtifactSection(wandb_enabled=bool(raw.get("wandb_enabled", False)))
+    return TomlArtifactSection(
+        wandb_enabled=_optional_bool(raw, "wandb_enabled", "artifacts", default=False),
+        wandb_project=_optional_str(raw, "wandb_project", "artifacts", default="jaxtitan"),
+        wandb_entity=_optional_str(raw, "wandb_entity", "artifacts", default=None),
+        wandb_group=_optional_str(raw, "wandb_group", "artifacts", default=None),
+        wandb_tags=tuple(_optional_str_list(raw, "wandb_tags", "artifacts")),
+        wandb_mode=_optional_str(raw, "wandb_mode", "artifacts", default="online"),
+    )
 
 
 def _eval_section(value: Any) -> TomlEvalSection:
@@ -355,6 +397,18 @@ def _optional_bool(raw: Mapping[str, Any], key: str, section: str, *, default: b
     if not isinstance(value, bool):
         raise ConfigError(f"{section}.{key} must be a boolean")
     return value
+
+
+def _optional_str_list(raw: Mapping[str, Any], key: str, section: str) -> list[str]:
+    value = raw.get(key, [])
+    if not isinstance(value, list):
+        raise ConfigError(f"{section}.{key} must be a list of strings")
+    result = []
+    for idx, item in enumerate(value):
+        if not isinstance(item, str) or not item:
+            raise ConfigError(f"{section}.{key}[{idx}] must be a non-empty string")
+        result.append(item)
+    return result
 
 
 def _optional_path(raw: Mapping[str, Any], key: str, section: str) -> Path | None:

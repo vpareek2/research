@@ -604,6 +604,28 @@ def test_run_preflight_rejects_missing_train_manifest(
     assert not (tmp_path / "runs" / "loop").exists()
 
 
+def test_run_preflight_accepts_hf_streaming_train_pipeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _patch_hf_stream(monkeypatch, [{"text": "hello world " * 32}])
+    config_path = tmp_path / "streaming.toml"
+    config_path.write_text(_streaming_preflight_config())
+
+    report = run_preflight(config_path)
+    payload = report.payload
+
+    assert payload["status"] == "passed"
+    assert payload["data"]["mode"] == "hf_streaming"
+    assert payload["data"]["train_manifest"] is None
+    assert payload["data"]["train_split_tokens"] is None
+    assert payload["data"]["pipeline"]["backend"] == "hf_streaming"
+    assert payload["data"]["pipeline"]["source"]["dataset"] == "mock/dataset"
+    assert payload["data"]["pipeline"]["exact_resume"] is True
+    assert payload["data"]["first_batch"]["target_tokens"] == 4
+
+
 def test_run_preflight_rejects_too_small_train_split(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -755,4 +777,82 @@ axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 [parallelism]
 mode = "{parallelism_mode}"
 {eval_block}
+"""
+
+
+class _FakeHFIterable:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self.rows = rows
+        self.index = 0
+
+    def __iter__(self) -> "_FakeHFIterable":
+        return self
+
+    def __next__(self) -> dict[str, object]:
+        if self.index >= len(self.rows):
+            raise StopIteration
+        row = self.rows[self.index]
+        self.index += 1
+        return row
+
+    def state_dict(self) -> dict[str, int]:
+        return {"index": self.index}
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        self.index = int(state.get("index", 0))
+
+
+def _patch_hf_stream(monkeypatch: pytest.MonkeyPatch, rows: list[dict[str, object]]) -> None:
+    monkeypatch.setattr("jaxtitan.data.streaming._load_hf_dataset", lambda _source: _FakeHFIterable(list(rows)))
+
+
+def _streaming_preflight_config() -> str:
+    return """
+[run]
+id = "loop"
+seed = 7
+output_dir = "runs"
+
+[model]
+name = "decoder"
+variant = "tiny"
+vocab_size = 50257
+hidden_size = 8
+intermediate_size = 16
+num_layers = 1
+num_heads = 2
+n_kv_heads = 1
+max_seq_len = 4
+compute_dtype = "float32"
+
+[optimizer]
+name = "adamw"
+weight_decay = 0.0
+
+[optimizer.schedule]
+name = "constant"
+peak_lr = 0.001
+
+[data]
+mode = "hf_streaming"
+tokenizer_id = "gpt2"
+order = "sequential"
+
+[data.hf_streaming]
+dataset = "mock/dataset"
+split = "train"
+revision = "abc123"
+text_column = "text"
+append_eot = true
+
+[training]
+seq_len = 4
+global_batch_size = 1
+target_tokens = 4
+log_every_steps = 1
+checkpoint_every_steps = 10
+
+[mesh]
+axis_names = ["data"]
+axis_sizes = [1]
 """

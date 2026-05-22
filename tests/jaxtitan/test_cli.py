@@ -3,6 +3,10 @@ import sys
 import json
 from pathlib import Path
 
+import pytest
+
+import jaxtitan.cli as cli
+
 MINIMAL_CONFIG = """
 [run]
 id = "smoke"
@@ -231,6 +235,122 @@ def test_cli_data_check_tokenizer_mismatch_fails_cleanly(tmp_path: Path, prepare
     assert "Traceback" not in result.stderr
 
 
+def test_cli_data_prepare_human_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr("jaxtitan.data.prepare.load_hf_texts", lambda source: ["hello", "world"])
+    config_path = tmp_path / "prepare.toml"
+    output = tmp_path / "prepared"
+    config_path.write_text(_prepare_data_config(output), encoding="utf-8")
+
+    code = cli.main(["data", "prepare", str(config_path)])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "manifest:" in captured.out
+    assert "tokens:" in captured.out
+    assert "uv run jaxtitan data check" in captured.out
+    assert "[data]" in captured.out
+    assert 'order = "document_buffer"' in captured.out
+    assert (output / "manifest.json").is_file()
+
+
+def test_cli_data_prepare_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr("jaxtitan.data.prepare.load_hf_texts", lambda source: ["hello"])
+    config_path = tmp_path / "prepare.toml"
+    config_path.write_text(_prepare_data_config(tmp_path / "prepared-json"), encoding="utf-8")
+
+    code = cli.main(["data", "prepare", str(config_path), "--json"])
+    captured = capsys.readouterr()
+
+    payload = json.loads(captured.out)
+    assert code == 0
+    assert payload["manifest"]["tokenizer_id"] == "gpt2"
+    assert payload["source"]["dataset"] == "HuggingFaceFW/fineweb"
+    assert captured.err == ""
+
+
+def test_cli_data_prepare_existing_output_fails_cleanly(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = tmp_path / "existing"
+    output.mkdir()
+    config_path = tmp_path / "prepare.toml"
+    config_path.write_text(_prepare_data_config(output), encoding="utf-8")
+
+    code = cli.main(["data", "prepare", str(config_path), "--json"])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "already exists" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_cli_data_prepare_bad_text_row_fails_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr("jaxtitan.data.prepare.load_hf_texts", lambda source: [object()])
+    config_path = tmp_path / "prepare.toml"
+    config_path.write_text(_prepare_data_config(tmp_path / "bad-text"), encoding="utf-8")
+
+    code = cli.main(["data", "prepare", str(config_path), "--json"])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "text rows must be strings" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_cli_data_inspect_human_output(
+    tmp_path: Path,
+    prepared_dataset: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = cli.main(["data", "inspect", str(prepared_dataset), "--tokenizer", "toy-tokenizer", "--seq-len", "4"])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "manifest:" in captured.out
+    assert "records: seq_len=4 train=1 val=0" in captured.out
+    assert "training config:" in captured.out
+    assert 'train_manifest = "' in captured.out
+
+
+def test_cli_data_inspect_json(
+    prepared_dataset: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = cli.main(["data", "inspect", str(prepared_dataset), "--tokenizer", "toy-tokenizer", "--json"])
+    captured = capsys.readouterr()
+
+    payload = json.loads(captured.out)
+    assert code == 0
+    assert payload["manifest"]["tokenizer_id"] == "toy-tokenizer"
+    assert payload["data_config_toml"].startswith("[data]")
+    assert captured.err == ""
+
+
+def test_cli_data_inspect_invalid_seq_len_fails_cleanly(
+    prepared_dataset: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = cli.main(["data", "inspect", str(prepared_dataset), "--seq-len", "0"])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "seq-len" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_cli_run_preflight_invalid_data_fails_cleanly(tmp_path: Path) -> None:
     config_path = tmp_path / "jaxtitan.toml"
     config_path.write_text(_preflight_config(tmp_path / "missing" / "manifest.json"))
@@ -289,4 +409,31 @@ checkpoint_every_steps = 10
 [mesh]
 axis_names = ["data"]
 axis_sizes = [1]
+"""
+
+
+def _prepare_data_config(output: Path) -> str:
+    return f"""
+[source]
+type = "hf"
+dataset = "HuggingFaceFW/fineweb"
+name = "sample-10BT"
+split = "train"
+text_column = "text"
+streaming = true
+
+[tokenizer]
+name = "gpt2"
+append_eot = true
+
+[output]
+path = "{output.as_posix()}"
+max_tokens = 32
+val_fraction = 0.25
+shard_tokens = 8
+
+[tokenization]
+workers = 1
+batch_docs = 2
+queue_batches = 1
 """

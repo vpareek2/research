@@ -50,6 +50,8 @@ def evaluate_checkpoint(run_dir: str | Path, selector: str) -> dict[str, Any]:
         train_row,
     )
     manifest_path = runtime_spec.data.validation_manifest or runtime_spec.data.train_manifest
+    if manifest_path is None:
+        raise ContractError("checkpoint eval requires a prepared validation manifest")
     payload = {
         "schema_version": 1,
         "status": "completed",

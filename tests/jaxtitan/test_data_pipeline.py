@@ -11,6 +11,7 @@ from jaxtitan.data import (
     PreparedTokenGrainPipeline,
     TokenShard,
     TokenSplit,
+    build_hf_streaming_pipeline,
     data_pipeline_compat_payload,
     data_pipeline_state_from_mapping,
     data_pipeline_state_to_dict,
@@ -19,6 +20,7 @@ from jaxtitan.data import (
 )
 from jaxtitan.errors import ContractError
 from jaxtitan.runtime.training import _combine_provenance, _stack_accumulated_batches
+from jaxtitan.specs.data import HFStreamingSpec
 
 
 def test_read_token_range_within_one_shard(prepared_dataset_factory: Callable[..., Path]) -> None:
@@ -116,6 +118,67 @@ def test_data_source_emits_document_ids_for_manifest_with_offsets(
     assert int(first["doc_id"]) == 0
     assert int(second["doc_id"]) == 0
     assert int(cross_shard["doc_id"]) == 2
+
+
+def test_hf_streaming_pipeline_emits_shifted_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_hf_stream(monkeypatch, [{"text": "hello world"}, {"text": "goodbye"}])
+    pipeline = _streaming_pipeline(seq_len=2, batch_size=2)
+    state = pipeline.initial_state()
+
+    result = pipeline.next_batch(state)
+    tokens = pipeline.tokenizer.encode("hello world") + [pipeline.tokenizer.eot_token]
+    tokens += pipeline.tokenizer.encode("goodbye") + [pipeline.tokenizer.eot_token]
+
+    np.testing.assert_array_equal(result.batch.input_ids, np.asarray([tokens[0:2], tokens[2:4]], dtype=np.int32))
+    np.testing.assert_array_equal(result.batch.target_ids, np.asarray([tokens[1:3], tokens[3:5]], dtype=np.int32))
+    assert result.batch.loss_mask.dtype == np.bool_
+    assert result.provenance.token_start == 0
+    assert result.provenance.token_end == 4
+    assert result.provenance.examples == 2
+    assert result.state.backend == "hf_streaming"
+    assert result.state.stream_state["rows_seen"] == 2
+    assert result.state.stream_state["docs_seen"] == 2
+
+
+def test_hf_streaming_pipeline_restores_exact_next_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = [{"text": "alpha beta gamma delta epsilon " * 4}, {"text": "zeta eta theta iota kappa " * 4}]
+    _patch_hf_stream(monkeypatch, rows)
+    first = _streaming_pipeline(seq_len=4, batch_size=1)
+    state = first.initial_state()
+    first_batch = first.next_batch(state)
+    restored_state = data_pipeline_state_from_mapping(data_pipeline_state_to_dict(first_batch.state))
+
+    restored = _streaming_pipeline(seq_len=4, batch_size=1)
+    expected_next = first.next_batch(first_batch.state)
+    actual_next = restored.next_batch(restored_state)
+
+    np.testing.assert_array_equal(actual_next.batch.input_ids, expected_next.batch.input_ids)
+    np.testing.assert_array_equal(actual_next.batch.target_ids, expected_next.batch.target_ids)
+    assert actual_next.provenance.token_start == expected_next.provenance.token_start
+    assert actual_next.state.next_record_index == expected_next.state.next_record_index
+
+
+def test_hf_streaming_pipeline_state_uses_document_offset_for_long_documents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_hf_stream(monkeypatch, [{"text": "long document " * 200}])
+    pipeline = _streaming_pipeline(seq_len=4, batch_size=1)
+    state = pipeline.initial_state()
+
+    next_state = pipeline.next_batch(state).state
+
+    assert next_state.stream_state["current_doc_active"] is True
+    assert next_state.stream_state["current_doc_token_offset"] > 0
+    assert len(next_state.stream_state["pending_tokens"]) <= pipeline.seq_len
+
+
+def test_hf_streaming_pipeline_raises_on_exhaustion(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_hf_stream(monkeypatch, [{"text": "x"}])
+    pipeline = _streaming_pipeline(seq_len=8, batch_size=2)
+    state = pipeline.initial_state()
+
+    with pytest.raises(StopIteration, match="HF streaming source ended"):
+        pipeline.next_batch(state)
 
 
 def test_pipeline_sequential_batches_are_fixed_shape_and_shifted(prepared_dataset_factory: Callable[..., Path]) -> None:
@@ -401,6 +464,53 @@ def test_pipeline_compat_summary_changes_for_identity_fields(prepared_dataset_fa
     assert data_pipeline_compat_payload(first_manifest, tokenizer_id="toy-tokenizer", split="train", seq_len=4, batch_size=2, worker_buffer_size=2) != base
     assert data_pipeline_compat_payload(first_manifest, tokenizer_id="toy-tokenizer", split="train", seq_len=4, batch_size=2, prefetch=True) != base
     assert data_pipeline_compat_payload(second_manifest, tokenizer_id="other-tokenizer", split="train", seq_len=4, batch_size=2) != base
+
+
+class _FakeHFIterable:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self.rows = rows
+        self.index = 0
+
+    def __iter__(self) -> "_FakeHFIterable":
+        return self
+
+    def __next__(self) -> dict[str, object]:
+        if self.index >= len(self.rows):
+            raise StopIteration
+        row = self.rows[self.index]
+        self.index += 1
+        return row
+
+    def state_dict(self) -> dict[str, int]:
+        return {"index": self.index}
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        self.index = int(state.get("index", 0))
+
+
+def _patch_hf_stream(monkeypatch: pytest.MonkeyPatch, rows: list[dict[str, object]]) -> None:
+    monkeypatch.setattr("jaxtitan.data.streaming._load_hf_dataset", lambda _source: _FakeHFIterable(list(rows)))
+
+
+def _streaming_pipeline(*, seq_len: int, batch_size: int):
+    return build_hf_streaming_pipeline(
+        HFStreamingSpec(
+            dataset="mock/dataset",
+            name="mock-config",
+            split="train",
+            revision="abc123",
+            text_column="text",
+            append_eot=True,
+        ),
+        tokenizer_id="gpt2",
+        seq_len=seq_len,
+        batch_size=batch_size,
+        order="sequential",
+        shuffle_seed=None,
+        worker_count=0,
+        worker_buffer_size=1,
+        prefetch=False,
+    )
 
 
 def _pipeline(

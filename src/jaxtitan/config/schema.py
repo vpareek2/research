@@ -83,10 +83,23 @@ class TomlOptimizerSection:
 
 
 @dataclass(frozen=True, slots=True)
+class TomlHFStreamingSection:
+    dataset: str
+    split: str
+    revision: str
+    name: str | None = None
+    data_dir: str | None = None
+    text_column: str = "text"
+    append_eot: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class TomlDataSection:
-    train_manifest: Path
+    mode: str = "prepared"
+    train_manifest: Path | None = None
     tokenizer_id: str | None = None
     validation_manifest: Path | None = None
+    hf_streaming: TomlHFStreamingSection | None = None
     order: str = "sequential"
     shuffle_seed: int | None = None
     worker_count: int = 0
@@ -129,6 +142,11 @@ class TomlParallelismSection:
 @dataclass(frozen=True, slots=True)
 class TomlArtifactSection:
     wandb_enabled: bool = False
+    wandb_project: str = "jaxtitan"
+    wandb_entity: str | None = None
+    wandb_group: str | None = None
+    wandb_tags: tuple[str, ...] = ()
+    wandb_mode: str = "online"
 
 
 @dataclass(frozen=True, slots=True)

@@ -53,9 +53,27 @@ class ArtifactSpec:
 
     root: Path = Path("runs")
     wandb_enabled: bool = False
+    wandb_project: str = "jaxtitan"
+    wandb_entity: str | None = None
+    wandb_group: str | None = None
+    wandb_tags: tuple[str, ...] = ()
+    wandb_mode: str = "online"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "root", Path(self.root))
+        object.__setattr__(self, "wandb_tags", tuple(self.wandb_tags))
+        if not isinstance(self.wandb_enabled, bool):
+            raise ContractError("artifacts.wandb_enabled must be a boolean")
+        if not isinstance(self.wandb_project, str) or not self.wandb_project:
+            raise ContractError("artifacts.wandb_project must be a non-empty string")
+        if self.wandb_entity is not None and (not isinstance(self.wandb_entity, str) or not self.wandb_entity):
+            raise ContractError("artifacts.wandb_entity must be non-empty when provided")
+        if self.wandb_group is not None and (not isinstance(self.wandb_group, str) or not self.wandb_group):
+            raise ContractError("artifacts.wandb_group must be non-empty when provided")
+        if self.wandb_mode not in {"online", "offline"}:
+            raise ContractError("artifacts.wandb_mode must be 'online' or 'offline'")
+        if any(not isinstance(tag, str) or not tag for tag in self.wandb_tags):
+            raise ContractError("artifacts.wandb_tags must contain only non-empty strings")
 
 
 @dataclass(frozen=True, slots=True)
