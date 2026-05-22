@@ -201,6 +201,9 @@ class MirroredArtifactWriter:
         self.local.write_runtime_diagnostics(diagnostics)
         self._mirror("runtime_diagnostics", lambda: self.mirror.log_runtime_diagnostics(diagnostics))
 
+    def write_profiling_diagnostics(self, diagnostics: Mapping[str, Any]) -> None:
+        self.local.write_profiling_diagnostics(diagnostics)
+
     def write_wandb_metadata(self, metadata: Mapping[str, Any]) -> None:
         self.local.write_wandb_metadata(metadata)
 

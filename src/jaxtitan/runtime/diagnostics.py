@@ -17,6 +17,7 @@ import numpy as np
 from jaxtitan import __version__
 from jaxtitan.models import ParamMetadata, count_parameters
 from jaxtitan.optim import optimizer_policy_summary
+from jaxtitan.runtime.profiling import profiling_runtime_summary
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.run import RunSpec
 
@@ -247,6 +248,7 @@ def build_runtime_diagnostics(
         },
         "compile": compile_contract_summary(spec, sharding),
         "parallelism": parallelism_summary(spec, context),
+        "profiling": profiling_runtime_summary(spec),
         "sharding": None if sharding is None else sharding_policy_summary(sharding),
         "data_pipeline": data_pipeline,
         "wandb": None if wandb is None else dict(wandb),

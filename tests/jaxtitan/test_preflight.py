@@ -72,6 +72,8 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert payload["compile"]["eval"]["expected_batch_shape"] == [2, 4]
     assert payload["compile"]["eval"]["input_shardings"]["input_ids"]["partition_spec"] == "PartitionSpec('data', None)"
     assert payload["diagnostics"]["compile"] == payload["compile"]
+    assert payload["profiling"]["enabled"] is False
+    assert payload["diagnostics"]["profiling"] == payload["profiling"]
     assert payload["parallelism"]["execution_mode"] == "replicated_data_parallel"
     assert payload["parallelism"]["metrics_scope"] == "global"
     assert payload["parallelism"]["artifact_writer"] == "single_host"
@@ -95,6 +97,7 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert "compile=passed" in text
     assert "compile contract:" in text
     assert "donate_train=True" in text
+    assert "profiling: enabled=False" in text
     assert not (tmp_path / "runs" / "loop").exists()
 
 
@@ -198,6 +201,47 @@ def test_run_preflight_accepts_muon_optimizer(
     assert payload["diagnostics"]["optimizer"] == payload["optimizer"]["policy"]
     assert "adamw_fallback_peak_lr=0.001" in text
     assert "routes={'adamw': 7, 'muon': 7}" in text
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_reports_profiling_config_without_collecting_trace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("profiled-preflight", shard_token_groups=(tuple(range(0, 50)),), train_tokens=25)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            profiling_block="""
+[profiling]
+enabled = true
+trace_start_step = 2
+trace_steps = 1
+create_perfetto_trace = true
+create_perfetto_link = false
+""",
+        )
+    )
+
+    report = run_preflight(config_path)
+    payload = report.payload
+    text = format_preflight_report(report)
+
+    assert payload["profiling"] == {
+        "schema_version": 1,
+        "enabled": True,
+        "trace_start_step": 2,
+        "trace_steps": 1,
+        "trace_end_step": 2,
+        "create_perfetto_trace": True,
+        "create_perfetto_link": False,
+        "trace_dir": "profiles",
+    }
+    assert payload["diagnostics"]["profiling"] == payload["profiling"]
+    assert "profiling: enabled=True start=2 steps=1 perfetto_trace=True" in text
     assert not (tmp_path / "runs" / "loop").exists()
 
 
@@ -690,6 +734,7 @@ def _preflight_config(
     prefetch: bool = False,
     document_buffer_size: int | None = None,
     document_refill_size: int | None = None,
+    profiling_block: str = "",
 ) -> str:
     shuffle_seed_line = "" if shuffle_seed is None else f"shuffle_seed = {shuffle_seed}\n"
     document_buffer_size_line = "" if document_buffer_size is None else f"document_buffer_size = {document_buffer_size}\n"
@@ -776,6 +821,7 @@ axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 
 [parallelism]
 mode = "{parallelism_mode}"
+{profiling_block}
 {eval_block}
 """
 

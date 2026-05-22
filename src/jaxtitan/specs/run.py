@@ -77,6 +77,39 @@ class ArtifactSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class ProfilingSpec:
+    """Programmatic JAX profiler trace capture contract."""
+
+    enabled: bool = False
+    trace_start_step: int = 3
+    trace_steps: int = 2
+    create_perfetto_trace: bool = True
+    create_perfetto_link: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ContractError("profiling.enabled must be a boolean")
+        if not isinstance(self.trace_start_step, int) or isinstance(self.trace_start_step, bool):
+            raise ContractError("profiling.trace_start_step must be an integer")
+        if not isinstance(self.trace_steps, int) or isinstance(self.trace_steps, bool):
+            raise ContractError("profiling.trace_steps must be an integer")
+        if self.trace_start_step <= 0:
+            raise ContractError(
+                f"profiling.trace_start_step must be positive, got {self.trace_start_step}"
+            )
+        if self.trace_steps <= 0:
+            raise ContractError(f"profiling.trace_steps must be positive, got {self.trace_steps}")
+        if not isinstance(self.create_perfetto_trace, bool):
+            raise ContractError("profiling.create_perfetto_trace must be a boolean")
+        if not isinstance(self.create_perfetto_link, bool):
+            raise ContractError("profiling.create_perfetto_link must be a boolean")
+
+    @property
+    def trace_end_step(self) -> int:
+        return self.trace_start_step + self.trace_steps - 1
+
+
+@dataclass(frozen=True, slots=True)
 class TrainingLossSpec:
     """Training objective loss controls."""
 
@@ -146,6 +179,7 @@ class RunSpec:
     training: TrainingSpec
     parallelism: ParallelismSpec = ParallelismSpec()
     artifacts: ArtifactSpec = ArtifactSpec()
+    profiling: ProfilingSpec = ProfilingSpec()
     evals: tuple[EvalSpec, ...] = ()
     generation: GenerationSpec | None = None
 

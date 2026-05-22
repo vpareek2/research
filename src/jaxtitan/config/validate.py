@@ -1,5 +1,7 @@
 """Cross-spec validation."""
 
+import math
+
 from jaxtitan.errors import ConfigError
 from jaxtitan.specs.run import RunSpec
 
@@ -37,3 +39,10 @@ def validate_run_spec(spec: RunSpec) -> None:
         raise ConfigError(f"parallelism.mode='{spec.parallelism.mode}' requires a mesh fsdp axis")
     if spec.data.mode == "hf_streaming" and spec.evals and spec.data.validation_manifest is None:
         raise ConfigError("data.validation_manifest is required for evals when data.mode='hf_streaming'")
+    if spec.profiling.enabled:
+        estimated_steps = math.ceil(spec.training.target_tokens / effective_batch_tokens)
+        if spec.profiling.trace_start_step > estimated_steps:
+            raise ConfigError(
+                "profiling.trace_start_step must be reachable by training.target_tokens; "
+                f"trace_start_step={spec.profiling.trace_start_step} estimated_steps={estimated_steps}"
+            )

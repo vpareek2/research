@@ -150,6 +150,15 @@ class TomlArtifactSection:
 
 
 @dataclass(frozen=True, slots=True)
+class TomlProfilingSection:
+    enabled: bool = False
+    trace_start_step: int = 3
+    trace_steps: int = 2
+    create_perfetto_trace: bool = True
+    create_perfetto_link: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class TomlEvalSection:
     name: str
     every_steps: int

@@ -46,6 +46,9 @@ def test_inspect_run_reports_summary_checkpoints_and_recent_metrics(
     assert payload["diagnostics"]["data_pipeline"]["worker_buffer_size"] == 1
     assert payload["diagnostics"]["data_pipeline"]["document_aware"] is False
     assert payload["diagnostics"]["data_pipeline"]["document_count"] is None
+    assert payload["profiling"]["enabled"] is False
+    assert payload["profiling"]["status"] == "disabled"
+    assert payload["profiling"]["trace_dir"] == "profiles"
     assert payload["router_health"] is None
     assert payload["optimizer_health"]["group_count"] > 0
     optimizer_leaf_count = sum(group["leaf_count"] for group in payload["recent_train_metrics"][-1]["optimizer_groups"])
@@ -60,6 +63,7 @@ def test_inspect_run_reports_summary_checkpoints_and_recent_metrics(
     assert "mode=replicated_data_parallel" in text
     assert "artifacts=single_host" in text
     assert "optimizer health:" in text
+    assert "profiling:" not in text
     assert "best checkpoint:" in text
     assert json.loads(run_inspection_to_json(inspection))["run_id"] == "loop"
 
@@ -171,6 +175,46 @@ def test_inspect_run_reports_wandb_metadata(
     assert payload["diagnostics"]["wandb"]["project"] == "jaxtitan-test"
     assert "wandb: project=jaxtitan-test entity=team mode=offline id=loop-abc" in text
     assert json.loads(run_inspection_to_json(inspection))["wandb"]["mode"] == "offline"
+
+
+def test_inspect_run_reports_profiling_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("inspect-profiling", shard_token_groups=(tuple(range(0, 50)),), train_tokens=25)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_training_config(manifest))
+    run_training(config_path)
+    profiling = {
+        "schema_version": 1,
+        "enabled": True,
+        "status": "completed",
+        "trace_dir": "profiles",
+        "trace_start_step": 3,
+        "trace_steps": 2,
+        "trace_end_step": 4,
+        "traced_step_range": {"start": 3, "end": 4},
+        "create_perfetto_trace": True,
+        "create_perfetto_link": False,
+        "trace_files": ["profiles/trace.trace.json.gz"],
+        "started_at": "2026-05-22T00:00:00Z",
+        "stopped_at": "2026-05-22T00:00:01Z",
+        "error": None,
+    }
+    run_dir = tmp_path / "runs" / "loop"
+    (run_dir / "diagnostics" / "profiling.json").write_text(json.dumps(profiling))
+
+    inspection = inspect_run(run_dir)
+    payload = inspection.payload
+    text = format_run_inspection(inspection)
+
+    assert payload["profiling"]["status"] == "completed"
+    assert payload["profiling"]["trace_step_range"] == {"start": 3, "end": 4}
+    assert payload["profiling"]["perfetto_trace_available"] is True
+    assert "profiling: status=completed range={'start': 3, 'end': 4} dir=profiles perfetto=yes" in text
+    assert json.loads(run_inspection_to_json(inspection))["profiling"]["status"] == "completed"
 
 
 def test_inspect_run_missing_required_artifact_fails(

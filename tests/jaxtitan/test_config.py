@@ -80,6 +80,11 @@ def test_load_config_resolves_minimal_toml(tmp_path: Path) -> None:
     assert spec.artifacts.wandb_group is None
     assert spec.artifacts.wandb_tags == ()
     assert spec.artifacts.wandb_mode == "online"
+    assert spec.profiling.enabled is False
+    assert spec.profiling.trace_start_step == 3
+    assert spec.profiling.trace_steps == 2
+    assert spec.profiling.create_perfetto_trace is True
+    assert spec.profiling.create_perfetto_link is False
 
 
 def test_load_config_accepts_explicit_model_runtime_fields(tmp_path: Path) -> None:
@@ -400,6 +405,74 @@ def test_load_config_rejects_invalid_wandb_artifacts(tmp_path: Path, artifact_bl
     )
 
     with pytest.raises(ConfigError, match=match):
+        load_config(config_path)
+
+
+def test_load_config_accepts_profiling_section(tmp_path: Path) -> None:
+    config_path = tmp_path / "profiled.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace("target_tokens = 128", "target_tokens = 512")
+        + """
+[profiling]
+enabled = true
+trace_start_step = 2
+trace_steps = 3
+create_perfetto_trace = true
+create_perfetto_link = false
+"""
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.profiling.enabled is True
+    assert spec.profiling.trace_start_step == 2
+    assert spec.profiling.trace_steps == 3
+    assert spec.profiling.trace_end_step == 4
+    assert spec.profiling.create_perfetto_trace is True
+    assert spec.profiling.create_perfetto_link is False
+
+
+@pytest.mark.parametrize(
+    ("profiling_block", "match"),
+    [
+        ('enabled = "yes"', "profiling.enabled"),
+        ("trace_start_step = 0", "trace_start_step"),
+        ("trace_steps = 0", "trace_steps"),
+        ('create_perfetto_trace = "true"', "create_perfetto_trace"),
+        ('create_perfetto_link = "false"', "create_perfetto_link"),
+    ],
+)
+def test_load_config_rejects_invalid_profiling_section(
+    tmp_path: Path,
+    profiling_block: str,
+    match: str,
+) -> None:
+    config_path = tmp_path / "bad-profiling.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG
+        + f"""
+[profiling]
+{profiling_block}
+"""
+    )
+
+    with pytest.raises(ConfigError, match=match):
+        load_config(config_path)
+
+
+def test_load_config_rejects_unreachable_profiling_start_step(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad-profiling-window.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG
+        + """
+[profiling]
+enabled = true
+trace_start_step = 2
+trace_steps = 1
+"""
+    )
+
+    with pytest.raises(ConfigError, match="trace_start_step"):
         load_config(config_path)
 
 

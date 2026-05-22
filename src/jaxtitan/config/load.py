@@ -17,6 +17,7 @@ from jaxtitan.config.schema import (
     TomlModelSection,
     TomlOptimizerSection,
     TomlParallelismSection,
+    TomlProfilingSection,
     TomlRunSection,
     TomlScheduleSection,
     TomlTrainingLossSection,
@@ -34,7 +35,7 @@ from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
 from jaxtitan.specs.parallelism import ParallelismSpec
-from jaxtitan.specs.run import ArtifactSpec, RunSpec, TrainingSpec
+from jaxtitan.specs.run import ArtifactSpec, ProfilingSpec, RunSpec, TrainingSpec
 
 
 def load_config(path: str | Path) -> RunSpec:
@@ -63,6 +64,7 @@ def run_spec_from_mapping(raw: Mapping[str, Any]) -> RunSpec:
         mesh_section = _mesh_section(_optional_mapping(raw, "mesh"))
         parallelism_section = _parallelism_section(_optional_mapping(raw, "parallelism"))
         artifact_section = _artifact_section(_optional_mapping(raw, "artifacts"))
+        profiling_section = _profiling_section(_optional_mapping(raw, "profiling"))
         eval_sections = tuple(_eval_section(item) for item in _optional_list(raw, "evals"))
         generation_raw = raw.get("generation")
         generation_section = None if generation_raw is None else _generation_section(_ensure_mapping(generation_raw, "generation"))
@@ -101,6 +103,7 @@ def run_spec_from_mapping(raw: Mapping[str, Any]) -> RunSpec:
             training=TrainingSpec(**asdict(training_section)),
             parallelism=ParallelismSpec(**asdict(parallelism_section)),
             artifacts=ArtifactSpec(root=run_section.output_dir, **asdict(artifact_section)),
+            profiling=ProfilingSpec(**asdict(profiling_section)),
             evals=tuple(EvalSpec(**asdict(section)) for section in eval_sections),
             generation=None if generation_section is None else GenerationSpec(**asdict(generation_section)),
         )
@@ -309,6 +312,16 @@ def _artifact_section(raw: Mapping[str, Any]) -> TomlArtifactSection:
         wandb_group=_optional_str(raw, "wandb_group", "artifacts", default=None),
         wandb_tags=tuple(_optional_str_list(raw, "wandb_tags", "artifacts")),
         wandb_mode=_optional_str(raw, "wandb_mode", "artifacts", default="online"),
+    )
+
+
+def _profiling_section(raw: Mapping[str, Any]) -> TomlProfilingSection:
+    return TomlProfilingSection(
+        enabled=_optional_bool(raw, "enabled", "profiling", default=False),
+        trace_start_step=_optional_int_with_default(raw, "trace_start_step", "profiling", default=3),
+        trace_steps=_optional_int_with_default(raw, "trace_steps", "profiling", default=2),
+        create_perfetto_trace=_optional_bool(raw, "create_perfetto_trace", "profiling", default=True),
+        create_perfetto_link=_optional_bool(raw, "create_perfetto_link", "profiling", default=False),
     )
 
 

@@ -277,6 +277,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
         "diagnostics": runtime_diagnostics.payload,
         "compile": runtime_diagnostics.payload["compile"],
         "parallelism": runtime_diagnostics.payload["parallelism"],
+        "profiling": runtime_diagnostics.payload["profiling"],
         "sharding": runtime_diagnostics.payload["sharding"],
         "observed_sharding": {
             "first_train_batch": first_train_batch_sharding,
@@ -309,6 +310,7 @@ def format_preflight_report(report: PreflightReport) -> str:
     diagnostics = payload["diagnostics"]
     compile_contract = payload["compile"]
     parallelism = payload["parallelism"]
+    profiling = payload["profiling"]
     performance = diagnostics["performance"]
     jax_info = diagnostics["jax"]
     lines = [
@@ -368,6 +370,11 @@ def format_preflight_report(report: PreflightReport) -> str:
             f"donate_train={compile_contract['train']['donate_state']} "
             f"eval_shape={compile_contract['eval']['expected_batch_shape']} "
             f"donate_eval={compile_contract['eval']['donate_state']}"
+        ),
+        (
+            "profiling: "
+            f"enabled={profiling['enabled']} start={profiling['trace_start_step']} "
+            f"steps={profiling['trace_steps']} perfetto_trace={profiling['create_perfetto_trace']}"
         ),
     ]
     if payload["eval"] is None:

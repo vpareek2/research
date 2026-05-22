@@ -29,6 +29,8 @@ class ArtifactWriter(Protocol):
 
     def write_runtime_diagnostics(self, diagnostics: Mapping[str, Any]) -> None: ...
 
+    def write_profiling_diagnostics(self, diagnostics: Mapping[str, Any]) -> None: ...
+
     def write_wandb_metadata(self, metadata: Mapping[str, Any]) -> None: ...
 
     def write_checkpoint_index(self, index: Mapping[str, Any]) -> None: ...
@@ -65,6 +67,7 @@ def initialize_run(config_path: str | Path) -> RunManifest:
             "checkpoints": "checkpoints",
             "diagnostics": "diagnostics",
             "evals": "evals",
+            "profiles": "profiles",
             "samples": "samples",
             "summaries": "summaries",
         },
@@ -132,6 +135,9 @@ class LocalArtifactWriter:
     def write_runtime_diagnostics(self, diagnostics: Mapping[str, Any]) -> None:
         self._write_json(self.run_dir / "diagnostics" / "runtime.json", diagnostics)
 
+    def write_profiling_diagnostics(self, diagnostics: Mapping[str, Any]) -> None:
+        self._write_json(self.run_dir / "diagnostics" / "profiling.json", diagnostics)
+
     def write_wandb_metadata(self, metadata: Mapping[str, Any]) -> None:
         self._write_json(self.run_dir / "diagnostics" / "wandb.json", metadata)
 
@@ -156,6 +162,7 @@ class LocalArtifactWriter:
             self.run_dir / "checkpoints",
             self.run_dir / "diagnostics",
             self.run_dir / "evals",
+            self.run_dir / "profiles",
             self.run_dir / "samples",
             self.run_dir / "summaries",
         ):

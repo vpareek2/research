@@ -449,6 +449,142 @@ def test_run_training_wandb_resume_requires_saved_metadata(
     assert events[-1]["phase"] == "init"
 
 
+def test_run_training_captures_configured_jax_profile_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_profiler = _patch_fake_jax_profiler(monkeypatch)
+    manifest = prepared_dataset_factory(
+        "profiled-loop",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            eval_every_steps=1,
+            profiling_block=_profiling_block(trace_start_step=1, trace_steps=1),
+        )
+    )
+
+    run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    events = _jsonl(run_dir / "events.jsonl")
+    profiling = json.loads((run_dir / "diagnostics" / "profiling.json").read_text())
+    runtime = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+
+    assert fake_profiler.start_calls == [
+        {
+            "log_dir": "runs/loop/profiles",
+            "create_perfetto_link": False,
+            "create_perfetto_trace": True,
+        }
+    ]
+    assert fake_profiler.stop_count == 1
+    assert fake_profiler.annotations == [
+        "train_loop_step",
+        "data",
+        "placement",
+        "train_step",
+        "metrics_sync",
+        "eval",
+        "checkpoint",
+    ]
+    assert [event["type"] for event in events if event["type"].startswith("profiling_")] == [
+        "profiling_trace_started",
+        "profiling_trace_completed",
+    ]
+    assert profiling["status"] == "completed"
+    assert profiling["traced_step_range"] == {"start": 1, "end": 1}
+    assert profiling["trace_files"] == ["profiles/trace.trace.json.gz"]
+    assert runtime["profiling"]["enabled"] is True
+    assert runtime["profiling"]["trace_start_step"] == 1
+    assert runtime["profiling"]["trace_steps"] == 1
+
+
+def test_run_training_profiler_failure_writes_event_and_aborts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _patch_fake_jax_profiler(monkeypatch, fail_start=True)
+    manifest = prepared_dataset_factory(
+        "profile-failure",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            profiling_block=_profiling_block(trace_start_step=1, trace_steps=1),
+        )
+    )
+
+    with pytest.raises(ContractError, match="JAX profiling failed during start"):
+        run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    events = _jsonl(run_dir / "events.jsonl")
+    profiling = json.loads((run_dir / "diagnostics" / "profiling.json").read_text())
+    assert events[-2]["type"] == "profiling_failed"
+    assert events[-1]["type"] == "training_failed"
+    assert profiling["status"] == "failed"
+    assert profiling["error"]["phase"] == "start"
+    assert not (run_dir / "summaries" / "final.json").exists()
+
+
+def test_run_training_resume_rejects_past_profiling_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake_profiler = _patch_fake_jax_profiler(monkeypatch)
+    manifest = prepared_dataset_factory(
+        "profile-resume",
+        shard_token_groups=(tuple(range(0, 50)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+        )
+    )
+    run_training(config_path)
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            profiling_block=_profiling_block(trace_start_step=1, trace_steps=1),
+        )
+    )
+
+    with pytest.raises(ContractError, match="profiling window"):
+        run_training(config_path, resume=True)
+
+    events = _jsonl(tmp_path / "runs" / "loop" / "events.jsonl")
+    assert fake_profiler.start_calls == []
+    assert any(event["type"] == "profiling_failed" and event["phase"] == "resume" for event in events)
+    assert events[-1]["type"] == "training_failed"
+
+
 def test_run_training_records_muon_optimizer_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1929,6 +2065,7 @@ def _training_config(
     document_refill_size: int | None = None,
     trinity_moe_balance_name: str | None = None,
     artifacts_block: str = "",
+    profiling_block: str = "",
 ) -> str:
     total_steps_line = "" if total_steps is None else f"total_steps = {total_steps}\n"
     validation_manifest_line = (
@@ -2022,6 +2159,7 @@ axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 [parallelism]
 mode = "{parallelism_mode}"
 {artifacts_block}
+{profiling_block}
 {eval_block}
 """
 
@@ -2117,6 +2255,79 @@ wandb_group = "unit"
 wandb_tags = ["fake", "runtime"]
 wandb_mode = "offline"
 """
+
+
+def _profiling_block(*, trace_start_step: int, trace_steps: int) -> str:
+    return f"""
+[profiling]
+enabled = true
+trace_start_step = {trace_start_step}
+trace_steps = {trace_steps}
+create_perfetto_trace = true
+create_perfetto_link = false
+"""
+
+
+class _FakeJaxProfiler:
+    def __init__(self, *, fail_start: bool = False, fail_stop: bool = False) -> None:
+        self.fail_start = fail_start
+        self.fail_stop = fail_stop
+        self.start_calls: list[dict[str, object]] = []
+        self.stop_count = 0
+        self.annotations: list[str] = []
+        self._last_log_dir: Path | None = None
+
+    def start_trace(
+        self,
+        log_dir: str,
+        *,
+        create_perfetto_link: bool = False,
+        create_perfetto_trace: bool = False,
+        **_kwargs: object,
+    ) -> None:
+        if self.fail_start:
+            raise RuntimeError("fake start failure")
+        self.start_calls.append(
+            {
+                "log_dir": log_dir,
+                "create_perfetto_link": create_perfetto_link,
+                "create_perfetto_trace": create_perfetto_trace,
+            }
+        )
+        self._last_log_dir = Path(log_dir)
+
+    def stop_trace(self) -> None:
+        if self.fail_stop:
+            raise RuntimeError("fake stop failure")
+        self.stop_count += 1
+        if self._last_log_dir is not None:
+            self._last_log_dir.mkdir(parents=True, exist_ok=True)
+            (self._last_log_dir / "trace.trace.json.gz").write_bytes(b"fake trace")
+
+    def trace_annotation(self, name: str):
+        parent = self
+
+        class _Annotation:
+            def __enter__(self) -> None:
+                parent.annotations.append(name)
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        return _Annotation()
+
+
+def _patch_fake_jax_profiler(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_start: bool = False,
+    fail_stop: bool = False,
+) -> _FakeJaxProfiler:
+    fake = _FakeJaxProfiler(fail_start=fail_start, fail_stop=fail_stop)
+    monkeypatch.setattr("jaxtitan.runtime.profiling.jax.profiler.start_trace", fake.start_trace)
+    monkeypatch.setattr("jaxtitan.runtime.profiling.jax.profiler.stop_trace", fake.stop_trace)
+    monkeypatch.setattr("jaxtitan.runtime.profiling.jax.profiler.TraceAnnotation", fake.trace_annotation)
+    return fake
 
 
 class _FakeWandbRun:

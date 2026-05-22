@@ -49,6 +49,7 @@ from jaxtitan.runtime.diagnostics import (
     training_diagnostics_summary,
     runtime_execution_mode,
 )
+from jaxtitan.runtime.profiling import ProfilingManager
 from jaxtitan.runtime.resume import checkpoint_metadata, validate_resume_compat, validate_resume_metadata
 from jaxtitan.services import (
     ArtifactWriter,
@@ -294,6 +295,8 @@ def _run_training_initialized(
         wandb=getattr(writer, "wandb_metadata", None),
     )
     writer.write_runtime_diagnostics(runtime_diagnostics.payload)
+    profiler = ProfilingManager(spec=runtime_spec, writer=writer)
+    profiler.write_initial_diagnostics()
     train_state = initialize_train_state(
         model_state,
         optimizer.transform,
@@ -356,6 +359,7 @@ def _run_training_initialized(
             train_state = restored.train_state
             dataset_state = restored.dataset_state
             host_state = restored.host_state
+            profiler.validate_resume_step(_scalar_int(train_state.step))
             writer.append_event(
                 {
                     **_event("training_resumed", runtime_spec),
@@ -390,79 +394,90 @@ def _run_training_initialized(
         train_compiled = False
         eval_compiled = False
         while _scalar_int(train_state.tokens_seen) < runtime_spec.training.target_tokens:
-            timer = PhaseTimer()
-            with timer.phase("data"):
-                try:
-                    batch, dataset_state, provenance = _next_accumulated_train_batch(
-                        data,
-                        dataset_state,
-                        runtime_spec.training.gradient_accumulation_steps,
-                    )
-                except StopIteration as exc:
-                    raise ContractError(_data_exhausted_message(runtime_spec, data, train_state)) from exc
-            with timer.phase("placement"):
-                placed_batch = place_accumulated_batch(batch, sharding)
-            if not train_compiled and progress is not None:
-                progress("compile_start", {"phase": "train"})
-            with timer.phase("train_dispatch"):
-                train_state, metrics = train_step(train_state, placed_batch)
-            train_compiled = True
-            metrics_sync_sec = sync_and_time(_train_sync_target(train_state, metrics))
-            timer.add("metrics_sync", metrics_sync_sec)
-            base_row = _metrics_row(train_state, metrics, provenance, runtime_spec=runtime_spec, context=context)
-            row = enrich_train_metrics(
-                base_row,
-                timings={
-                    "data_sec": timer.seconds("data"),
-                    "placement_sec": timer.seconds("placement"),
-                    "train_dispatch_sec": timer.seconds("train_dispatch"),
-                    "metrics_sync_sec": timer.seconds("metrics_sync"),
-                    "train_step_sec": timer.seconds("train_dispatch") + timer.seconds("metrics_sync"),
-                    "step_sec": timer.total_sec(),
-                },
-                runtime=runtime_diagnostics,
-                telemetry=sample_device_telemetry(context.devices),
-            )
-            last_row = row
-            host_state = replace(host_state, dataset=dataset_state)
-            if _should_log(row["step"], runtime_spec.training.log_every_steps, runtime_spec.training.target_tokens, row["tokens_seen"]):
-                writer.append_train_metrics(row)
-                logged_rows.append(row)
-                last_logged_step = row["step"]
-                if progress is not None:
-                    progress("train", {"row": row})
-            checkpoint_due = row["step"] % runtime_spec.training.checkpoint_every_steps == 0
-            eval_due = eval_spec is not None and row["step"] % eval_spec.every_steps == 0
-            if eval_due or (eval_spec is not None and checkpoint_due):
-                if not eval_compiled and progress is not None:
-                    progress("compile_start", {"phase": "eval"})
-                last_eval = run_validation_eval(
-                    writer,
-                    runtime_spec,
-                    eval_spec,
-                    eval_step,
-                    sharding,
-                    train_state,
-                    row,
-                    progress=progress,
+            next_step = _scalar_int(train_state.step) + 1
+            with profiler.step(next_step):
+                timer = PhaseTimer()
+                with timer.phase("data"), profiler.annotation("data"):
+                    try:
+                        batch, dataset_state, provenance = _next_accumulated_train_batch(
+                            data,
+                            dataset_state,
+                            runtime_spec.training.gradient_accumulation_steps,
+                        )
+                    except StopIteration as exc:
+                        raise ContractError(_data_exhausted_message(runtime_spec, data, train_state)) from exc
+                with timer.phase("placement"), profiler.annotation("placement"):
+                    placed_batch = place_accumulated_batch(batch, sharding)
+                if not train_compiled and progress is not None:
+                    progress("compile_start", {"phase": "train"})
+                with timer.phase("train_dispatch"), profiler.annotation("train_step"):
+                    train_state, metrics = train_step(train_state, placed_batch)
+                train_compiled = True
+                with profiler.annotation("metrics_sync"):
+                    metrics_sync_sec = sync_and_time(_train_sync_target(train_state, metrics))
+                timer.add("metrics_sync", metrics_sync_sec)
+                base_row = _metrics_row(train_state, metrics, provenance, runtime_spec=runtime_spec, context=context)
+                row = enrich_train_metrics(
+                    base_row,
+                    timings={
+                        "data_sec": timer.seconds("data"),
+                        "placement_sec": timer.seconds("placement"),
+                        "train_dispatch_sec": timer.seconds("train_dispatch"),
+                        "metrics_sync_sec": timer.seconds("metrics_sync"),
+                        "train_step_sec": timer.seconds("train_dispatch") + timer.seconds("metrics_sync"),
+                        "step_sec": timer.total_sec(),
+                    },
+                    runtime=runtime_diagnostics,
+                    telemetry=sample_device_telemetry(context.devices),
                 )
-                last_eval_step = row["step"]
-                eval_compiled = True
-            if checkpoint_due:
-                host_state, checkpoint_index = _save_checkpoint(
-                    checkpoint_service,
-                    writer,
-                    runtime_spec,
-                    train_state,
-                    dataset_state,
-                    host_state,
-                    checkpoint_index,
-                    row,
-                    last_eval,
-                    reason="interval",
-                    progress=progress,
-                )
+                last_row = row
+                host_state = replace(host_state, dataset=dataset_state)
+                if _should_log(
+                    row["step"],
+                    runtime_spec.training.log_every_steps,
+                    runtime_spec.training.target_tokens,
+                    row["tokens_seen"],
+                ):
+                    writer.append_train_metrics(row)
+                    logged_rows.append(row)
+                    last_logged_step = row["step"]
+                    if progress is not None:
+                        progress("train", {"row": row})
+                checkpoint_due = row["step"] % runtime_spec.training.checkpoint_every_steps == 0
+                eval_due = eval_spec is not None and row["step"] % eval_spec.every_steps == 0
+                if eval_due or (eval_spec is not None and checkpoint_due):
+                    if not eval_compiled and progress is not None:
+                        progress("compile_start", {"phase": "eval"})
+                    with profiler.annotation("eval"):
+                        last_eval = run_validation_eval(
+                            writer,
+                            runtime_spec,
+                            eval_spec,
+                            eval_step,
+                            sharding,
+                            train_state,
+                            row,
+                            progress=progress,
+                        )
+                    last_eval_step = row["step"]
+                    eval_compiled = True
+                if checkpoint_due:
+                    with profiler.annotation("checkpoint"):
+                        host_state, checkpoint_index = _save_checkpoint(
+                            checkpoint_service,
+                            writer,
+                            runtime_spec,
+                            train_state,
+                            dataset_state,
+                            host_state,
+                            checkpoint_index,
+                            row,
+                            last_eval,
+                            reason="interval",
+                            progress=progress,
+                        )
 
+        profiler.close()
         if last_row is None:
             raise ContractError("training.target_tokens was already satisfied before the first train step")
         if last_logged_step != last_row["step"]:
@@ -591,6 +606,7 @@ def _run_training_initialized(
             progress("completed", {"summary": summary})
         return summary
     finally:
+        profiler.close()
         data.close()
         checkpoint_service.close()
 

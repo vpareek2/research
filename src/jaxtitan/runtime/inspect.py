@@ -26,6 +26,7 @@ def inspect_run(run_dir: str | Path) -> RunInspection:
     raw_index = _read_required_json(run_dir / "checkpoints" / "index.json", "checkpoint index")
     diagnostics = _read_optional_json(run_dir / "diagnostics" / "runtime.json", "runtime diagnostics")
     wandb = _read_optional_json(run_dir / "diagnostics" / "wandb.json", "W&B metadata")
+    profiling = _read_optional_json(run_dir / "diagnostics" / "profiling.json", "profiling diagnostics")
     index = load_checkpoint_index(run_dir)
     _validate_checkpoint_paths(run_dir, raw_index)
     recent_train_metrics = _read_recent_jsonl(run_dir / "metrics" / "train.jsonl")
@@ -52,6 +53,7 @@ def inspect_run(run_dir: str | Path) -> RunInspection:
         "checkpoints": [_checkpoint_summary(run_dir, record) for record in index.records],
         "diagnostics": _diagnostics_summary(diagnostics),
         "wandb": _wandb_summary(wandb, diagnostics),
+        "profiling": _profiling_summary(profiling, diagnostics),
         "router_health": _router_health(final, recent_train_metrics),
         "optimizer_health": _optimizer_health(final, recent_train_metrics),
         "recent_train_metrics": recent_train_metrics,
@@ -113,6 +115,14 @@ def format_run_inspection(inspection: RunInspection) -> str:
             "wandb: "
             f"project={wandb['project']} entity={wandb['entity']} mode={wandb['mode']} "
             f"id={wandb['wandb_run_id']}{suffix}"
+        )
+    profiling = payload["profiling"]
+    if profiling is not None and profiling["enabled"]:
+        perfetto = "yes" if profiling["perfetto_trace_available"] else "no"
+        lines.append(
+            "profiling: "
+            f"status={profiling['status']} range={profiling['trace_step_range']} "
+            f"dir={profiling['trace_dir']} perfetto={perfetto}"
         )
     router_health = payload["router_health"]
     if router_health is not None:
@@ -310,6 +320,48 @@ def _wandb_summary(
     if diagnostics is not None and isinstance(diagnostics.get("wandb"), Mapping):
         return _wandb_summary_from_raw(diagnostics["wandb"])
     return None
+
+
+def _profiling_summary(
+    raw: Mapping[str, Any] | None,
+    diagnostics: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    source = raw
+    if source is None and diagnostics is not None and isinstance(diagnostics.get("profiling"), Mapping):
+        source = diagnostics["profiling"]
+    if source is None:
+        return None
+    trace_files = source.get("trace_files")
+    if not isinstance(trace_files, list):
+        trace_files = []
+    trace_range = source.get("traced_step_range")
+    if not isinstance(trace_range, Mapping):
+        start = source.get("trace_start_step")
+        end = source.get("trace_end_step")
+        trace_range = None if start is None or end is None else {"start": start, "end": end}
+    return {
+        "enabled": source.get("enabled"),
+        "status": source.get("status", "configured" if source.get("enabled") else "disabled"),
+        "trace_dir": source.get("trace_dir", "profiles"),
+        "trace_step_range": trace_range,
+        "trace_start_step": source.get("trace_start_step"),
+        "trace_steps": source.get("trace_steps"),
+        "trace_end_step": source.get("trace_end_step"),
+        "create_perfetto_trace": source.get("create_perfetto_trace"),
+        "create_perfetto_link": source.get("create_perfetto_link"),
+        "trace_files": trace_files,
+        "perfetto_trace_available": any(_looks_like_perfetto_trace(path) for path in trace_files),
+        "started_at": source.get("started_at"),
+        "stopped_at": source.get("stopped_at"),
+        "error": source.get("error"),
+    }
+
+
+def _looks_like_perfetto_trace(path: Any) -> bool:
+    if not isinstance(path, str):
+        return False
+    lowered = path.lower()
+    return lowered.endswith((".trace.json.gz", ".perfetto_trace.json.gz", ".json.gz", ".trace"))
 
 
 def _wandb_summary_from_raw(raw: Mapping[str, Any]) -> dict[str, Any]:
