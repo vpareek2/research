@@ -1,0 +1,2 @@
+upstream = "https://github.com/HazyResearch/ThunderKittens"
+commit = "41f4c2a7e4246911e4ed2b7ced8ea13bfd295e7f"
