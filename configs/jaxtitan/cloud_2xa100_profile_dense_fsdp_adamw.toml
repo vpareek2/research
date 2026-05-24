@@ -1,0 +1,75 @@
+[run]
+id = "cloud_2xa100_profile_dense_fsdp_adamw"
+seed = 123
+output_dir = "runs"
+
+[model]
+name = "decoder"
+variant = "cloud-2xa100-profile-dense-fsdp"
+vocab_size = 50257
+hidden_size = 2048
+intermediate_size = 8192
+num_layers = 24
+num_heads = 16
+n_kv_heads = 4
+max_seq_len = 1024
+rope_theta = 1000000.0
+norm_epsilon = 0.000001
+tied_embeddings = false
+param_dtype = "float32"
+compute_dtype = "bfloat16"
+remat = "block"
+
+[optimizer]
+name = "adamw"
+weight_decay = 0.1
+grad_clip_norm = 1.0
+
+[optimizer.schedule]
+name = "cosine"
+peak_lr = 0.0006
+warmup_steps = 2
+total_steps = 20
+min_lr_ratio = 0.1
+
+[data]
+train_manifest = "data/cloud_smoke_gpt2/manifest.json"
+tokenizer_id = "gpt2"
+order = "document_buffer"
+shuffle_seed = 123
+worker_count = 0
+worker_buffer_size = 1
+prefetch = false
+document_buffer_size = 128
+document_refill_size = 128
+
+[training]
+seq_len = 1024
+global_batch_size = 2
+gradient_accumulation_steps = 1
+target_tokens = 40960
+precision = "bf16"
+log_every_steps = 1
+checkpoint_every_steps = 10
+
+[mesh]
+axis_names = ["data", "fsdp"]
+axis_sizes = [1, 2]
+
+[parallelism]
+mode = "fsdp"
+
+[profiling]
+enabled = true
+trace_start_step = 4
+trace_steps = 2
+create_perfetto_trace = true
+create_perfetto_link = false
+
+[[evals]]
+name = "validation"
+every_steps = 5
+num_batches = 1
+
+[artifacts]
+wandb_enabled = false
