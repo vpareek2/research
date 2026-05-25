@@ -46,6 +46,16 @@ def build_parser() -> argparse.ArgumentParser:
     data_inspect_parser.add_argument("--seq-len", type=int, help="Report record counts for this sequence length.")
     data_inspect_parser.add_argument("--json", action="store_true", help="Print inspection JSON.")
 
+    kernels_parser = commands.add_parser("kernels", help="Inspect Jaxtitan kernel backend plans.")
+    kernels_commands = kernels_parser.add_subparsers(dest="kernels_command", required=True)
+
+    kernels_list_parser = kernels_commands.add_parser("list", help="List Jaxtitan-owned kernel candidates.")
+    kernels_list_parser.add_argument("--json", action="store_true", help="Print kernel registry JSON.")
+
+    kernels_check_parser = kernels_commands.add_parser("check", help="Resolve the kernel plan for a TOML config.")
+    kernels_check_parser.add_argument("path", help="Path to a Jaxtitan TOML config.")
+    kernels_check_parser.add_argument("--json", action="store_true", help="Print kernel plan JSON.")
+
     run_parser = commands.add_parser("run", help="Create and inspect local run artifacts.")
     run_commands = run_parser.add_subparsers(dest="run_command", required=True)
 
@@ -138,6 +148,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(data_inspection_to_json(inspection))
             else:
                 print(format_data_inspection(inspection))
+            return 0
+
+        if args.command == "kernels" and args.kernels_command == "list":
+            from jaxtitan.kernels import format_kernel_registry, kernel_plan_to_json, kernel_registry_payload
+
+            payload = kernel_registry_payload()
+            if args.json:
+                print(kernel_plan_to_json(payload))
+            else:
+                print(format_kernel_registry(payload))
+            return 0
+
+        if args.command == "kernels" and args.kernels_command == "check":
+            from jaxtitan.kernels import (
+                format_kernel_plan,
+                kernel_plan,
+                kernel_plan_to_json,
+                require_kernel_plan_supported,
+            )
+
+            spec = load_config(args.path)
+            plan = kernel_plan(spec)
+            require_kernel_plan_supported(plan)
+            if args.json:
+                print(kernel_plan_to_json(plan))
+            else:
+                print(format_kernel_plan(plan))
             return 0
 
         if args.command == "run" and args.run_command == "init":

@@ -7,7 +7,7 @@ from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ParamRouteRule, ScheduleSpec
 from jaxtitan.specs.parallelism import ParallelismSpec
-from jaxtitan.specs.run import ArtifactSpec, ProfilingSpec, RunDirs, RunManifest, RunSpec, TrainingSpec
+from jaxtitan.specs.run import ArtifactSpec, KernelSpec, ProfilingSpec, RunDirs, RunManifest, RunSpec, TrainingSpec
 
 __all__ = [
     "ArtifactSpec",
@@ -16,6 +16,7 @@ __all__ = [
     "EvalSpec",
     "GenerationSpec",
     "HFStreamingSpec",
+    "KernelSpec",
     "MeshSpec",
     "ModelSpec",
     "OptimizerSpec",

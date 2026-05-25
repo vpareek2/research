@@ -12,6 +12,7 @@ import numpy as np
 
 from jaxtitan.config import load_config
 from jaxtitan.errors import ContractError
+from jaxtitan.kernels import require_kernel_plan_supported
 from jaxtitan.mesh import (
     build_mesh_context,
     build_sharding_plan,
@@ -90,6 +91,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
         sharding=sharding,
         data_pipeline=train_data.describe(),
     )
+    require_kernel_plan_supported(runtime_diagnostics.payload["kernels"])
     train_state = initialize_train_state(
         model_state,
         optimizer.transform,
@@ -284,6 +286,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
         "compile": runtime_diagnostics.payload["compile"],
         "parallelism": runtime_diagnostics.payload["parallelism"],
         "profiling": runtime_diagnostics.payload["profiling"],
+        "kernels": runtime_diagnostics.payload["kernels"],
         "sharding": runtime_diagnostics.payload["sharding"],
         "observed_sharding": {
             "first_train_batch": first_train_batch_sharding,
@@ -317,6 +320,7 @@ def format_preflight_report(report: PreflightReport) -> str:
     compile_contract = payload["compile"]
     parallelism = payload["parallelism"]
     profiling = payload["profiling"]
+    kernels = payload["kernels"]
     performance = diagnostics["performance"]
     jax_info = diagnostics["jax"]
     lines = [
@@ -381,6 +385,12 @@ def format_preflight_report(report: PreflightReport) -> str:
             "profiling: "
             f"enabled={profiling['enabled']} start={profiling['trace_start_step']} "
             f"steps={profiling['trace_steps']} perfetto_trace={profiling['create_perfetto_trace']}"
+        ),
+        (
+            "kernels: "
+            f"enabled={kernels['enabled']} strict={kernels['strict']} compile={kernels['compile']} "
+            f"active={kernels['active_count']} fallback={kernels['fallback_count']} "
+            f"unavailable={kernels['unavailable_count']}"
         ),
     ]
     if payload["eval"] is None:

@@ -24,6 +24,7 @@ from jaxtitan.data import (
     build_prepared_token_pipeline,
 )
 from jaxtitan.errors import ContractError
+from jaxtitan.kernels import require_kernel_plan_supported
 from jaxtitan.mesh import (
     build_mesh_context,
     build_sharding_plan,
@@ -300,6 +301,7 @@ def _run_training_initialized(
         wandb=getattr(writer, "wandb_metadata", None),
     )
     writer.write_runtime_diagnostics(runtime_diagnostics.payload)
+    require_kernel_plan_supported(runtime_diagnostics.payload["kernels"])
     profiler = ProfilingManager(spec=runtime_spec, writer=writer)
     profiler.write_initial_diagnostics()
     train_state = initialize_train_state(

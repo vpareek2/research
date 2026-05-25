@@ -54,6 +54,7 @@ def inspect_run(run_dir: str | Path) -> RunInspection:
         "diagnostics": _diagnostics_summary(diagnostics),
         "wandb": _wandb_summary(wandb, diagnostics),
         "profiling": _profiling_summary(profiling, diagnostics),
+        "kernels": _kernel_summary(diagnostics),
         "router_health": _router_health(final, recent_train_metrics),
         "optimizer_health": _optimizer_health(final, recent_train_metrics),
         "recent_train_metrics": recent_train_metrics,
@@ -123,6 +124,14 @@ def format_run_inspection(inspection: RunInspection) -> str:
             "profiling: "
             f"status={profiling['status']} range={profiling['trace_step_range']} "
             f"dir={profiling['trace_dir']} perfetto={perfetto}"
+        )
+    kernels = payload["kernels"]
+    if kernels is not None:
+        lines.append(
+            "kernels: "
+            f"enabled={kernels['enabled']} strict={kernels['strict']} "
+            f"active={kernels['active_count']} fallback={kernels['fallback_count']} "
+            f"unavailable={kernels['unavailable_count']}"
         )
     router_health = payload["router_health"]
     if router_health is not None:
@@ -307,6 +316,7 @@ def _diagnostics_summary(raw: Mapping[str, Any] | None) -> dict[str, Any] | None
         "parallelism": None if parallelism is None else _parallelism_summary(parallelism),
         "sharding": sharding,
         "data_pipeline": None if data_pipeline is None else _data_pipeline_summary(data_pipeline),
+        "kernels": _kernel_summary_from_raw(raw.get("kernels")) if isinstance(raw.get("kernels"), Mapping) else None,
         "wandb": _wandb_summary_from_raw(raw.get("wandb")) if isinstance(raw.get("wandb"), Mapping) else None,
     }
 
@@ -320,6 +330,32 @@ def _wandb_summary(
     if diagnostics is not None and isinstance(diagnostics.get("wandb"), Mapping):
         return _wandb_summary_from_raw(diagnostics["wandb"])
     return None
+
+
+def _kernel_summary(diagnostics: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if diagnostics is None or not isinstance(diagnostics.get("kernels"), Mapping):
+        return None
+    return _kernel_summary_from_raw(diagnostics["kernels"])
+
+
+def _kernel_summary_from_raw(raw: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": raw.get("enabled"),
+        "strict": raw.get("strict"),
+        "compile": raw.get("compile"),
+        "mode": raw.get("mode"),
+        "device_kind": raw.get("device_kind"),
+        "active_count": raw.get("active_count"),
+        "fallback_count": raw.get("fallback_count"),
+        "disabled_count": raw.get("disabled_count"),
+        "unavailable_count": raw.get("unavailable_count"),
+        "active": raw.get("active"),
+        "fallback": raw.get("fallback"),
+        "disabled": raw.get("disabled"),
+        "unavailable": raw.get("unavailable"),
+        "target_ops": raw.get("target_ops"),
+        "decisions": raw.get("decisions"),
+    }
 
 
 def _profiling_summary(

@@ -15,6 +15,7 @@ import jax
 import numpy as np
 
 from jaxtitan import __version__
+from jaxtitan.kernels import kernel_plan
 from jaxtitan.models import ParamMetadata, count_parameters
 from jaxtitan.models.execution import (
     EXPERT_PARALLEL_CAPACITY_POLICY,
@@ -255,6 +256,7 @@ def build_runtime_diagnostics(
         "compile": compile_contract_summary(spec, sharding),
         "parallelism": parallelism_summary(spec, context),
         "profiling": profiling_runtime_summary(spec),
+        "kernels": kernel_plan(spec, device_kind=device_kind),
         "sharding": None if sharding is None else sharding_policy_summary(sharding),
         "data_pipeline": data_pipeline,
         "wandb": None if wandb is None else dict(wandb),

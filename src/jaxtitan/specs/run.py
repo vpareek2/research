@@ -110,6 +110,23 @@ class ProfilingSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class KernelSpec:
+    """Kernel backend resolution contract."""
+
+    enabled: bool = False
+    strict: bool = False
+    compile: str = "lazy"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ContractError("kernels.enabled must be a boolean")
+        if not isinstance(self.strict, bool):
+            raise ContractError("kernels.strict must be a boolean")
+        if self.compile not in {"lazy", "ahead_of_time"}:
+            raise ContractError("kernels.compile must be 'lazy' or 'ahead_of_time'")
+
+
+@dataclass(frozen=True, slots=True)
 class TrainingLossSpec:
     """Training objective loss controls."""
 
@@ -180,6 +197,7 @@ class RunSpec:
     parallelism: ParallelismSpec = ParallelismSpec()
     artifacts: ArtifactSpec = ArtifactSpec()
     profiling: ProfilingSpec = ProfilingSpec()
+    kernels: KernelSpec = KernelSpec()
     evals: tuple[EvalSpec, ...] = ()
     generation: GenerationSpec | None = None
 

@@ -74,6 +74,10 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert payload["diagnostics"]["compile"] == payload["compile"]
     assert payload["profiling"]["enabled"] is False
     assert payload["diagnostics"]["profiling"] == payload["profiling"]
+    assert payload["kernels"]["enabled"] is False
+    assert payload["kernels"]["active_count"] == 0
+    assert payload["kernels"]["fallback"]["rmsnorm"] == "kernels_disabled"
+    assert payload["diagnostics"]["kernels"] == payload["kernels"]
     assert payload["parallelism"]["execution_mode"] == "replicated_data_parallel"
     assert payload["parallelism"]["metrics_scope"] == "global"
     assert payload["parallelism"]["artifact_writer"] == "single_host"
@@ -98,6 +102,7 @@ def test_run_preflight_validates_full_runtime_path_without_artifacts(
     assert "compile contract:" in text
     assert "donate_train=True" in text
     assert "profiling: enabled=False" in text
+    assert "kernels: enabled=False strict=False compile=lazy active=0" in text
     assert not (tmp_path / "runs" / "loop").exists()
 
 
@@ -242,6 +247,31 @@ create_perfetto_link = false
     }
     assert payload["diagnostics"]["profiling"] == payload["profiling"]
     assert "profiling: enabled=True start=2 steps=1 perfetto_trace=True" in text
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_rejects_strict_unavailable_kernels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("strict-kernels", shard_token_groups=(tuple(range(0, 50)),), train_tokens=25)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            profiling_block="""
+[kernels]
+enabled = true
+strict = true
+""",
+        )
+    )
+
+    with pytest.raises(ContractError, match="kernels.strict=true"):
+        run_preflight(config_path)
+
     assert not (tmp_path / "runs" / "loop").exists()
 
 

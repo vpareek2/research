@@ -86,6 +86,9 @@ def test_load_config_resolves_minimal_toml(tmp_path: Path) -> None:
     assert spec.profiling.trace_steps == 2
     assert spec.profiling.create_perfetto_trace is True
     assert spec.profiling.create_perfetto_link is False
+    assert spec.kernels.enabled is False
+    assert spec.kernels.strict is False
+    assert spec.kernels.compile == "lazy"
 
 
 def test_load_config_accepts_explicit_model_runtime_fields(tmp_path: Path) -> None:
@@ -474,6 +477,51 @@ trace_steps = 1
     )
 
     with pytest.raises(ConfigError, match="trace_start_step"):
+        load_config(config_path)
+
+
+def test_load_config_accepts_kernel_backend_section(tmp_path: Path) -> None:
+    config_path = tmp_path / "kernels.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG
+        + """
+[kernels]
+enabled = true
+strict = false
+compile = "ahead_of_time"
+"""
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.kernels.enabled is True
+    assert spec.kernels.strict is False
+    assert spec.kernels.compile == "ahead_of_time"
+
+
+@pytest.mark.parametrize(
+    ("kernel_block", "match"),
+    [
+        ('enabled = "yes"', "kernels.enabled"),
+        ('strict = "no"', "kernels.strict"),
+        ('compile = "now"', "kernels.compile"),
+    ],
+)
+def test_load_config_rejects_invalid_kernel_backend_section(
+    tmp_path: Path,
+    kernel_block: str,
+    match: str,
+) -> None:
+    config_path = tmp_path / "bad-kernels.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG
+        + f"""
+[kernels]
+{kernel_block}
+"""
+    )
+
+    with pytest.raises(ConfigError, match=match):
         load_config(config_path)
 
 

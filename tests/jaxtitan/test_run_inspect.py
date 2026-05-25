@@ -49,6 +49,9 @@ def test_inspect_run_reports_summary_checkpoints_and_recent_metrics(
     assert payload["profiling"]["enabled"] is False
     assert payload["profiling"]["status"] == "disabled"
     assert payload["profiling"]["trace_dir"] == "profiles"
+    assert payload["kernels"]["enabled"] is False
+    assert payload["kernels"]["active_count"] == 0
+    assert payload["kernels"]["fallback"]["rmsnorm"] == "kernels_disabled"
     assert payload["router_health"] is None
     assert payload["optimizer_health"]["group_count"] > 0
     optimizer_leaf_count = sum(group["leaf_count"] for group in payload["recent_train_metrics"][-1]["optimizer_groups"])
@@ -63,6 +66,7 @@ def test_inspect_run_reports_summary_checkpoints_and_recent_metrics(
     assert "mode=replicated_data_parallel" in text
     assert "artifacts=single_host" in text
     assert "optimizer health:" in text
+    assert "kernels: enabled=False strict=False active=0" in text
     assert "profiling:" not in text
     assert "best checkpoint:" in text
     assert json.loads(run_inspection_to_json(inspection))["run_id"] == "loop"

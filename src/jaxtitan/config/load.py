@@ -12,6 +12,7 @@ from jaxtitan.config.schema import (
     TomlEvalSection,
     TomlGenerationSection,
     TomlHFStreamingSection,
+    TomlKernelSection,
     TomlMeshSection,
     TomlMoeBalanceSection,
     TomlModelSection,
@@ -35,7 +36,7 @@ from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
 from jaxtitan.specs.parallelism import ParallelismSpec
-from jaxtitan.specs.run import ArtifactSpec, ProfilingSpec, RunSpec, TrainingSpec
+from jaxtitan.specs.run import ArtifactSpec, KernelSpec, ProfilingSpec, RunSpec, TrainingSpec
 
 
 def load_config(path: str | Path) -> RunSpec:
@@ -65,6 +66,7 @@ def run_spec_from_mapping(raw: Mapping[str, Any]) -> RunSpec:
         parallelism_section = _parallelism_section(_optional_mapping(raw, "parallelism"))
         artifact_section = _artifact_section(_optional_mapping(raw, "artifacts"))
         profiling_section = _profiling_section(_optional_mapping(raw, "profiling"))
+        kernel_section = _kernel_section(_optional_mapping(raw, "kernels"))
         eval_sections = tuple(_eval_section(item) for item in _optional_list(raw, "evals"))
         generation_raw = raw.get("generation")
         generation_section = None if generation_raw is None else _generation_section(_ensure_mapping(generation_raw, "generation"))
@@ -104,6 +106,7 @@ def run_spec_from_mapping(raw: Mapping[str, Any]) -> RunSpec:
             parallelism=ParallelismSpec(**asdict(parallelism_section)),
             artifacts=ArtifactSpec(root=run_section.output_dir, **asdict(artifact_section)),
             profiling=ProfilingSpec(**asdict(profiling_section)),
+            kernels=KernelSpec(**asdict(kernel_section)),
             evals=tuple(EvalSpec(**asdict(section)) for section in eval_sections),
             generation=None if generation_section is None else GenerationSpec(**asdict(generation_section)),
         )
@@ -325,6 +328,14 @@ def _profiling_section(raw: Mapping[str, Any]) -> TomlProfilingSection:
         trace_steps=_optional_int_with_default(raw, "trace_steps", "profiling", default=2),
         create_perfetto_trace=_optional_bool(raw, "create_perfetto_trace", "profiling", default=True),
         create_perfetto_link=_optional_bool(raw, "create_perfetto_link", "profiling", default=False),
+    )
+
+
+def _kernel_section(raw: Mapping[str, Any]) -> TomlKernelSection:
+    return TomlKernelSection(
+        enabled=_optional_bool(raw, "enabled", "kernels", default=False),
+        strict=_optional_bool(raw, "strict", "kernels", default=False),
+        compile=_optional_str(raw, "compile", "kernels", default="lazy"),
     )
 
 

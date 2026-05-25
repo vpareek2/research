@@ -160,6 +160,13 @@ class TomlProfilingSection:
 
 
 @dataclass(frozen=True, slots=True)
+class TomlKernelSection:
+    enabled: bool = False
+    strict: bool = False
+    compile: str = "lazy"
+
+
+@dataclass(frozen=True, slots=True)
 class TomlEvalSection:
     name: str
     every_steps: int

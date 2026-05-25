@@ -90,6 +90,59 @@ def test_cli_config_check_json(tmp_path: Path) -> None:
     assert json.loads(result.stdout)["run_id"] == "smoke"
 
 
+def test_cli_kernels_list() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "jaxtitan.cli", "kernels", "list"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "rmsnorm: impl=thunderkittens" in result.stdout
+
+
+def test_cli_kernels_check_json(tmp_path: Path) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(MINIMAL_CONFIG)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "jaxtitan.cli", "kernels", "check", str(config_path), "--json"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert payload["enabled"] is False
+    assert payload["active_count"] == 0
+    assert payload["fallback"]["rmsnorm"] == "kernels_disabled"
+
+
+def test_cli_kernels_check_strict_unavailable_fails_cleanly(tmp_path: Path) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG
+        + """
+[kernels]
+enabled = true
+strict = true
+"""
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "jaxtitan.cli", "kernels", "check", str(config_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "kernels.strict=true" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_cli_run_init(tmp_path: Path, minimal_config: str) -> None:
     config_path = tmp_path / "jaxtitan.toml"
     config_path.write_text(minimal_config)
