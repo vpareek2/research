@@ -24,6 +24,15 @@ struct RmsNormGlobals {
     float eps;
 };
 
+void dispatch_rmsnorm_stream(
+    bf16 *x,
+    bf16 *weight,
+    bf16 *out,
+    float eps,
+    size_t rows,
+    cudaStream_t stream
+);
+
 __global__ __launch_bounds__(kThreads, 1)
 void rmsnorm_kernel(const __grid_constant__ RmsNormGlobals g) {
     const int row = blockIdx.x;
@@ -69,6 +78,17 @@ void dispatch_rmsnorm(
     float eps,
     size_t rows
 ) {
+    dispatch_rmsnorm_stream(x, weight, out, eps, rows, nullptr);
+}
+
+void dispatch_rmsnorm_stream(
+    bf16 *x,
+    bf16 *weight,
+    bf16 *out,
+    float eps,
+    size_t rows,
+    cudaStream_t stream
+) {
     using row_vec = RmsNormGlobals::row_vec;
     using x_gl = RmsNormGlobals::x_gl;
     using weight_gl = RmsNormGlobals::weight_gl;
@@ -86,5 +106,5 @@ void dispatch_rmsnorm(
     dim3 grid(static_cast<unsigned int>(rows), 1, 1);
     dim3 block(kThreads, 1, 1);
 
-    rmsnorm_kernel<<<grid, block, shared_bytes>>>(globals);
+    rmsnorm_kernel<<<grid, block, shared_bytes, stream>>>(globals);
 }

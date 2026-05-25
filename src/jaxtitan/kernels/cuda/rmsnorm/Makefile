@@ -4,5 +4,6 @@ OUT := rmsnorm_test.out
 CMD := ./$(OUT)
 CONFIG := standalone
 NVCCFLAGS += -Xcompiler=-fsigned-char
+NVCCFLAGS += $(EXTRA_NVCCFLAGS)
 
 include ../common.mk

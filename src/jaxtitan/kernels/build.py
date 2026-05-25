@@ -28,6 +28,9 @@ class BuildTarget:
     make_target: str
     output_name: str
     artifact_kind: str
+    source_files: tuple[str, ...]
+    extra_nvccflags: tuple[str, ...] = ()
+    needs_jax_ffi_include: bool = False
 
 
 def repo_root() -> Path:
@@ -54,6 +57,20 @@ def build_targets() -> tuple[BuildTarget, ...]:
             make_target="all",
             output_name="rmsnorm_test.out",
             artifact_kind="standalone_test",
+            source_files=("rmsnorm_test.cu", "rmsnorm.cu"),
+        ),
+        BuildTarget(
+            op="rmsnorm",
+            source_dir=root / "src" / "jaxtitan" / "kernels" / "cuda" / "rmsnorm",
+            make_target="all",
+            output_name="rmsnorm_ffi.so",
+            artifact_kind="ffi",
+            source_files=("rmsnorm_ffi.cu", "rmsnorm.cu"),
+            extra_nvccflags=(
+                "-shared",
+                "-Xcompiler=-fPIC",
+            ),
+            needs_jax_ffi_include=True,
         ),
     )
 
@@ -88,23 +105,26 @@ def enrich_kernel_plan_with_cache(plan: dict[str, Any], *, root: str | Path | No
     for decision in plan["decisions"]:
         item = dict(decision)
         op = str(item["op"])
-        artifact = artifacts.get(op)
+        artifact_group = artifacts.get(op)
         status = "not_buildable"
-        if artifact is not None and isinstance(artifact, dict):
-            rel_path = artifact.get("path")
-            expected_sha = artifact.get("sha256")
-            artifact_path = cache_root / rel_path if isinstance(rel_path, str) else None
-            if artifact_path is not None and artifact_path.exists() and isinstance(expected_sha, str):
-                actual_sha = _sha256(artifact_path)
-                if actual_sha == expected_sha:
-                    status = "cached"
-                    cached[op] = rel_path
-                else:
-                    status = "stale"
-                    stale[op] = rel_path
+        if artifact_group is not None and isinstance(artifact_group, dict):
+            normalized = _normalize_artifact_group(artifact_group)
+            checks = {
+                kind: _artifact_cache_status(cache_root, artifact)
+                for kind, artifact in normalized.items()
+            }
+            if checks.get("ffi", (None, None))[0] == "cached":
+                status = "ffi_cached"
+                cached[op] = str(checks["ffi"][1])
+            elif checks.get("standalone_test", (None, None))[0] == "cached":
+                status = "standalone_cached"
+                cached[op] = str(checks["standalone_test"][1])
+            elif any(value[0] == "stale" for value in checks.values()):
+                status = "stale"
+                stale[op] = _first_artifact_path(checks)
             else:
                 status = "missing"
-                missing[op] = str(rel_path)
+                missing[op] = _first_artifact_path(checks)
         elif op in {target.op for target in build_targets()}:
             status = "missing"
             missing[op] = "not_compiled"
@@ -145,13 +165,20 @@ def compile_kernel_plan(
             skipped[target.op] = "not_required_by_config"
             continue
         output_path = out_dir / target.output_name
+        extra_nvccflags = list(target.extra_nvccflags)
+        if target.needs_jax_ffi_include:
+            extra_nvccflags.append(f"-I{_jax_ffi_include_dir()}")
+        extra_flags = " ".join(extra_nvccflags)
         command = [
             "make",
             f"ARCH={resolved_arch}",
+            f"SRC={' '.join(target.source_files)}",
             f"OUT={output_path.as_posix()}",
+            f"EXTRA_NVCCFLAGS={extra_flags}",
             target.make_target,
         ]
-        commands[target.op] = command
+        command_key = f"{target.op}:{target.artifact_kind}"
+        commands[command_key] = command
         result = subprocess.run(
             command,
             cwd=target.source_dir,
@@ -159,15 +186,17 @@ def compile_kernel_plan(
             capture_output=True,
             text=True,
         )
-        logs[target.op] = (result.stdout + result.stderr)[-12000:]
+        logs[command_key] = (result.stdout + result.stderr)[-12000:]
         if result.returncode != 0:
             raise ContractError(
-                f"kernel compile failed for {target.op} with exit code {result.returncode}: "
-                f"{logs[target.op]}"
+                f"kernel compile failed for {target.op}:{target.artifact_kind} "
+                f"with exit code {result.returncode}: {logs[command_key]}"
             )
         if not output_path.exists():
-            raise ContractError(f"kernel compile for {target.op} did not produce {output_path}")
-        artifacts[target.op] = {
+            raise ContractError(
+                f"kernel compile for {target.op}:{target.artifact_kind} did not produce {output_path}"
+            )
+        artifacts.setdefault(target.op, {})[target.artifact_kind] = {
             "path": output_path.relative_to(out_dir).as_posix(),
             "sha256": _sha256(output_path),
             "bytes": output_path.stat().st_size,
@@ -246,3 +275,41 @@ def _thunderkittens_metadata() -> dict[str, Any]:
 
 def _sha256(path: Path) -> str:
     return sha256(path.read_bytes()).hexdigest()
+
+
+def _jax_ffi_include_dir() -> str:
+    import jax
+
+    return str(jax.ffi.include_dir())
+
+
+def _normalize_artifact_group(group: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    if "path" in group:
+        kind = str(group.get("kind", "standalone_test"))
+        return {kind: group}
+    normalized: dict[str, dict[str, Any]] = {}
+    for kind, artifact in group.items():
+        if isinstance(artifact, dict):
+            normalized[str(kind)] = artifact
+    return normalized
+
+
+def _artifact_cache_status(cache_root: Path, artifact: dict[str, Any]) -> tuple[str, str]:
+    rel_path = artifact.get("path")
+    expected_sha = artifact.get("sha256")
+    artifact_path = cache_root / rel_path if isinstance(rel_path, str) else None
+    if artifact_path is not None and artifact_path.exists() and isinstance(expected_sha, str):
+        actual_sha = _sha256(artifact_path)
+        if actual_sha == expected_sha:
+            return "cached", rel_path
+        return "stale", rel_path
+    return "missing", str(rel_path)
+
+
+def _first_artifact_path(checks: dict[str, tuple[str, str]]) -> str:
+    if not checks:
+        return "not_compiled"
+    for kind in ("ffi", "standalone_test"):
+        if kind in checks:
+            return checks[kind][1]
+    return next(iter(checks.values()))[1]

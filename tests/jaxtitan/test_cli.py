@@ -143,6 +143,70 @@ strict = true
     assert "Traceback" not in result.stderr
 
 
+def test_cli_kernels_bench_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(MINIMAL_CONFIG)
+
+    def fake_benchmark(spec, *, cache_root, rows, warmup, iters):
+        return {
+            "schema_version": 1,
+            "op": "rmsnorm",
+            "run_id": spec.run_id,
+            "cache_root": cache_root,
+            "rows_arg": rows,
+            "warmup": warmup,
+            "iters": iters,
+            "rows": [],
+        }
+
+    monkeypatch.setattr("jaxtitan.kernels.bench.benchmark_rmsnorm", fake_benchmark)
+
+    result = cli.main(
+        [
+            "kernels",
+            "bench",
+            "rmsnorm",
+            str(config_path),
+            "--cache-dir",
+            "cache",
+            "--rows",
+            "1,4",
+            "--warmup",
+            "2",
+            "--iters",
+            "3",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["op"] == "rmsnorm"
+    assert payload["run_id"] == "smoke"
+    assert payload["rows_arg"] == [1, 4]
+    assert payload["warmup"] == 2
+    assert payload["iters"] == 3
+
+
+def test_cli_kernels_bench_bad_rows_fails_cleanly(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(MINIMAL_CONFIG)
+
+    result = cli.main(["kernels", "bench", "rmsnorm", str(config_path), "--rows", "0"])
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "rows" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_cli_run_init(tmp_path: Path, minimal_config: str) -> None:
     config_path = tmp_path / "jaxtitan.toml"
     config_path.write_text(minimal_config)

@@ -63,6 +63,15 @@ def build_parser() -> argparse.ArgumentParser:
     kernels_compile_parser.add_argument("--cache-dir", help="Kernel cache directory.")
     kernels_compile_parser.add_argument("--json", action="store_true", help="Print compiled kernel plan JSON.")
 
+    kernels_bench_parser = kernels_commands.add_parser("bench", help="Benchmark a compiled Jaxtitan kernel.")
+    kernels_bench_parser.add_argument("op", choices=["rmsnorm"], help="Kernel operation to benchmark.")
+    kernels_bench_parser.add_argument("path", help="Path to a Jaxtitan TOML config.")
+    kernels_bench_parser.add_argument("--cache-dir", help="Kernel cache directory.")
+    kernels_bench_parser.add_argument("--rows", default="1,4,17,64,256", help="Comma-separated row counts.")
+    kernels_bench_parser.add_argument("--warmup", type=int, default=5, help="Warmup iterations per shape.")
+    kernels_bench_parser.add_argument("--iters", type=int, default=20, help="Measured iterations per shape.")
+    kernels_bench_parser.add_argument("--json", action="store_true", help="Print benchmark JSON.")
+
     run_parser = commands.add_parser("run", help="Create and inspect local run artifacts.")
     run_commands = run_parser.add_subparsers(dest="run_command", required=True)
 
@@ -194,6 +203,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(kernel_plan_to_json(plan))
             else:
                 print(format_compile_result(plan))
+            return 0
+
+        if args.command == "kernels" and args.kernels_command == "bench":
+            from jaxtitan.kernels.bench import (
+                benchmark_rmsnorm,
+                benchmark_to_json,
+                format_rmsnorm_benchmark,
+                parse_rows,
+            )
+
+            spec = load_config(args.path)
+            rows = parse_rows(args.rows)
+            payload = benchmark_rmsnorm(
+                spec,
+                cache_root=args.cache_dir,
+                rows=rows,
+                warmup=args.warmup,
+                iters=args.iters,
+            )
+            if args.json:
+                print(benchmark_to_json(payload))
+            else:
+                print(format_rmsnorm_benchmark(payload))
             return 0
 
         if args.command == "run" and args.run_command == "init":
