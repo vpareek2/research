@@ -205,11 +205,17 @@ def format_kernel_plan(plan: dict[str, Any]) -> str:
             f"unavailable={plan['unavailable_count']} device={plan['device_kind']}"
         )
     ]
+    if "cached_count" in plan:
+        lines[0] += (
+            f" cache={plan['cache_dir']} cached={plan['cached_count']} "
+            f"missing_cache={plan['missing_cache_count']} stale_cache={plan['stale_cache_count']}"
+        )
     for decision in plan["decisions"]:
+        cache_status = "" if "cache_status" not in decision else f" cache={decision['cache_status']}"
         lines.append(
             "  "
             f"{decision['op']}: backend={decision['backend']} reason={decision['reason']} "
-            f"status={decision['status']}"
+            f"status={decision['status']}{cache_status}"
         )
     return "\n".join(lines)
 

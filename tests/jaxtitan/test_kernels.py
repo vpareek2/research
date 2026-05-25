@@ -1,13 +1,17 @@
 from pathlib import Path
+import subprocess
 
 import pytest
 
 from jaxtitan.config import load_config
 from jaxtitan.errors import ContractError
 from jaxtitan.kernels import (
+    compile_kernel_plan,
+    enrich_kernel_plan_with_cache,
     format_kernel_plan,
     kernel_plan,
     kernel_registry_payload,
+    load_cache_manifest,
     require_kernel_plan_supported,
 )
 
@@ -78,6 +82,9 @@ def test_kernel_plan_defaults_to_xla_when_backend_disabled(tmp_path: Path) -> No
         "swiglu": "kernels_disabled",
     }
     assert "rmsnorm: backend=xla reason=kernels_disabled" in format_kernel_plan(plan)
+    enriched = enrich_kernel_plan_with_cache(plan, root=tmp_path / "kernel-cache")
+    assert enriched["missing_cache"] == {"rmsnorm": "not_compiled"}
+    assert enriched["decisions"][0]["cache_status"] == "missing"
 
 
 def test_kernel_plan_reports_unavailable_candidates_when_enabled(tmp_path: Path) -> None:
@@ -115,3 +122,39 @@ strict = true
 
     with pytest.raises(ContractError, match="kernels.strict=true"):
         require_kernel_plan_supported(plan)
+
+
+def test_compile_kernel_plan_writes_cache_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(MINIMAL_CONFIG)
+    cache_dir = tmp_path / "cache"
+
+    def fake_run(command, *, cwd, check, capture_output, text):
+        output = Path(next(part.removeprefix("OUT=") for part in command if part.startswith("OUT=")))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"compiled-rmsnorm")
+        return subprocess.CompletedProcess(command, 0, stdout=f"built in {cwd}", stderr="")
+
+    monkeypatch.setattr("jaxtitan.kernels.build.subprocess.run", fake_run)
+    monkeypatch.setattr("jaxtitan.kernels.build._nvcc_version", lambda: "nvcc fake")
+
+    plan = compile_kernel_plan(load_config(config_path), arch="SM90", root=cache_dir)
+    manifest = load_cache_manifest(cache_dir)
+
+    assert manifest is not None
+    assert manifest["arch"] == "SM90"
+    assert manifest["artifacts"]["rmsnorm"]["path"] == "rmsnorm_test.out"
+    assert plan["cached"] == {"rmsnorm": "rmsnorm_test.out"}
+    assert plan["missing_cache_count"] == 0
+    assert plan["decisions"][0]["cache_status"] == "cached"
+
+
+def test_compile_kernel_plan_rejects_bad_arch(tmp_path: Path) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(MINIMAL_CONFIG)
+
+    with pytest.raises(ContractError, match="kernel ARCH"):
+        compile_kernel_plan(load_config(config_path), arch="SM70", root=tmp_path / "cache")

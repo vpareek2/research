@@ -54,7 +54,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     kernels_check_parser = kernels_commands.add_parser("check", help="Resolve the kernel plan for a TOML config.")
     kernels_check_parser.add_argument("path", help="Path to a Jaxtitan TOML config.")
+    kernels_check_parser.add_argument("--cache-dir", help="Kernel cache directory.")
     kernels_check_parser.add_argument("--json", action="store_true", help="Print kernel plan JSON.")
+
+    kernels_compile_parser = kernels_commands.add_parser("compile", help="Compile buildable kernels for a TOML config.")
+    kernels_compile_parser.add_argument("path", help="Path to a Jaxtitan TOML config.")
+    kernels_compile_parser.add_argument("--arch", help="Kernel architecture, such as SM90 or SM121.")
+    kernels_compile_parser.add_argument("--cache-dir", help="Kernel cache directory.")
+    kernels_compile_parser.add_argument("--json", action="store_true", help="Print compiled kernel plan JSON.")
 
     run_parser = commands.add_parser("run", help="Create and inspect local run artifacts.")
     run_commands = run_parser.add_subparsers(dest="run_command", required=True)
@@ -162,6 +169,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "kernels" and args.kernels_command == "check":
             from jaxtitan.kernels import (
+                enrich_kernel_plan_with_cache,
                 format_kernel_plan,
                 kernel_plan,
                 kernel_plan_to_json,
@@ -169,12 +177,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
             spec = load_config(args.path)
-            plan = kernel_plan(spec)
+            plan = enrich_kernel_plan_with_cache(kernel_plan(spec), root=args.cache_dir)
             require_kernel_plan_supported(plan)
             if args.json:
                 print(kernel_plan_to_json(plan))
             else:
                 print(format_kernel_plan(plan))
+            return 0
+
+        if args.command == "kernels" and args.kernels_command == "compile":
+            from jaxtitan.kernels import compile_kernel_plan, format_compile_result, kernel_plan_to_json
+
+            spec = load_config(args.path)
+            plan = compile_kernel_plan(spec, arch=args.arch, root=args.cache_dir)
+            if args.json:
+                print(kernel_plan_to_json(plan))
+            else:
+                print(format_compile_result(plan))
             return 0
 
         if args.command == "run" and args.run_command == "init":
