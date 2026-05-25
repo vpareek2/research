@@ -130,6 +130,48 @@ def test_resume_fingerprint_changes_for_moe_balance_policy(tmp_path: Path, prepa
     assert build_resume_compat(smebu).runtime_fingerprint != build_resume_compat(changed_aux_weight).runtime_fingerprint
 
 
+def test_resume_fingerprint_changes_for_expert_parallel_axis(tmp_path: Path, prepared_dataset_factory) -> None:
+    manifest = _manifest(prepared_dataset_factory, "ep")
+    ep_two = _runtime_spec(
+        tmp_path,
+        manifest,
+        axis_names=("data", "ep"),
+        axis_sizes=(1, 2),
+        expert_parallel=True,
+        trinity_moe_num_experts=4,
+        hidden_size=16,
+        intermediate_size=32,
+        num_heads=4,
+        n_kv_heads=4,
+    )
+    ep_four = _runtime_spec(
+        tmp_path,
+        manifest,
+        axis_names=("data", "ep"),
+        axis_sizes=(1, 4),
+        expert_parallel=True,
+        trinity_moe_num_experts=4,
+        hidden_size=16,
+        intermediate_size=32,
+        num_heads=4,
+        n_kv_heads=4,
+    )
+
+    assert build_resume_compat(ep_two).runtime_fingerprint != build_resume_compat(ep_four).runtime_fingerprint
+    assert build_resume_compat(ep_two).payload["parallelism"]["expert_parallel"] is True
+    assert build_resume_compat(ep_two).payload["parallelism"]["expert_parallel_policy"] == {
+        "enabled": True,
+        "axis": "ep",
+        "axis_size": 2,
+        "num_experts": 4,
+        "experts_per_rank": 2,
+        "dispatcher_backend": "all_to_all",
+        "capacity_policy": "strict_dropless_static_source_buckets",
+        "token_partition": "assignment_index_mod_ep",
+        "combine_policy": "reverse_all_to_all_then_psum",
+    }
+
+
 def test_resume_metadata_contains_compatibility_payload(tmp_path: Path, prepared_dataset_factory) -> None:
     manifest = _manifest(prepared_dataset_factory, "metadata")
     spec = _runtime_spec(tmp_path, manifest)
@@ -308,7 +350,9 @@ def _config_text(
     document_buffer_size: int | None = None,
     document_refill_size: int | None = None,
     trinity_moe_balance_name: str | None = None,
+    trinity_moe_num_experts: int = 3,
     sequence_aux_loss_weight: float = 1e-4,
+    expert_parallel: bool = False,
 ) -> str:
     total_steps_line = "" if total_steps is None else f"total_steps = {total_steps}\n"
     shuffle_seed_line = "" if shuffle_seed is None else f"shuffle_seed = {shuffle_seed}\n"
@@ -316,7 +360,8 @@ def _config_text(
     document_refill_size_line = "" if document_refill_size is None else f"document_refill_size = {document_refill_size}\n"
     model_name = "decoder"
     trinity_block = ""
-    if trinity_moe_balance_name is not None:
+    if trinity_moe_balance_name is not None or expert_parallel:
+        balance_name = "none" if trinity_moe_balance_name is None else trinity_moe_balance_name
         model_name = "trinity"
         num_layers = 2
         trinity_block = f"""
@@ -326,11 +371,11 @@ local_window = 4
 local_layers_per_global = 1
 
 [model.trinity.moe]
-num_experts = 3
+num_experts = {trinity_moe_num_experts}
 top_k = 2
 
 [model.trinity.moe.balance]
-name = "{trinity_moe_balance_name}"
+name = "{balance_name}"
 sequence_aux_loss_weight = {sequence_aux_loss_weight}
 """
     return f"""
@@ -388,6 +433,7 @@ axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 
 [parallelism]
 mode = "{parallelism_mode}"
+expert_parallel = {str(expert_parallel).lower()}
 """
 
 

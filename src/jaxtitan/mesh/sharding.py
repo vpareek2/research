@@ -11,11 +11,11 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from jaxtitan.batch import Batch
 from jaxtitan.errors import ContractError
-from jaxtitan.models import ParamLayout
+from jaxtitan.models import ExpertLayout, ParamLayout
 from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.parallelism import ParallelismSpec
 
-SUPPORTED_AXES = {"data", "fsdp", "tp"}
+SUPPORTED_AXES = {"data", "fsdp", "tp", "ep"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +39,12 @@ class MeshContext:
         if "fsdp" not in self.spec.axis_names:
             return 1
         return self.spec.axis_sizes[self.spec.axis_names.index("fsdp")]
+
+    @property
+    def ep_axis_size(self) -> int:
+        if "ep" not in self.spec.axis_names:
+            return 1
+        return self.spec.axis_sizes[self.spec.axis_names.index("ep")]
 
     @property
     def selected_device_count(self) -> int:
@@ -99,16 +105,21 @@ def build_sharding_plan(
     *,
     parallelism: ParallelismSpec | None = None,
     param_layouts: tuple[ParamLayout, ...] = (),
+    expert_layouts: tuple[ExpertLayout, ...] = (),
 ) -> ShardingPlan:
     """Build shardings for data-sharded batches and policy-placed state."""
 
     parallelism = ParallelismSpec() if parallelism is None else parallelism
     if parallelism.mode in {"zero2", "fsdp"} and "fsdp" not in context.spec.axis_names:
         raise ContractError(f"parallelism.mode='{parallelism.mode}' requires a mesh fsdp axis")
+    if parallelism.expert_parallel and "ep" not in context.spec.axis_names:
+        raise ContractError("parallelism.expert_parallel=true requires a mesh ep axis")
+    if parallelism.expert_parallel and not expert_layouts:
+        raise ContractError("parallelism.expert_parallel=true requires routed expert layout metadata")
     batch_matrix = NamedSharding(context.mesh, P("data", None))
     accumulated_batch = NamedSharding(context.mesh, P(None, "data", None))
     replicated = NamedSharding(context.mesh, P())
-    param_shardings = _param_shardings(context, parallelism, param_layouts, replicated)
+    param_shardings = _param_shardings(context, parallelism, param_layouts, expert_layouts, replicated)
     return ShardingPlan(
         mesh=context,
         batch=BatchSharding(
@@ -187,7 +198,7 @@ def place_replicated(tree: Any, plan: ShardingPlan) -> Any:
 def place_model_state(tree: Any, plan: ShardingPlan) -> Any:
     """Place model state leaves according to the sharding plan's parameter policy."""
 
-    if plan.parallelism.mode in {"ddp", "zero2"}:
+    if plan.parallelism.mode in {"ddp", "zero2"} and not plan.parallelism.expert_parallel:
         return place_replicated(tree, plan)
     return _place_params_by_policy(tree, plan)
 
@@ -195,7 +206,7 @@ def place_model_state(tree: Any, plan: ShardingPlan) -> Any:
 def place_optimizer_init_state(tree: Any, plan: ShardingPlan) -> Any:
     """Place a model-shaped tree used only to initialize optimizer state."""
 
-    if plan.parallelism.mode == "ddp":
+    if plan.parallelism.mode == "ddp" and not plan.parallelism.expert_parallel:
         return place_replicated(tree, plan)
     return _place_params_by_policy(tree, plan)
 
@@ -203,7 +214,7 @@ def place_optimizer_init_state(tree: Any, plan: ShardingPlan) -> Any:
 def gradient_shardings_like(tree: Any, plan: ShardingPlan) -> Any:
     """Build a model-shaped sharding tree for gradients and optimizer updates."""
 
-    if plan.parallelism.mode == "ddp":
+    if plan.parallelism.mode == "ddp" and not plan.parallelism.expert_parallel:
         return jax.tree.map(lambda _leaf: plan.replicated, tree)
 
     def leaf_sharding(path, _leaf):
@@ -302,13 +313,20 @@ def _param_shardings(
     context: MeshContext,
     parallelism: ParallelismSpec,
     param_layouts: tuple[ParamLayout, ...],
+    expert_layouts: tuple[ExpertLayout, ...],
     replicated: NamedSharding,
 ) -> dict[tuple[str, ...], NamedSharding]:
-    if parallelism.mode == "ddp":
-        return {layout.path: replicated for layout in param_layouts}
     shardings = {}
     fsdp_axis_size = context.fsdp_axis_size
+    expert_by_path = {layout.path: layout for layout in expert_layouts}
     for layout in param_layouts:
+        expert_layout = expert_by_path.get(layout.path)
+        if parallelism.expert_parallel and expert_layout is not None:
+            shardings[layout.path] = _expert_sharding(context, expert_layout)
+            continue
+        if parallelism.mode == "ddp":
+            shardings[layout.path] = replicated
+            continue
         if layout.fsdp_axis is None:
             shardings[layout.path] = replicated
             continue
@@ -324,6 +342,23 @@ def _param_shardings(
         spec[layout.fsdp_axis] = "fsdp"
         shardings[layout.path] = NamedSharding(context.mesh, P(*spec))
     return shardings
+
+
+def _expert_sharding(context: MeshContext, layout: ExpertLayout) -> NamedSharding:
+    if len(layout.shape) <= layout.expert_axis:
+        raise ContractError(f"expert parameter {'.'.join(layout.path)!r} has invalid expert axis {layout.expert_axis}")
+    if len(layout.shape) != 3:
+        raise ContractError(f"expert parameter {'.'.join(layout.path)!r} must be rank 3, got {layout.shape}")
+    ep_axis_size = context.ep_axis_size
+    dim_size = layout.shape[layout.expert_axis]
+    if dim_size % ep_axis_size != 0:
+        raise ContractError(
+            f"expert parameter {'.'.join(layout.path)!r} dimension {layout.expert_axis} "
+            f"with size {dim_size} must be divisible by ep axis size {ep_axis_size}"
+        )
+    spec = [None] * len(layout.shape)
+    spec[layout.expert_axis] = "ep"
+    return NamedSharding(context.mesh, P(*spec))
 
 
 def _metadata_path_from_jax_path(path) -> tuple[str, ...]:

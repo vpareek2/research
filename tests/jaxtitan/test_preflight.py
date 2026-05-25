@@ -392,6 +392,62 @@ def test_run_preflight_accepts_zero2_parallelism_without_artifacts(
     assert not (tmp_path / "runs" / "loop").exists()
 
 
+def test_run_preflight_reports_expert_parallel_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("ep-preflight", shard_token_groups=(tuple(range(0, 80)),), train_tokens=50)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            optimizer_name="muon",
+            axis_names=("data", "ep"),
+            axis_sizes=(1, 4),
+            global_batch_size=4,
+            target_tokens=16,
+            hidden_size=16,
+            intermediate_size=32,
+            num_layers=2,
+            num_heads=4,
+            n_kv_heads=4,
+            model_name="trinity",
+            trinity=True,
+            trinity_moe=True,
+            expert_parallel=True,
+        )
+    )
+
+    report = run_preflight(config_path)
+    payload = report.payload
+    text = format_preflight_report(report)
+
+    assert payload["parallelism"]["mode"] == "ddp"
+    assert payload["parallelism"]["expert_parallel"] is True
+    assert payload["parallelism"]["expert_parallel_policy"] == {
+        "enabled": True,
+        "axis": "ep",
+        "axis_size": 4,
+        "num_experts": 4,
+        "experts_per_rank": 1,
+        "dispatcher_backend": "all_to_all",
+        "capacity_policy": "strict_dropless_static_source_buckets",
+        "token_partition": "assignment_index_mod_ep",
+        "combine_policy": "reverse_all_to_all_then_psum",
+    }
+    assert payload["parallelism"]["execution_mode"] == "replicated_data_parallel+ep"
+    assert payload["mesh"]["ep_axis_size"] == 4
+    assert payload["sharding"]["model_state"]["ep_sharded_leaves"] == 3
+    assert payload["sharding"]["optimizer_state"]["ep_sharded_leaves"] == 3
+    assert payload["sharding"]["reserved"]["ep"]["dispatcher_backend"] == "all_to_all"
+    assert payload["optimizer"]["policy"]["route_counts"]["muon"] >= 3
+    assert "mode=replicated_data_parallel+ep" in text
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
 def test_run_preflight_reports_gradient_accumulation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -721,6 +777,8 @@ def _preflight_config(
     n_kv_heads: int = 1,
     model_name: str = "decoder",
     trinity: bool = False,
+    trinity_moe: bool = False,
+    expert_parallel: bool = False,
     gradient_accumulation_steps: int = 1,
     remat: str = "none",
     eval_every_steps: int | None = None,
@@ -753,6 +811,12 @@ peak_lr = {adamw_fallback_peak_lr}
 initial_dense_layers = 1
 local_window = 4
 local_layers_per_global = 1
+"""
+        if trinity_moe:
+            trinity_block += """
+[model.trinity.moe]
+num_experts = 4
+top_k = 2
 """
     eval_block = ""
     if eval_every_steps is not None:
@@ -821,6 +885,7 @@ axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 
 [parallelism]
 mode = "{parallelism_mode}"
+expert_parallel = {str(expert_parallel).lower()}
 {profiling_block}
 {eval_block}
 """

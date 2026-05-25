@@ -27,7 +27,7 @@ ADAMW_EPS = 1e-8
 _SUPPORTED_RUNTIME_BACKENDS = {"adamw", "muon"}
 _INTERNAL_RUNTIME_BACKENDS = {"dion2"}
 # Next optimizer backends to evaluate after Muon has run artifacts: Aurora, Scion, and SOAP.
-_MUON_TAGS = frozenset(
+_MUON_MATRIX_TAGS = frozenset(
     {
         "attention_q",
         "attention_k",
@@ -42,6 +42,8 @@ _MUON_TAGS = frozenset(
         "moe_shared_down",
     }
 )
+_MUON_EXPERT_TAGS = frozenset({"moe_gate", "moe_up", "moe_down"})
+_MUON_TAGS = _MUON_MATRIX_TAGS | _MUON_EXPERT_TAGS
 _NORM_TAGS = frozenset(
     {
         "attention_q_norm",
@@ -234,7 +236,10 @@ def optimizer_policy_summary(
             **muon_policy_constants(),
             "distributed_policy": "replicated_or_auto_dion2_when_sharded",
             "distributed_matrix_update": "auto_dion2",
-            "hidden_matrix_tags": sorted(_MUON_TAGS),
+            "rank3_expert_policy": "per_expert_full_matrix_when_complete_local",
+            "rank3_split_matrix_policy": "unsupported_until_explicit_distributed_expert_matrix_optimizer",
+            "hidden_matrix_tags": sorted(_MUON_MATRIX_TAGS),
+            "routed_expert_matrix_tags": sorted(_MUON_EXPERT_TAGS),
             "fallback_tags": ["embedding", "lm_head", *sorted(_NORM_TAGS)],
         },
         "dion2": {
@@ -354,8 +359,8 @@ def _distributed_policy_payload(name: str) -> dict[str, str]:
         }
     if name == "muon":
         return {
-            "optimizer_state": "replicated_muon_or_sharded_dion2",
-            "gradient_update": "muon_when_replicated_dion2_when_sharded",
+            "optimizer_state": "replicated_or_expert_axis_muon_and_sharded_dion2",
+            "gradient_update": "muon_when_complete_matrix_dion2_when_rank2_sharded",
             "zero2_fsdp": "auto_dion2",
         }
     return {
@@ -369,7 +374,7 @@ def _route_distributed_policy(backend: str) -> str:
     if backend == "adamw":
         return "elementwise_shard_safe"
     if backend == "muon":
-        return "replicated_full_matrix_only"
+        return "complete_matrix_or_per_expert_complete_matrix"
     if backend == "dion2":
         return "fsdp_sharded_matrix"
     return "unknown"
@@ -510,7 +515,11 @@ def _default_backend(spec: OptimizerSpec, item: ParamMetadata) -> str:
 
 
 def _resolve_backend(requested_backend: str, item: ParamMetadata, leaf: Any) -> tuple[str, int | None, str | None]:
-    if requested_backend != "muon" or item.tag not in _MUON_TAGS:
+    if requested_backend != "muon":
+        return requested_backend, None, None
+    if item.tag in _MUON_EXPERT_TAGS:
+        return _resolve_expert_muon_backend(item, leaf)
+    if item.tag not in _MUON_MATRIX_TAGS:
         return requested_backend, None, None
     matrix_axis = _fsdp_matrix_axis(leaf)
     if matrix_axis is None:
@@ -518,16 +527,43 @@ def _resolve_backend(requested_backend: str, item: ParamMetadata, leaf: Any) -> 
     return "dion2", matrix_axis, "fsdp_sharded_optimizer_state"
 
 
+def _resolve_expert_muon_backend(item: ParamMetadata, leaf: Any) -> tuple[str, int | None, str | None]:
+    if len(item.shape) != 3:
+        return "muon", None, None
+    sharded_axes = _sharded_axes(leaf, {"fsdp", "ep"})
+    matrix_sharded_axes = sorted(axis for axis in sharded_axes if axis in {1, 2})
+    if matrix_sharded_axes:
+        raise ContractError(
+            f"Muon routed expert route for parameter {'.'.join(item.path)!r} requires complete per-expert "
+            f"matrices; sharded matrix axes {matrix_sharded_axes} are unsupported until an explicit "
+            "distributed expert matrix optimizer exists"
+        )
+    if 0 in sharded_axes:
+        return "muon", None, "expert_axis_sharded_full_matrices"
+    return "muon", None, None
+
+
 def _validate_route(item: ParamMetadata, backend: str) -> None:
+    if backend == "muon" and item.tag in _MUON_EXPERT_TAGS:
+        if len(item.shape) != 3:
+            raise ContractError(
+                f"Muon routed expert route for parameter {'.'.join(item.path)!r} requires a rank-3 "
+                f"expert matrix stack, got shape {item.shape}"
+            )
+        return
     if backend in {"muon", "dion2"} and len(item.shape) != 2:
         display_backend = {"muon": "Muon", "dion2": "Dion2"}.get(backend, backend)
         raise ContractError(
             f"{display_backend} route for parameter {'.'.join(item.path)!r} requires a rank-2 matrix, "
             f"got shape {item.shape}"
         )
-    if item.tag in _MUON_TAGS and len(item.shape) != 2:
+    if item.tag in _MUON_MATRIX_TAGS and len(item.shape) != 2:
         raise ContractError(
             f"Muon-eligible parameter {'.'.join(item.path)!r} has tag {item.tag!r} but shape {item.shape}"
+        )
+    if item.tag in _MUON_EXPERT_TAGS and len(item.shape) != 3:
+        raise ContractError(
+            f"Muon routed expert parameter {'.'.join(item.path)!r} has tag {item.tag!r} but shape {item.shape}"
         )
 
 
@@ -570,17 +606,38 @@ def _params_by_metadata_path(params: PyTree) -> dict[tuple[str, ...], Any]:
 
 
 def _fsdp_matrix_axis(leaf: Any) -> int | None:
+    axes = _partition_axes(leaf)
+    if axes is None:
+        return None
+    fsdp_axes = [idx for idx, axis in enumerate(axes) if _axis_contains(axis, "fsdp")]
+    if not fsdp_axes:
+        return None
+    if len(fsdp_axes) != 1:
+        raise ContractError(f"Muon matrix route expects at most one fsdp-sharded parameter axis, got {axes}")
+    return fsdp_axes[0]
+
+
+def _sharded_axes(leaf: Any, names: set[str]) -> set[int]:
+    axes = _partition_axes(leaf)
+    if axes is None:
+        return set()
+    return {idx for idx, axis in enumerate(axes) if any(_axis_contains(axis, name) for name in names)}
+
+
+def _partition_axes(leaf: Any) -> tuple[Any, ...] | None:
     sharding = getattr(leaf, "sharding", None)
     spec = getattr(sharding, "spec", None)
     if spec is None:
         return None
-    axes = tuple(spec)
-    fsdp_axes = [idx for idx, axis in enumerate(axes) if axis == "fsdp"]
-    if not fsdp_axes:
-        return None
-    if len(fsdp_axes) != 1:
-        raise ContractError(f"Muon matrix route expects at most one fsdp-sharded parameter axis, got {spec}")
-    return fsdp_axes[0]
+    return tuple(spec)
+
+
+def _axis_contains(axis: Any, name: str) -> bool:
+    if axis == name:
+        return True
+    if isinstance(axis, tuple):
+        return name in axis
+    return False
 
 
 def _mask_from_assignments(
@@ -612,6 +669,7 @@ def _muon_description_suffix(spec: OptimizerSpec) -> str:
         f"muon_ns_coefficients={constants['newton_schulz_coefficients']} "
         f"muon_scale_mode={constants['scale_mode']} "
         f"muon_rms_match_scale={constants['rms_match_scale']:g} "
+        "muon_rank3_expert=per_expert_full_matrix "
         "adamw_fallback=true"
     )
 

@@ -72,23 +72,27 @@ def muon_transform(
 
 
 def zeropower_via_newton_schulz(value: jax.Array) -> jax.Array:
-    """Approximate the zeroth power of a 2D matrix using Newton-Schulz iterations."""
+    """Approximate the zeroth power of a matrix or expert-axis matrix stack."""
 
-    if len(value.shape) != 2:
-        raise ValueError(f"Muon Newton-Schulz expects rank-2 arrays, got shape {value.shape}")
+    if len(value.shape) not in {2, 3}:
+        raise ValueError(f"Muon Newton-Schulz expects rank-2 or expert-axis rank-3 arrays, got shape {value.shape}")
     original_dtype = value.dtype
     x = value.astype(jnp.bfloat16)
-    x = x / jnp.maximum(jnp.linalg.norm(x), jnp.asarray(MUON_NS_EPS, dtype=x.dtype))
-    transposed = x.shape[0] > x.shape[1]
+    norm_axes = (-2, -1) if x.ndim == 3 else None
+    x = x / jnp.maximum(
+        jnp.linalg.norm(x, axis=norm_axes, keepdims=norm_axes is not None),
+        jnp.asarray(MUON_NS_EPS, dtype=x.dtype),
+    )
+    transposed = x.shape[-2] > x.shape[-1]
     if transposed:
-        x = x.T
+        x = jnp.swapaxes(x, -1, -2)
     a, b, c = MUON_NS_COEFFICIENTS
     for _ in range(MUON_NS_STEPS):
-        xx_t = x @ x.T
+        xx_t = x @ jnp.swapaxes(x, -1, -2)
         update = b * xx_t + c * (xx_t @ xx_t)
         x = a * x + update @ x
     if transposed:
-        x = x.T
+        x = jnp.swapaxes(x, -1, -2)
     return x.astype(original_dtype)
 
 
@@ -108,4 +112,5 @@ def muon_policy_constants() -> dict[str, Any]:
 
 
 def _rms_match_scale(shape: tuple[int, ...]) -> jax.Array:
-    return jnp.asarray(MUON_RMS_MATCH_SCALE * math.sqrt(max(shape)), dtype=jnp.float32)
+    matrix_shape = shape[-2:] if len(shape) == 3 else shape
+    return jnp.asarray(MUON_RMS_MATCH_SCALE * math.sqrt(max(matrix_shape)), dtype=jnp.float32)

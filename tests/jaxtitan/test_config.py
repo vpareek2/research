@@ -73,6 +73,7 @@ def test_load_config_resolves_minimal_toml(tmp_path: Path) -> None:
     assert spec.training.gradient_accumulation_steps == 1
     assert spec.mesh.axis_names == ("data",)
     assert spec.parallelism.mode == "ddp"
+    assert spec.parallelism.expert_parallel is False
     assert spec.artifacts.root == Path("runs")
     assert spec.artifacts.wandb_enabled is False
     assert spec.artifacts.wandb_project == "jaxtitan"
@@ -499,6 +500,111 @@ def test_load_config_accepts_explicit_parallelism_modes(tmp_path: Path) -> None:
     assert load_config(ddp_path).parallelism.mode == "ddp"
     assert load_config(fsdp_path).parallelism.mode == "fsdp"
     assert load_config(zero2_path).parallelism.mode == "zero2"
+
+
+def test_load_config_accepts_expert_parallelism_with_ep_axis(tmp_path: Path) -> None:
+    config_path = tmp_path / "ep.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "ep"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 4]")
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 8
+top_k = 2
+
+[parallelism]
+mode = "ddp"
+expert_parallel = true
+"""
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.parallelism.mode == "ddp"
+    assert spec.parallelism.expert_parallel is True
+    assert spec.mesh.axis_names == ("data", "ep")
+
+
+def test_load_config_rejects_unused_ep_axis(tmp_path: Path) -> None:
+    config_path = tmp_path / "unused-ep.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('axis_names = ["data"]', 'axis_names = ["data", "ep"]').replace(
+            "axis_sizes = [1]",
+            "axis_sizes = [1, 2]",
+        )
+    )
+
+    with pytest.raises(ConfigError, match="expert_parallel"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_expert_parallel_without_ep_axis(tmp_path: Path) -> None:
+    config_path = tmp_path / "missing-ep.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 8
+top_k = 2
+
+[parallelism]
+expert_parallel = true
+"""
+    )
+
+    with pytest.raises(ConfigError, match="ep axis"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_expert_parallel_without_moe(tmp_path: Path) -> None:
+    config_path = tmp_path / "dense-ep.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('axis_names = ["data"]', 'axis_names = ["data", "ep"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 2]")
+        + """
+[parallelism]
+expert_parallel = true
+"""
+    )
+
+    with pytest.raises(ConfigError, match="Trinity MoE"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_expert_count_not_divisible_by_ep_axis(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad-ep.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "ep"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 4]")
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 6
+top_k = 2
+
+[parallelism]
+expert_parallel = true
+"""
+    )
+
+    with pytest.raises(ConfigError, match="num_experts"):
+        load_config(config_path)
 
 
 def test_load_config_rejects_invalid_parallelism_mode(tmp_path: Path) -> None:

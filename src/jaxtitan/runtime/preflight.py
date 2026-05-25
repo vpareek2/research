@@ -73,7 +73,12 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
 
     context = build_mesh_context(runtime_spec.mesh)
     model = build_model(runtime_spec.model, seed=runtime_spec.seed)
-    sharding = build_sharding_plan(context, parallelism=runtime_spec.parallelism, param_layouts=model.param_layouts)
+    sharding = build_sharding_plan(
+        context,
+        parallelism=runtime_spec.parallelism,
+        param_layouts=model.param_layouts,
+        expert_layouts=model.expert_layouts,
+    )
     model_state = place_model_state(model.state, sharding)
     optimizer_init_state = place_optimizer_init_state(model.state, sharding)
     optimizer = build_optimizer(runtime_spec.optimizer, optimizer_init_state, model.metadata)
@@ -203,6 +208,7 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
             "axis_sizes": runtime_spec.mesh.axis_sizes,
             "data_axis_size": context.data_axis_size,
             "fsdp_axis_size": context.fsdp_axis_size,
+            "ep_axis_size": context.ep_axis_size,
         },
         "data": {
             "mode": runtime_spec.data.mode,

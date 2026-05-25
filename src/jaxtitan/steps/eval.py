@@ -12,6 +12,7 @@ from jaxtitan.errors import ContractError
 from jaxtitan.metrics import EvalMetrics
 from jaxtitan.mesh import ShardingPlan, replicated_shardings_like
 from jaxtitan.models import apply_model_output
+from jaxtitan.models.execution import ModelExecutionContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +55,7 @@ def make_eval_step(
     if sharding is not None and state_template is None:
         raise ContractError("state_template is required when compiling eval step with explicit shardings")
     state_sharding = None if sharding is None else replicated_shardings_like(state_template, sharding)
+    execution = _model_execution_context(sharding)
     in_shardings = None
     out_shardings = None
     if sharding is not None:
@@ -66,7 +68,11 @@ def make_eval_step(
         out_shardings = (sharding.metrics, sharding.metrics)
 
     def _compiled_impl(state: Any, input_ids: Any, target_ids: Any, loss_mask: Any) -> tuple[Any, Any]:
-        output = apply_model_output(graph, state, input_ids)
+        output = (
+            apply_model_output(graph, state, input_ids)
+            if execution is None
+            else apply_model_output(graph, state, input_ids, execution=execution)
+        )
         loss = causal_lm_loss(output.logits, target_ids, loss_mask)
         return loss.loss_sum, loss.token_count
 
@@ -83,6 +89,12 @@ def make_eval_step(
         )
 
     return _eval
+
+
+def _model_execution_context(sharding: ShardingPlan | None) -> ModelExecutionContext | None:
+    if sharding is None or not sharding.parallelism.expert_parallel:
+        return None
+    return ModelExecutionContext(expert_parallel_mesh=sharding.mesh.mesh)
 
 
 def _validate_batch(batch: Batch, *, expected_batch_shape: tuple[int, int] | None = None) -> None:

@@ -136,7 +136,7 @@ def test_train_step_updates_trinity_moe_model_with_adamw() -> None:
     assert math.isfinite(float(jax.device_get(metrics.loss_sum)))
 
 
-def test_train_step_updates_trinity_moe_model_with_muon_fallback_routes() -> None:
+def test_train_step_updates_trinity_moe_model_with_per_expert_muon_routes() -> None:
     built = build_model(
         _tiny_trinity_spec(
             num_layers=2,
@@ -153,8 +153,8 @@ def test_train_step_updates_trinity_moe_model_with_muon_fallback_routes() -> Non
 
     routes = {assignment.tag: assignment for assignment in optimizer.route_assignments if assignment.tag.startswith("moe_")}
     for tag in ("moe_gate", "moe_up", "moe_down"):
-        assert routes[tag].backend == "adamw"
-        assert routes[tag].fallback_reason == "rank_not_two"
+        assert routes[tag].backend == "muon"
+        assert routes[tag].fallback_reason is None
     for tag in ("moe_shared_gate", "moe_shared_up", "moe_shared_down"):
         assert routes[tag].backend == "muon"
     assert routes["moe_router"].backend == "adamw"
@@ -641,6 +641,99 @@ def test_muon_train_step_supports_accumulation_remat_donation_and_sharding() -> 
     assert metrics.token_count == 64
     assert metrics.loss_sum.shape == ()
     assert {assignment.backend for assignment in optimizer.route_assignments} == {"adamw", "muon"}
+
+
+def test_ep_train_step_shards_routed_experts_and_uses_per_expert_muon() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_trinity_spec(
+            num_layers=2,
+            initial_dense_layers=1,
+            moe={"num_experts": 4, "top_k": 2},
+            compute_dtype="float32",
+            remat="block",
+        ),
+        seed=0,
+    )
+    context = build_mesh_context(MeshSpec(axis_names=("data", "ep"), axis_sizes=(1, 4)))
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(mode="ddp", expert_parallel=True),
+        param_layouts=built.param_layouts,
+        expert_layouts=built.expert_layouts,
+    )
+    model_state = place_model_state(built.state, plan)
+    optimizer = _optimizer(model_state, built.metadata, optimizer_name="muon")
+    state = initialize_train_state(model_state, optimizer.transform, seed=1)
+    step = make_train_step(
+        built.graph,
+        optimizer,
+        sharding=plan,
+        state_template=state,
+        donate_state=True,
+        expected_batch_shape=(1, 4, 4),
+    )
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
+
+    next_state, metrics = step(state, place_batch(batch, plan))
+
+    routes = {assignment.tag: assignment for assignment in optimizer.route_assignments if assignment.tag.startswith("moe_")}
+    for tag in ("moe_gate", "moe_up", "moe_down"):
+        assert routes[tag].backend == "muon"
+        assert routes[tag].resolution_reason == "expert_axis_sharded_full_matrices"
+    assert next_state.step == 1
+    assert next_state.tokens_seen == 16
+    assert metrics.token_count == 16
+    assert metrics.loss_sum.shape == ()
+    assert any(
+        getattr(leaf, "sharding", None).spec == jax.sharding.PartitionSpec("ep", None, None)
+        for leaf in jax.tree.leaves(next_state.model)
+        if hasattr(getattr(leaf, "sharding", None), "spec")
+    )
+
+
+def test_fsdp_ep_train_step_uses_dion2_for_dense_and_muon_for_routed_experts() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_trinity_spec(
+            num_layers=2,
+            initial_dense_layers=1,
+            moe={"num_experts": 4, "top_k": 2, "num_shared_experts": 1},
+            compute_dtype="float32",
+        ),
+        seed=0,
+    )
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp", "ep"), axis_sizes=(1, 2, 2)))
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(mode="fsdp", expert_parallel=True),
+        param_layouts=built.param_layouts,
+        expert_layouts=built.expert_layouts,
+    )
+    model_state = place_model_state(built.state, plan)
+    optimizer = _optimizer(model_state, built.metadata, optimizer_name="muon")
+    state = initialize_train_state(model_state, optimizer.transform, seed=1)
+    step = make_train_step(
+        built.graph,
+        optimizer,
+        sharding=plan,
+        state_template=state,
+        donate_state=True,
+        expected_batch_shape=(1, 4, 4),
+    )
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
+
+    next_state, metrics = step(state, place_batch(batch, plan))
+
+    routes = {assignment.tag: assignment.backend for assignment in optimizer.route_assignments}
+    assert routes["attention_q"] == "dion2"
+    assert routes["moe_gate"] == "muon"
+    assert routes["moe_up"] == "muon"
+    assert routes["moe_down"] == "muon"
+    assert next_state.step == 1
+    assert next_state.tokens_seen == 16
+    assert metrics.token_count == 16
+    assert metrics.loss_sum.shape == ()
 
 
 def test_train_step_with_data_axis_sharding_reports_global_metrics() -> None:

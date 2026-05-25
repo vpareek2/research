@@ -11,6 +11,7 @@ from jaxtitan.errors import ContractError
 from jaxtitan.metrics import StepMetrics
 from jaxtitan.mesh import ShardingPlan, gradient_shardings_like, replicated_shardings_like
 from jaxtitan.models import apply_model_output
+from jaxtitan.models.execution import ModelExecutionContext
 from jaxtitan.optim import OptimizerBuildResult, OptimizerTransform
 from jaxtitan.specs.model import MoeBalanceSpec
 from jaxtitan.specs.run import TrainingLossSpec
@@ -82,6 +83,7 @@ def make_train_step(
         if sharding is None or sharding.parallelism.mode != "zero2"
         else gradient_shardings_like(state_template.model, sharding)
     )
+    execution = _model_execution_context(sharding)
     in_shardings = None
     out_shardings = None
     if sharding is not None:
@@ -107,7 +109,11 @@ def make_train_step(
 
         def microbatch_grad(params: Any, micro_input_ids: Any, micro_target_ids: Any, micro_loss_mask: Any):
             def objective_sum_fn(loss_params: Any):
-                output = apply_model_output(graph, loss_params, micro_input_ids)
+                output = (
+                    apply_model_output(graph, loss_params, micro_input_ids)
+                    if execution is None
+                    else apply_model_output(graph, loss_params, micro_input_ids, execution=execution)
+                )
                 loss = causal_lm_loss(output.logits, micro_target_ids, micro_loss_mask)
                 aux_loss = _aux_loss_value(output.aux_losses)
                 moe_aux_loss = _aux_loss_value(output.aux_losses, name_prefix="moe_")
@@ -377,6 +383,12 @@ def make_train_step(
         return next_state, metrics
 
     return _train
+
+
+def _model_execution_context(sharding: ShardingPlan | None) -> ModelExecutionContext | None:
+    if sharding is None or not sharding.parallelism.expert_parallel:
+        return None
+    return ModelExecutionContext(expert_parallel_mesh=sharding.mesh.mesh)
 
 
 def _validate_train_batch(batch: Batch, *, expected_batch_shape: tuple[int, int, int] | None) -> None:

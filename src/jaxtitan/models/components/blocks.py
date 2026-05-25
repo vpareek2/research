@@ -15,6 +15,7 @@ from jaxtitan.models.components.attention import (
 from jaxtitan.models.components.ffn import DecoderSwiGLU
 from jaxtitan.models.components.moe import SparseMoE
 from jaxtitan.models.components.norm import build_rms_norm
+from jaxtitan.models.execution import ModelExecutionContext
 from jaxtitan.specs.model import ModelSpec, TrinityMoeSpec
 
 
@@ -188,12 +189,15 @@ class TrinityMoEBlock(nnx.Module):
         x: jax.Array,
         context: FullAttentionContext,
         layer_index: int,
+        *,
+        execution: ModelExecutionContext | None = None,
     ) -> tuple[jax.Array, tuple[Any, ...], tuple[Any, ...]]:
         x = x + self.attn_post_norm(self.attn(self.attn_pre_norm(x), context))
         mlp_out, aux_losses, router_stats = self.mlp.forward_with_output(
             self.ffn_pre_norm(x),
             name=f"layers.{layer_index}.mlp",
             layer_index=layer_index,
+            execution=execution,
         )
         x = x + self.ffn_post_norm(mlp_out)
         return x, aux_losses, router_stats

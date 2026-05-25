@@ -12,6 +12,7 @@ import numpy as np
 
 from jaxtitan.data import data_pipeline_compat_payload, dataset_manifest_sha256, hf_streaming_compat_payload
 from jaxtitan.errors import ContractError
+from jaxtitan.models.execution import expert_parallel_policy_payload
 from jaxtitan.optim import optimizer_policy_summary
 from jaxtitan.services import CheckpointRestore
 from jaxtitan.specs.run import RunSpec
@@ -43,7 +44,14 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
             ),
         },
         "mesh": _normalize(spec.mesh),
-        "parallelism": _normalize(spec.parallelism),
+        "parallelism": {
+            **_normalize(spec.parallelism),
+            "expert_parallel_policy": expert_parallel_policy_payload(
+                enabled=spec.parallelism.expert_parallel,
+                ep_axis_size=dict(zip(spec.mesh.axis_names, spec.mesh.axis_sizes, strict=True)).get("ep", 1),
+                num_experts=_moe_num_experts(spec),
+            ),
+        },
         "data": _data_compat_payload(spec),
         "training": {
             "precision": spec.training.precision,
@@ -105,6 +113,13 @@ def _data_compat_payload(spec: RunSpec) -> dict[str, Any]:
             ),
         }
     raise ContractError(f"unsupported data.mode={spec.data.mode!r}")
+
+
+def _moe_num_experts(spec: RunSpec) -> int | None:
+    trinity = spec.model.trinity
+    if trinity is None or trinity.moe is None:
+        return None
+    return trinity.moe.num_experts
 
 
 def checkpoint_metadata(

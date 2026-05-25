@@ -14,7 +14,7 @@ from jaxtitan.models.components.dtypes import dtype_from_name
 from jaxtitan.models.components.init import truncated_normal_init
 from jaxtitan.models.components.norm import build_rms_norm
 from jaxtitan.models.components.position import precompute_rope
-from jaxtitan.models.execution import apply_layer
+from jaxtitan.models.execution import ModelExecutionContext, apply_layer
 from jaxtitan.models.output import ModelOutput
 from jaxtitan.specs.model import ModelSpec, TrinitySpec
 
@@ -66,7 +66,7 @@ class TrinityModel(nnx.Module):
             rngs=rngs,
         )
 
-    def __call__(self, input_ids: Any) -> ModelOutput:
+    def __call__(self, input_ids: Any, execution: ModelExecutionContext | None = None) -> ModelOutput:
         input_ids = jnp.asarray(input_ids)
         if input_ids.ndim != 2:
             raise ContractError(f"input_ids must have shape [batch, seq], got {input_ids.shape}")
@@ -87,7 +87,12 @@ class TrinityModel(nnx.Module):
             context = FullAttentionContext(cos=None, sin=None) if kind == "global" else FullAttentionContext(cos=cos, sin=sin)
             if hasattr(layer, "forward_with_output"):
                 def layer_call(hidden, layer_context, *, current_layer=layer, current_index=layer_index):
-                    return current_layer.forward_with_output(hidden, layer_context, current_index)
+                    return current_layer.forward_with_output(
+                        hidden,
+                        layer_context,
+                        current_index,
+                        execution=execution,
+                    )
 
                 x, layer_aux_losses, layer_router_stats = apply_layer(
                     layer_call,

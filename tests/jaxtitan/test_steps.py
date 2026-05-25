@@ -7,10 +7,11 @@ import pytest
 
 from jaxtitan.batch import Batch
 from jaxtitan.errors import ContractError
-from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch, place_replicated
+from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_batch, place_model_state, place_replicated
 from jaxtitan.models import AuxLoss, ModelOutput, build_model
 from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
+from jaxtitan.specs.parallelism import ParallelismSpec
 from jaxtitan.steps import causal_lm_loss, eval_step, make_eval_step
 import jaxtitan.steps.eval as eval_module
 
@@ -176,6 +177,38 @@ def test_make_eval_step_with_data_axis_sharding_reports_global_metrics() -> None
     assert metrics.loss_sum.sharding == plan.metrics
 
 
+def test_make_eval_step_supports_expert_parallel_dispatcher() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_trinity_spec(
+            num_layers=2,
+            trinity={
+                "initial_dense_layers": 1,
+                "local_window": 4,
+                "local_layers_per_global": 3,
+                "moe": {"num_experts": 4, "top_k": 2},
+            },
+        ),
+        seed=1,
+    )
+    context = build_mesh_context(MeshSpec(axis_names=("data", "ep"), axis_sizes=(1, 4)))
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(mode="ddp", expert_parallel=True),
+        param_layouts=built.param_layouts,
+        expert_layouts=built.expert_layouts,
+    )
+    model_state = place_model_state(built.state, plan)
+    step = make_eval_step(built.graph, sharding=plan, state_template=model_state, expected_batch_shape=(4, 4))
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
+
+    metrics = step(model_state, place_batch(batch, plan))
+
+    assert metrics.token_count == 16
+    assert metrics.loss_sum.shape == ()
+    assert metrics.loss_sum.sharding == plan.metrics
+
+
 def test_repeated_compiled_eval_calls_return_stable_shapes_and_dtypes() -> None:
     built = build_model(_tiny_spec(), seed=2)
     step = make_eval_step(built.graph, expected_batch_shape=(2, 4))
@@ -191,18 +224,44 @@ def test_repeated_compiled_eval_calls_return_stable_shapes_and_dtypes() -> None:
     assert first.num_batches.dtype == second.num_batches.dtype
 
 
-def _tiny_spec() -> ModelSpec:
+def _tiny_spec(**overrides) -> ModelSpec:
+    values = {
+        "name": "decoder",
+        "variant": "tiny",
+        "vocab_size": 16,
+        "hidden_size": 8,
+        "intermediate_size": 16,
+        "num_layers": 1,
+        "num_heads": 2,
+        "n_kv_heads": 1,
+        "max_seq_len": 4,
+        "compute_dtype": "float32",
+    }
+    values.update(overrides)
+    return ModelSpec(**values)
+
+
+def _tiny_trinity_spec(**overrides) -> ModelSpec:
+    values = {
+        "name": "trinity",
+        "variant": "tiny-trinity",
+        "vocab_size": 16,
+        "hidden_size": 8,
+        "intermediate_size": 16,
+        "num_layers": 1,
+        "num_heads": 2,
+        "n_kv_heads": 1,
+        "max_seq_len": 4,
+        "compute_dtype": "float32",
+        "trinity": {
+            "initial_dense_layers": 0,
+            "local_window": 4,
+            "local_layers_per_global": 3,
+        },
+    }
+    values.update(overrides)
     return ModelSpec(
-        name="decoder",
-        variant="tiny",
-        vocab_size=16,
-        hidden_size=8,
-        intermediate_size=16,
-        num_layers=1,
-        num_heads=2,
-        n_kv_heads=1,
-        max_seq_len=4,
-        compute_dtype="float32",
+        **values,
     )
 
 

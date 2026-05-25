@@ -158,7 +158,7 @@ def test_sharding_policy_summary_records_data_parallel_policy() -> None:
     assert summary["optimizer_state"]["partition_spec"] == "PartitionSpec()"
     assert summary["metrics"]["partition_spec"] == "PartitionSpec()"
     assert summary["checkpoint"]["restore_template"]["partition_spec"] == "PartitionSpec()"
-    assert summary["reserved"] == {"fsdp": None, "tp": None, "kv_cache": None}
+    assert summary["reserved"] == {"fsdp": None, "ep": None, "tp": None, "kv_cache": None}
 
 
 def test_compile_contract_summary_records_donation_shapes_and_shardings() -> None:

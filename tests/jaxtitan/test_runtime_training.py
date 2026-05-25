@@ -1211,6 +1211,101 @@ def test_run_training_writes_moe_router_layer_diagnostics(
     assert final["final_optimizer_route_backend_counts"] == row["optimizer_route_backend_counts"]
 
 
+def test_run_training_records_trinity_moe_per_expert_muon_routes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "moe-muon-routes",
+        shard_token_groups=(tuple(range(0, 40)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=8,
+            log_every_steps=1,
+            model_name="trinity",
+            num_layers=2,
+            optimizer_name="muon",
+            trinity_moe_balance_name="none",
+        )
+    )
+
+    run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+    row = _jsonl(run_dir / "metrics" / "train.jsonl")[-1]
+    routes = {(route["tag"], route["backend"]) for route in diagnostics["optimizer"]["routes"]}
+    groups = {(group["tag"], group["backend"]) for group in row["optimizer_groups"]}
+
+    for tag in ("moe_gate", "moe_up", "moe_down"):
+        assert (tag, "muon") in routes
+        assert (tag, "muon") in groups
+    assert diagnostics["optimizer"]["muon"]["rank3_expert_policy"] == "per_expert_full_matrix_when_complete_local"
+    assert diagnostics["optimizer"]["route_counts"]["muon"] > 0
+    assert row["optimizer_route_backend_counts"]["muon"] > 0
+
+
+def test_run_training_accepts_expert_parallel_moe_muon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "moe-ep-muon",
+        shard_token_groups=(tuple(range(0, 80)),),
+        train_tokens=50,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            model_name="trinity",
+            num_layers=2,
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=4,
+            n_kv_heads=4,
+            global_batch_size=4,
+            optimizer_name="muon",
+            axis_names=("data", "ep"),
+            axis_sizes=(1, 4),
+            expert_parallel=True,
+            trinity_moe_balance_name="none",
+            trinity_moe_num_experts=4,
+            checkpoint_every_steps=1,
+        )
+    )
+
+    summary = run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+    row = _jsonl(run_dir / "metrics" / "train.jsonl")[-1]
+    metadata = json.loads((run_dir / "checkpoints" / "000001" / "metadata" / "metadata").read_text())
+
+    assert summary.execution_mode == "replicated_data_parallel+ep"
+    assert diagnostics["parallelism"]["expert_parallel"] is True
+    assert diagnostics["parallelism"]["expert_parallel_policy"]["dispatcher_backend"] == "all_to_all"
+    assert diagnostics["parallelism"]["expert_parallel_policy"]["capacity_policy"] == "strict_dropless_static_source_buckets"
+    assert diagnostics["parallelism"]["mesh"]["ep_axis_size"] == 4
+    assert diagnostics["sharding"]["model_state"]["ep_sharded_leaves"] == 3
+    assert diagnostics["sharding"]["optimizer_state"]["ep_sharded_leaves"] == 3
+    assert diagnostics["optimizer"]["route_counts"]["muon"] > 0
+    assert row["optimizer_route_backend_counts"]["muon"] > 0
+    assert metadata["compatibility"]["parallelism"]["expert_parallel"] is True
+    assert metadata["compatibility"]["parallelism"]["expert_parallel_policy"]["dispatcher_backend"] == "all_to_all"
+
+
 def test_run_training_records_failure_when_dataset_exhausts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2064,6 +2159,8 @@ def _training_config(
     document_buffer_size: int | None = None,
     document_refill_size: int | None = None,
     trinity_moe_balance_name: str | None = None,
+    trinity_moe_num_experts: int = 3,
+    expert_parallel: bool = False,
     artifacts_block: str = "",
     profiling_block: str = "",
 ) -> str:
@@ -2099,7 +2196,7 @@ local_window = {seq_len}
 local_layers_per_global = 1
 
 [model.trinity.moe]
-num_experts = 3
+num_experts = {trinity_moe_num_experts}
 top_k = 2
 
 [model.trinity.moe.balance]
@@ -2158,6 +2255,7 @@ axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 
 [parallelism]
 mode = "{parallelism_mode}"
+expert_parallel = {str(expert_parallel).lower()}
 {artifacts_block}
 {profiling_block}
 {eval_block}

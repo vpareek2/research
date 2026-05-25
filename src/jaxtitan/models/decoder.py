@@ -14,7 +14,7 @@ from jaxtitan.models.components.attention import FullAttentionContext
 from jaxtitan.models.components.blocks import DecoderBlock
 from jaxtitan.models.components.dtypes import dtype_from_name
 from jaxtitan.models.components.position import precompute_rope
-from jaxtitan.models.execution import apply_layer
+from jaxtitan.models.execution import ModelExecutionContext, apply_layer
 from jaxtitan.models.output import ModelOutput, ensure_model_output
 from jaxtitan.specs.model import ModelSpec
 
@@ -42,6 +42,18 @@ class ParamLayout:
 
 
 @dataclass(frozen=True, slots=True)
+class ExpertLayout:
+    """MoE expert matrix layout policy for optimizer and EP planning."""
+
+    path: tuple[str, ...]
+    tag: str
+    shape: tuple[int, ...]
+    expert_axis: int
+    matrix_axes: tuple[int, int]
+    fsdp_axis: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class ModelBuildResult:
     """Explicit model graph/state split plus parameter metadata."""
 
@@ -49,6 +61,7 @@ class ModelBuildResult:
     state: Any
     metadata: tuple[ParamMetadata, ...]
     param_layouts: tuple[ParamLayout, ...]
+    expert_layouts: tuple[ExpertLayout, ...]
 
 
 def build_model(spec: ModelSpec, seed: int) -> ModelBuildResult:
@@ -64,20 +77,38 @@ def build_model(spec: ModelSpec, seed: int) -> ModelBuildResult:
         raise ContractError(f"unsupported model.name {spec.name!r}; expected 'decoder' or 'trinity'")
     graph, state = nnx.split(model)
     metadata = parameter_metadata(state)
-    return ModelBuildResult(graph=graph, state=state, metadata=metadata, param_layouts=parameter_layouts(metadata))
+    return ModelBuildResult(
+        graph=graph,
+        state=state,
+        metadata=metadata,
+        param_layouts=parameter_layouts(metadata),
+        expert_layouts=expert_layouts(metadata),
+    )
 
 
-def apply_model_output(graph: Any, state: Any, input_ids: Any) -> ModelOutput:
+def apply_model_output(
+    graph: Any,
+    state: Any,
+    input_ids: Any,
+    *,
+    execution: ModelExecutionContext | None = None,
+) -> ModelOutput:
     """Apply a split model graph/state and return the structured output."""
 
     model = nnx.merge(graph, state)
-    return ensure_model_output(model(input_ids))
+    return ensure_model_output(model(input_ids, execution=execution))
 
 
-def apply_model(graph: Any, state: Any, input_ids: Any) -> jax.Array:
+def apply_model(
+    graph: Any,
+    state: Any,
+    input_ids: Any,
+    *,
+    execution: ModelExecutionContext | None = None,
+) -> jax.Array:
     """Apply a split model graph/state to token ids."""
 
-    return apply_model_output(graph, state, input_ids).logits
+    return apply_model_output(graph, state, input_ids, execution=execution).logits
 
 
 def prefill_model(
@@ -140,6 +171,12 @@ def parameter_layouts(metadata: tuple[ParamMetadata, ...]) -> tuple[ParamLayout,
     return tuple(_layout_for_metadata(item) for item in metadata)
 
 
+def expert_layouts(metadata: tuple[ParamMetadata, ...]) -> tuple[ExpertLayout, ...]:
+    """Build MoE expert matrix metadata for optimizer and expert-parallel planning."""
+
+    return tuple(_expert_layout_for_metadata(item) for item in metadata if item.tag in _ROUTED_EXPERT_TAGS)
+
+
 class DecoderModel(nnx.Module):
     """Decoder-only language model recipe built from reusable components."""
 
@@ -173,7 +210,8 @@ class DecoderModel(nnx.Module):
             rngs=rngs,
         )
 
-    def __call__(self, input_ids: Any) -> jax.Array:
+    def __call__(self, input_ids: Any, execution: ModelExecutionContext | None = None) -> jax.Array:
+        del execution
         input_ids = jnp.asarray(input_ids)
         if input_ids.ndim != 2:
             raise ContractError(f"input_ids must have shape [batch, seq], got {input_ids.shape}")
@@ -304,6 +342,9 @@ def _moe_tag(path: tuple[str, ...]) -> str:
     raise ContractError(f"unrecognized MoE parameter path {'.'.join(path)}")
 
 
+_ROUTED_EXPERT_TAGS = frozenset({"moe_gate", "moe_up", "moe_down"})
+
+
 def _layout_for_metadata(item: ParamMetadata) -> ParamLayout:
     logical_axes, fsdp_axis = _layout_policy(item)
     if len(logical_axes) != len(item.shape):
@@ -319,6 +360,27 @@ def _layout_for_metadata(item: ParamMetadata) -> ParamLayout:
         shape=item.shape,
         logical_axes=logical_axes,
         fsdp_axis=fsdp_axis,
+    )
+
+
+def _expert_layout_for_metadata(item: ParamMetadata) -> ExpertLayout:
+    if item.tag not in _ROUTED_EXPERT_TAGS:
+        raise ContractError(f"parameter {'.'.join(item.path)!r} is not a routed expert tensor")
+    if len(item.shape) != 3:
+        raise ContractError(f"routed expert parameter {'.'.join(item.path)!r} must be rank 3, got {item.shape}")
+    if item.tag in {"moe_gate", "moe_up"}:
+        matrix_axes = (1, 2)
+    elif item.tag == "moe_down":
+        matrix_axes = (1, 2)
+    else:
+        raise ContractError(f"unrecognized routed expert tag {item.tag!r}")
+    return ExpertLayout(
+        path=item.path,
+        tag=item.tag,
+        shape=item.shape,
+        expert_axis=0,
+        matrix_axes=matrix_axes,
+        fsdp_axis=None,
     )
 
 

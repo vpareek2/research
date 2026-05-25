@@ -16,6 +16,11 @@ import numpy as np
 
 from jaxtitan import __version__
 from jaxtitan.models import ParamMetadata, count_parameters
+from jaxtitan.models.execution import (
+    EXPERT_PARALLEL_CAPACITY_POLICY,
+    EXPERT_PARALLEL_DISPATCHER_BACKEND,
+    expert_parallel_policy_payload,
+)
 from jaxtitan.optim import optimizer_policy_summary
 from jaxtitan.runtime.profiling import profiling_runtime_summary
 from jaxtitan.specs.model import ModelSpec
@@ -202,6 +207,7 @@ def build_runtime_diagnostics(
             "axis_sizes": list(spec.mesh.axis_sizes),
             "data_axis_size": context.data_axis_size,
             "fsdp_axis_size": context.fsdp_axis_size,
+            "ep_axis_size": context.ep_axis_size,
             "global_mesh_size": _product(spec.mesh.axis_sizes),
             "selected_device_count": device_count,
             "selected_addressable_device_count": device_count,
@@ -308,6 +314,12 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
         {
             "schema_version": 1,
             "mode": spec.parallelism.mode,
+            "expert_parallel": spec.parallelism.expert_parallel,
+            "expert_parallel_policy": expert_parallel_policy_payload(
+                enabled=spec.parallelism.expert_parallel,
+                ep_axis_size=context.ep_axis_size,
+                num_experts=_moe_num_experts(spec),
+            ),
             "execution_mode": runtime_execution_mode(spec),
             "metrics_scope": METRICS_SCOPE,
             "artifact_writer": ARTIFACT_WRITER,
@@ -327,6 +339,7 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
                 "axis_sizes": list(spec.mesh.axis_sizes),
                 "data_axis_size": context.data_axis_size,
                 "fsdp_axis_size": context.fsdp_axis_size,
+                "ep_axis_size": context.ep_axis_size,
             },
             "batch": {
                 "global_batch_size": spec.training.global_batch_size,
@@ -385,6 +398,14 @@ def sharding_policy_summary(plan: Any) -> dict[str, Any]:
                 "fsdp": None
                 if plan.parallelism.mode == "ddp"
                 else {"enabled": True, "axis_size": plan.mesh.fsdp_axis_size},
+                "ep": None
+                if not plan.parallelism.expert_parallel
+                else {
+                    "enabled": True,
+                    "axis_size": plan.mesh.ep_axis_size,
+                    "dispatcher_backend": EXPERT_PARALLEL_DISPATCHER_BACKEND,
+                    "capacity_policy": EXPERT_PARALLEL_CAPACITY_POLICY,
+                },
                 "tp": None,
                 "kv_cache": None,
             },
@@ -400,12 +421,15 @@ def _state_policy_summary(plan: Any, *, placement: str) -> dict[str, Any]:
         fsdp_sharded = 0
     else:
         fsdp_sharded = sum(1 for sharding in shardings if "fsdp" in str(getattr(sharding, "spec", "")))
-    replicated = len(shardings) - fsdp_sharded
+    ep_sharded = sum(1 for sharding in shardings if "ep" in str(getattr(sharding, "spec", "")))
+    replicated = len(shardings) - fsdp_sharded - ep_sharded
     return {
         "mode": plan.parallelism.mode,
+        "expert_parallel": plan.parallelism.expert_parallel,
         "partition_spec": _partition_spec_string(getattr(plan.replicated, "spec", None)),
         "parameter_leaves": len(shardings),
         "fsdp_sharded_leaves": fsdp_sharded,
+        "ep_sharded_leaves": ep_sharded,
         "replicated_leaves": replicated,
     }
 
@@ -559,8 +583,17 @@ def runtime_execution_mode(spec: RunSpec) -> str:
     """Return the artifact-facing execution mode name."""
 
     if spec.parallelism.mode in {"zero2", "fsdp"}:
-        return spec.parallelism.mode
+        return f"{spec.parallelism.mode}+ep" if spec.parallelism.expert_parallel else spec.parallelism.mode
+    if spec.parallelism.expert_parallel:
+        return "replicated_data_parallel+ep"
     return EXECUTION_MODE
+
+
+def _moe_num_experts(spec: RunSpec) -> int | None:
+    trinity = spec.model.trinity
+    if trinity is None or trinity.moe is None:
+        return None
+    return trinity.moe.num_experts
 
 
 def _telemetry_fields(telemetry: Mapping[str, Any]) -> dict[str, Any]:

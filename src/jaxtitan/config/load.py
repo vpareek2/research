@@ -301,7 +301,10 @@ def _mesh_section(raw: Mapping[str, Any]) -> TomlMeshSection:
 
 
 def _parallelism_section(raw: Mapping[str, Any]) -> TomlParallelismSection:
-    return TomlParallelismSection(mode=_optional_str(raw, "mode", "parallelism", default="ddp"))
+    return TomlParallelismSection(
+        mode=_optional_str(raw, "mode", "parallelism", default="ddp"),
+        expert_parallel=_optional_bool(raw, "expert_parallel", "parallelism", default=False),
+    )
 
 
 def _artifact_section(raw: Mapping[str, Any]) -> TomlArtifactSection:

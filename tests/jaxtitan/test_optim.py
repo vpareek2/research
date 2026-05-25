@@ -91,16 +91,21 @@ def test_adamw_build_init_and_update_accept_nnx_model_state() -> None:
 def test_muon_newton_schulz_is_finite_shape_preserving_and_deterministic() -> None:
     tall = jnp.arange(15, dtype=jnp.float32).reshape(5, 3) / 10.0
     wide = jnp.arange(15, dtype=jnp.float32).reshape(3, 5) / 10.0
+    expert_stack = jnp.stack([tall, tall + 1.0], axis=0)
 
     first = zeropower_via_newton_schulz(tall)
     second = zeropower_via_newton_schulz(tall)
     wide_result = zeropower_via_newton_schulz(wide)
+    expert_result = zeropower_via_newton_schulz(expert_stack)
 
     assert first.shape == tall.shape
     assert wide_result.shape == wide.shape
+    assert expert_result.shape == expert_stack.shape
     assert jnp.all(jnp.isfinite(first))
     assert jnp.all(jnp.isfinite(wide_result))
+    assert jnp.all(jnp.isfinite(expert_result))
     assert jnp.all(first == second)
+    assert jnp.allclose(expert_result[0], first)
 
 
 def test_dion2_selects_expected_rows_and_columns() -> None:
@@ -198,7 +203,7 @@ def test_muon_primary_routes_hidden_matrices_to_muon_with_adamw_fallback() -> No
     assert assignments[("norm", "scale")].fallback_reason == "norm"
 
 
-def test_muon_routes_shared_moe_matrices_and_excludes_expert_bias_weight_decay() -> None:
+def test_muon_routes_moe_matrices_and_excludes_expert_bias_weight_decay() -> None:
     result = build_model(
         _tiny_trinity_spec(
             num_layers=2,
@@ -217,10 +222,13 @@ def test_muon_routes_shared_moe_matrices_and_excludes_expert_bias_weight_decay()
     assert assignments["moe_shared_gate"].backend == "muon"
     assert assignments["moe_shared_up"].backend == "muon"
     assert assignments["moe_shared_down"].backend == "muon"
+    assert assignments["moe_gate"].backend == "muon"
+    assert assignments["moe_up"].backend == "muon"
+    assert assignments["moe_down"].backend == "muon"
+    assert assignments["moe_gate"].fallback_reason is None
+    assert assignments["moe_up"].fallback_reason is None
+    assert assignments["moe_down"].fallback_reason is None
     assert assignments["moe_router"].backend == "adamw"
-    assert assignments["moe_gate"].fallback_reason == "rank_not_two"
-    assert assignments["moe_up"].fallback_reason == "rank_not_two"
-    assert assignments["moe_down"].fallback_reason == "rank_not_two"
     assert assignments["moe_expert_bias"].backend == "adamw"
     assert assignments["moe_expert_bias"].weight_decay is False
     assert assignments["moe_expert_bias"].fallback_reason == "expert_bias"
@@ -247,20 +255,63 @@ def test_optimizer_policy_summary_records_distributed_safety() -> None:
     }
     assert adamw_policy["adamw"]["distributed_policy"] == "elementwise_shard_safe"
     assert muon_policy["distributed_policy"] == {
-        "optimizer_state": "replicated_muon_or_sharded_dion2",
-        "gradient_update": "muon_when_replicated_dion2_when_sharded",
+        "optimizer_state": "replicated_or_expert_axis_muon_and_sharded_dion2",
+        "gradient_update": "muon_when_complete_matrix_dion2_when_rank2_sharded",
         "zero2_fsdp": "auto_dion2",
     }
     assert muon_policy["muon"]["newton_schulz_precision"] == "bfloat16"
     assert muon_policy["muon"]["distributed_policy"] == "replicated_or_auto_dion2_when_sharded"
     assert muon_policy["muon"]["distributed_matrix_update"] == "auto_dion2"
+    assert muon_policy["muon"]["rank3_expert_policy"] == "per_expert_full_matrix_when_complete_local"
     assert muon_policy["dion2"]["fraction"] == 0.25
     assert muon_policy["auto_routing"]["active"] is False
     route_policies = {route["backend"]: route["distributed_policy"] for route in muon_policy["routes"]}
     assert route_policies == {
         "adamw": "elementwise_shard_safe",
-        "muon": "replicated_full_matrix_only",
+        "muon": "complete_matrix_or_per_expert_complete_matrix",
     }
+
+
+def test_rank3_moe_expert_muon_updates_selected_expert_matrices() -> None:
+    params = {"expert": jnp.ones((2, 3, 4), dtype=jnp.float32)}
+    grads = {"expert": jnp.ones((2, 3, 4), dtype=jnp.float32)}
+    metadata = (
+        ParamMetadata(path=("expert",), shape=(2, 3, 4), dtype="float32", count=24, tag="moe_gate"),
+    )
+    built = build_optimizer(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.0),
+        params,
+        metadata,
+    )
+
+    opt_state = built.transform.init(params)
+    updates, next_opt_state = built.transform.update(grads, opt_state, params=params)
+
+    assert built.route_assignments[0].backend == "muon"
+    assert updates["expert"].shape == params["expert"].shape
+    assert jnp.any(updates["expert"] != 0)
+    momentum_leaf = jax.tree.leaves(next_opt_state)[1]
+    assert momentum_leaf.shape == params["expert"].shape
+
+
+def test_rank3_moe_expert_muon_rejects_matrix_axis_sharding() -> None:
+    require_fake_devices()
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
+    sharded = jax.device_put(
+        jnp.ones((2, 4, 8), dtype=jnp.float32),
+        jax.sharding.NamedSharding(context.mesh, jax.sharding.PartitionSpec(None, "fsdp", None)),
+    )
+    params = {"expert": sharded}
+    metadata = (
+        ParamMetadata(path=("expert",), shape=(2, 4, 8), dtype="float32", count=64, tag="moe_gate"),
+    )
+
+    with pytest.raises(ContractError, match="complete per-expert matrices"):
+        build_optimizer(
+            OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.0),
+            params,
+            metadata,
+        )
 
 
 def test_sharded_muon_routes_auto_resolve_to_dion2() -> None:
