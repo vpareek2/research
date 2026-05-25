@@ -416,6 +416,58 @@ def test_all_to_all_expert_dispatcher_matches_local_dispatcher_on_ep_mesh() -> N
     assert jnp.allclose(actual, expected, atol=1e-5)
 
 
+def test_all_to_all_expert_dispatcher_matches_local_dispatcher_on_data_ep_mesh() -> None:
+    mesh = Mesh(np.asarray(jax.devices()[:4], dtype=object).reshape((2, 2)), ("data", "ep"))
+    experts = ExpertSwiGLU(
+        hidden_size=3,
+        intermediate_size=5,
+        num_experts=4,
+        dtype=jnp.float32,
+        param_dtype=jnp.float32,
+        rngs=nnx.Rngs(0),
+    )
+    gate = jnp.arange(4 * 3 * 5, dtype=jnp.float32).reshape(4, 3, 5) / 37.0
+    up = jnp.arange(4 * 3 * 5, dtype=jnp.float32).reshape(4, 3, 5)[::-1] / 41.0
+    down = jnp.arange(4 * 5 * 3, dtype=jnp.float32).reshape(4, 5, 3) / 43.0
+    experts.gate[...] = jax.device_put(gate, NamedSharding(mesh, P("ep", None, None)))
+    experts.up[...] = jax.device_put(up, NamedSharding(mesh, P("ep", None, None)))
+    experts.down[...] = jax.device_put(down, NamedSharding(mesh, P("ep", None, None)))
+    x = jax.device_put(
+        jnp.arange(4 * 3 * 3, dtype=jnp.float32).reshape(4, 3, 3) / 17.0,
+        NamedSharding(mesh, P("data", None, None)),
+    )
+    expert_ids = jax.device_put(
+        jnp.asarray(
+            [
+                [[0, 1], [2, 3], [1, 3]],
+                [[3, 1], [0, 2], [2, 1]],
+                [[1, 0], [3, 2], [0, 3]],
+                [[2, 0], [1, 3], [3, 2]],
+            ],
+            dtype=jnp.int32,
+        ),
+        NamedSharding(mesh, P("data", None, None)),
+    )
+    weights = jax.device_put(
+        jnp.asarray(
+            [
+                [[0.25, 0.75], [0.5, 0.5], [0.4, 0.6]],
+                [[0.55, 0.45], [0.3, 0.7], [0.65, 0.35]],
+                [[0.2, 0.8], [0.6, 0.4], [0.45, 0.55]],
+                [[0.7, 0.3], [0.35, 0.65], [0.15, 0.85]],
+            ],
+            dtype=jnp.float32,
+        ),
+        NamedSharding(mesh, P("data", None, None)),
+    )
+    expected = LocalExpertDispatcher()(experts, x, expert_ids, weights)
+
+    actual = AllToAllExpertDispatcher(mesh)(experts, x, expert_ids, weights)
+
+    assert actual.sharding.spec == P("data", None, None)
+    assert jnp.allclose(actual, expected, atol=1e-5)
+
+
 def test_all_to_all_expert_dispatcher_lowers_collectives() -> None:
     mesh = Mesh(np.asarray(jax.devices()[:4], dtype=object).reshape((1, 4)), ("data", "ep"))
     experts = ExpertSwiGLU(

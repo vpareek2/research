@@ -398,14 +398,13 @@ def _all_to_all_expert_swiglu(
         raise ContractError(
             f"expert count {gate.shape[0]} must be positive and divisible by ep axis size {ep_size}"
         )
-    assignment_count = expert_ids.shape[0] * expert_ids.shape[1] * expert_ids.shape[2]
-    source_capacity = (assignment_count + ep_size - 1) // ep_size
-
     def local_dispatch(local_x, local_expert_ids, local_weights, local_gate, local_up, local_down):
         local_expert_count = local_gate.shape[0]
         local_rank = jax.lax.axis_index(axis_name)
         token_count = local_x.shape[0] * local_x.shape[1]
         top_k = local_expert_ids.shape[-1]
+        assignment_count = local_expert_ids.shape[0] * local_expert_ids.shape[1] * top_k
+        source_capacity = (assignment_count + ep_size - 1) // ep_size
         flat_x = jnp.repeat(jnp.reshape(local_x, (token_count, local_x.shape[-1])), top_k, axis=0)
         flat_expert_ids = jnp.reshape(local_expert_ids, (assignment_count,))
         flat_weights = jnp.reshape(local_weights, (assignment_count,))
