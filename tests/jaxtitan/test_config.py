@@ -73,6 +73,7 @@ def test_load_config_resolves_minimal_toml(tmp_path: Path) -> None:
     assert spec.training.gradient_accumulation_steps == 1
     assert spec.mesh.axis_names == ("data",)
     assert spec.parallelism.mode == "ddp"
+    assert spec.parallelism.tensor_parallel is False
     assert spec.parallelism.expert_parallel is False
     assert spec.artifacts.root == Path("runs")
     assert spec.artifacts.wandb_enabled is False
@@ -550,6 +551,83 @@ def test_load_config_accepts_explicit_parallelism_modes(tmp_path: Path) -> None:
     assert load_config(zero2_path).parallelism.mode == "zero2"
 
 
+def test_load_config_accepts_tensor_parallelism(tmp_path: Path) -> None:
+    config_path = tmp_path / "tp.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('axis_names = ["data"]', 'axis_names = ["data", "tp"]').replace(
+            "axis_sizes = [1]",
+            "axis_sizes = [1, 4]",
+        )
+        + "\n[parallelism]\ntensor_parallel = true\n"
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.parallelism.tensor_parallel is True
+    assert spec.mesh.axis_names == ("data", "tp")
+
+
+def test_load_config_rejects_tp_axis_without_tensor_parallel(tmp_path: Path) -> None:
+    config_path = tmp_path / "tp-disabled.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('axis_names = ["data"]', 'axis_names = ["data", "tp"]').replace(
+            "axis_sizes = [1]",
+            "axis_sizes = [1, 2]",
+        )
+    )
+
+    with pytest.raises(ConfigError, match="tensor_parallel"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_tensor_parallel_without_tp_axis(tmp_path: Path) -> None:
+    config_path = tmp_path / "tp-missing.toml"
+    config_path.write_text(MINIMAL_CONFIG + "\n[parallelism]\ntensor_parallel = true\n")
+
+    with pytest.raises(ConfigError, match="mesh tp axis"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_tensor_parallel_non_divisible_heads(tmp_path: Path) -> None:
+    config_path = tmp_path / "tp-bad-heads.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('axis_names = ["data"]', 'axis_names = ["data", "tp"]').replace(
+            "axis_sizes = [1]",
+            "axis_sizes = [1, 3]",
+        )
+        + "\n[parallelism]\ntensor_parallel = true\n"
+    )
+
+    with pytest.raises(ConfigError, match="model.hidden_size|model.intermediate_size|model.num_heads"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_tensor_parallel_non_divisible_vocab(tmp_path: Path) -> None:
+    config_path = tmp_path / "tp-bad-vocab.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace("vocab_size = 32000", "vocab_size = 32001")
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "tp"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 2]")
+        + "\n[parallelism]\ntensor_parallel = true\n"
+    )
+
+    with pytest.raises(ConfigError, match="model.vocab_size"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_muon_with_tensor_parallel(tmp_path: Path) -> None:
+    config_path = tmp_path / "tp-muon.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "adamw"', 'name = "muon"', 1)
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "tp"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 2]")
+        + "\n[parallelism]\ntensor_parallel = true\n"
+    )
+
+    with pytest.raises(ConfigError, match="muon"):
+        load_config(config_path)
+
+
 def test_load_config_accepts_expert_parallelism_with_ep_axis(tmp_path: Path) -> None:
     config_path = tmp_path / "ep.toml"
     config_path.write_text(
@@ -791,6 +869,34 @@ expert_parallel = true
         load_config(config_path)
 
 
+def test_load_config_accepts_data_axis_rdep_expert_parallel(tmp_path: Path) -> None:
+    config_path = tmp_path / "data-rdep.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        .replace("axis_sizes = [1]", "axis_sizes = [2]")
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 8
+top_k = 2
+
+[parallelism]
+expert_parallel = true
+expert_parallel_axis = "data"
+"""
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.parallelism.expert_parallel is True
+    assert spec.parallelism.expert_parallel_axis == "data"
+    assert spec.mesh.axis_names == ("data",)
+
+
 def test_load_config_rejects_invalid_expert_parallel_axis(tmp_path: Path) -> None:
     config_path = tmp_path / "bad-expert-axis.toml"
     config_path.write_text(
@@ -809,7 +915,7 @@ top_k = 2
 
 [parallelism]
 expert_parallel = true
-expert_parallel_axis = "data"
+expert_parallel_axis = "bad"
 """
     )
 

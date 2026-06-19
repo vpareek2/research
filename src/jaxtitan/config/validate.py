@@ -35,7 +35,31 @@ def validate_run_spec(spec: RunSpec) -> None:
     axis_sizes = dict(zip(spec.mesh.axis_names, spec.mesh.axis_sizes, strict=True))
     fsdp_axis_size = axis_sizes.get("fsdp", 1)
     ep_axis_size = axis_sizes.get("ep", 1)
+    tp_axis_size = axis_sizes.get("tp", 1)
     expert_fsdp_axis_size = axis_sizes.get("expert_fsdp", 1)
+    if tp_axis_size != 1 and not spec.parallelism.tensor_parallel:
+        raise ConfigError("mesh tp axis size greater than 1 requires parallelism.tensor_parallel=true")
+    if spec.parallelism.tensor_parallel:
+        if "tp" not in axis_sizes:
+            raise ConfigError("parallelism.tensor_parallel=true requires a mesh tp axis")
+        for field_name, value in (
+            ("model.hidden_size", spec.model.hidden_size),
+            ("model.intermediate_size", spec.model.intermediate_size),
+            ("model.vocab_size", spec.model.vocab_size),
+            ("model.num_heads", spec.model.num_heads),
+            ("model.n_kv_heads", spec.model.n_kv_heads),
+        ):
+            if value % tp_axis_size != 0:
+                raise ConfigError(f"{field_name} ({value}) must be divisible by tp axis size ({tp_axis_size})")
+        if spec.model.trinity is not None and spec.model.trinity.moe is not None:
+            expert_width = spec.model.trinity.moe.expert_intermediate_size or spec.model.intermediate_size
+            if expert_width % tp_axis_size != 0:
+                raise ConfigError(
+                    f"model.trinity.moe.expert_intermediate_size ({expert_width}) must be divisible by "
+                    f"tp axis size ({tp_axis_size})"
+                )
+        if spec.optimizer.name == "muon":
+            raise ConfigError("optimizer.name='muon' is not supported with tensor parallelism yet; use adamw")
     if spec.parallelism.mode == "ddp" and fsdp_axis_size != 1:
         raise ConfigError("parallelism.mode='ddp' requires mesh fsdp axis size to be 1")
     if spec.parallelism.mode in {"zero2", "fsdp"} and "fsdp" not in axis_sizes:
@@ -63,6 +87,8 @@ def validate_run_spec(spec: RunSpec) -> None:
         expert_axis = resolve_expert_parallel_axis(spec.parallelism, axis_sizes)
         if spec.model.name != "trinity" or spec.model.trinity is None or spec.model.trinity.moe is None:
             raise ConfigError("parallelism.expert_parallel=true requires a Trinity MoE model")
+        if expert_axis.axis == "data" and expert_fsdp_axis_size != 1:
+            raise ConfigError("parallelism.expert_parallel_axis='data' does not support mesh expert_fsdp axis size greater than 1")
         num_experts = spec.model.trinity.moe.num_experts
         if num_experts % expert_axis.axis_size != 0:
             raise ConfigError(

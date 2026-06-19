@@ -14,7 +14,7 @@ from jaxtitan.models.components.dtypes import dtype_from_name
 from jaxtitan.models.components.init import truncated_normal_init
 from jaxtitan.models.components.norm import build_rms_norm
 from jaxtitan.models.components.position import precompute_rope
-from jaxtitan.models.execution import ModelExecutionContext, apply_layer
+from jaxtitan.models.execution import ModelExecutionContext, apply_layer, vocab_parallel_lm_head
 from jaxtitan.models.output import ModelOutput
 from jaxtitan.specs.model import ModelSpec, TrinitySpec
 
@@ -103,9 +103,12 @@ class TrinityModel(nnx.Module):
                 aux_losses.extend(layer_aux_losses)
                 router_stats.extend(layer_router_stats)
             else:
-                x = apply_layer(layer, x, context, remat=self.spec.remat)
+                def layer_call(hidden, layer_context, *, current_layer=layer):
+                    return current_layer(hidden, layer_context, execution=execution)
+
+                x = apply_layer(layer_call, x, context, remat=self.spec.remat)
         return ModelOutput(
-            logits=self.lm_head(self.norm(x)),
+            logits=vocab_parallel_lm_head(self.lm_head, self.norm(x), execution),
             aux_losses=tuple(aux_losses),
             router_stats=tuple(router_stats),
         )

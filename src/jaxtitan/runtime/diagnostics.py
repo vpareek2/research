@@ -19,7 +19,7 @@ from jaxtitan.kernels import kernel_plan
 from jaxtitan.models import ParamMetadata, count_parameters
 from jaxtitan.models.execution import (
     EXPERT_PARALLEL_CAPACITY_POLICY,
-    EXPERT_PARALLEL_DISPATCHER_BACKEND,
+    expert_parallel_dispatcher_backend,
     expert_parallel_policy_payload,
 )
 from jaxtitan.specs.parallelism import resolve_expert_fsdp_axis, resolve_expert_parallel_axis
@@ -210,6 +210,7 @@ def build_runtime_diagnostics(
             "data_axis_size": context.data_axis_size,
             "fsdp_axis_size": context.fsdp_axis_size,
             "ep_axis_size": context.ep_axis_size,
+            "tp_axis_size": context.tp_axis_size,
             "global_mesh_size": _product(spec.mesh.axis_sizes),
             "selected_device_count": device_count,
             "selected_addressable_device_count": device_count,
@@ -320,7 +321,21 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
         {
             "schema_version": 1,
             "mode": spec.parallelism.mode,
+            "tensor_parallel": spec.parallelism.tensor_parallel,
             "expert_parallel": spec.parallelism.expert_parallel,
+            "tensor_parallel_policy": {
+                "enabled": spec.parallelism.tensor_parallel,
+                "axis": "tp" if spec.parallelism.tensor_parallel else None,
+                "axis_size": axis_sizes.get("tp", 1) if spec.parallelism.tensor_parallel else 1,
+                "residual_stream": "replicated_block_boundary",
+                "embedding": "replicated",
+                "lm_head": "vocab_parallel" if spec.parallelism.tensor_parallel else "replicated",
+                "loss_parallel": {
+                    "enabled": spec.parallelism.tensor_parallel,
+                    "mode": "exact_vocab_sharded_logits" if spec.parallelism.tensor_parallel else None,
+                },
+                "routed_experts": "not_tensor_parallel_sharded",
+            },
             "expert_parallel_policy": expert_parallel_policy_payload(
                 enabled=spec.parallelism.expert_parallel,
                 axis_name=expert_axis.axis,
@@ -351,6 +366,9 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
                 "data_axis_size": context.data_axis_size,
                 "fsdp_axis_size": context.fsdp_axis_size,
                 "ep_axis_size": context.ep_axis_size,
+                "tp_axis_size": context.tp_axis_size,
+                "tensor_parallel_axis": "tp" if spec.parallelism.tensor_parallel else None,
+                "tensor_parallel_axis_size": axis_sizes.get("tp", 1) if spec.parallelism.tensor_parallel else 1,
                 "expert_parallel_axis": expert_axis.axis,
                 "expert_parallel_axis_size": expert_axis.axis_size,
                 "expert_parallel_axis_sharing": expert_axis.axis_sharing,
@@ -425,10 +443,24 @@ def sharding_policy_summary(plan: Any) -> dict[str, Any]:
                     "expert_fsdp_axis": plan.expert_fsdp_axis,
                     "expert_fsdp_axis_size": plan.expert_fsdp_axis_size,
                     "expert_fsdp_axis_sharing": plan.expert_fsdp_axis_sharing,
-                    "dispatcher_backend": EXPERT_PARALLEL_DISPATCHER_BACKEND,
+                    "dispatcher_backend": expert_parallel_dispatcher_backend(plan.expert_parallel_axis_sharing),
                     "capacity_policy": EXPERT_PARALLEL_CAPACITY_POLICY,
                 },
-                "tp": None,
+                "tp": None
+                if not plan.parallelism.tensor_parallel
+                else {
+                    "enabled": True,
+                    "axis": plan.tensor_parallel_axis,
+                    "axis_size": plan.tensor_parallel_axis_size,
+                    "residual_stream": "replicated_block_boundary",
+                    "embedding": "replicated",
+                    "lm_head": "vocab_parallel",
+                    "loss_parallel": {
+                        "enabled": True,
+                        "mode": "exact_vocab_sharded_logits",
+                    },
+                    "routed_experts": "not_tensor_parallel_sharded",
+                },
                 "kv_cache": None,
             },
         }
@@ -460,10 +492,13 @@ def _state_policy_summary(plan: Any, *, placement: str) -> dict[str, Any]:
         expert_fsdp_sharded = sum(
             1 for sharding in expert_shardings if expert_fsdp_axis in str(getattr(sharding, "spec", ""))
         )
+    tp_sharded = sum(1 for sharding in shardings if "tp" in str(getattr(sharding, "spec", "")))
     overlap = ep_sharded if expert_axis == "fsdp" and plan.parallelism.expert_parallel else 0
-    replicated = len(shardings) - fsdp_sharded - ep_sharded - expert_fsdp_sharded + overlap
+    replicated = len(shardings) - fsdp_sharded - ep_sharded - expert_fsdp_sharded - tp_sharded + overlap
     return {
         "mode": plan.parallelism.mode,
+        "tensor_parallel": plan.parallelism.tensor_parallel,
+        "tensor_parallel_axis": plan.tensor_parallel_axis,
         "expert_parallel": plan.parallelism.expert_parallel,
         "expert_parallel_axis": plan.expert_parallel_axis,
         "expert_parallel_axis_sharing": plan.expert_parallel_axis_sharing,
@@ -474,6 +509,7 @@ def _state_policy_summary(plan: Any, *, placement: str) -> dict[str, Any]:
         "fsdp_sharded_leaves": fsdp_sharded,
         "ep_sharded_leaves": ep_sharded,
         "expert_fsdp_sharded_leaves": expert_fsdp_sharded,
+        "tp_sharded_leaves": tp_sharded,
         "replicated_leaves": replicated,
     }
 
@@ -626,10 +662,15 @@ def training_diagnostics_summary(
 def runtime_execution_mode(spec: RunSpec) -> str:
     """Return the artifact-facing execution mode name."""
 
-    if spec.parallelism.mode in {"zero2", "fsdp"}:
-        return f"{spec.parallelism.mode}+ep" if spec.parallelism.expert_parallel else spec.parallelism.mode
+    suffixes = []
     if spec.parallelism.expert_parallel:
-        return "replicated_data_parallel+ep"
+        suffixes.append("ep")
+    if spec.parallelism.tensor_parallel:
+        suffixes.append("tp")
+    if spec.parallelism.mode in {"zero2", "fsdp"}:
+        return spec.parallelism.mode if not suffixes else f"{spec.parallelism.mode}+{'+'.join(suffixes)}"
+    if suffixes:
+        return f"replicated_data_parallel+{'+'.join(suffixes)}"
     return EXECUTION_MODE
 
 

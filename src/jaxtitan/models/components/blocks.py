@@ -28,9 +28,14 @@ class DecoderBlock(nnx.Module):
         self.post_norm = build_rms_norm(spec, rngs=rngs)
         self.mlp = DecoderSwiGLU(spec, rngs=rngs)
 
-    def __call__(self, x: jax.Array, context: FullAttentionContext) -> jax.Array:
-        x = x + self.attn(self.pre_norm(x), context)
-        x = x + self.mlp(self.post_norm(x))
+    def __call__(
+        self,
+        x: jax.Array,
+        context: FullAttentionContext,
+        execution: ModelExecutionContext | None = None,
+    ) -> jax.Array:
+        x = x + self.attn(self.pre_norm(x), context, execution=execution)
+        x = x + self.mlp(self.post_norm(x), execution=execution)
         return x
 
     def prefill(
@@ -104,9 +109,14 @@ class TrinityDenseBlock(nnx.Module):
         self.mlp = DecoderSwiGLU(spec, rngs=rngs, kernel_init=kernel_init)
         self.ffn_post_norm = build_rms_norm(spec, rngs=rngs, scale_init_value=post_scale)
 
-    def __call__(self, x: jax.Array, context: FullAttentionContext) -> jax.Array:
-        x = x + self.attn_post_norm(self.attn(self.attn_pre_norm(x), context))
-        x = x + self.ffn_post_norm(self.mlp(self.ffn_pre_norm(x)))
+    def __call__(
+        self,
+        x: jax.Array,
+        context: FullAttentionContext,
+        execution: ModelExecutionContext | None = None,
+    ) -> jax.Array:
+        x = x + self.attn_post_norm(self.attn(self.attn_pre_norm(x), context, execution=execution))
+        x = x + self.ffn_post_norm(self.mlp(self.ffn_pre_norm(x), execution=execution))
         return x
 
     def prefill(
@@ -192,7 +202,7 @@ class TrinityMoEBlock(nnx.Module):
         *,
         execution: ModelExecutionContext | None = None,
     ) -> tuple[jax.Array, tuple[Any, ...], tuple[Any, ...]]:
-        x = x + self.attn_post_norm(self.attn(self.attn_pre_norm(x), context))
+        x = x + self.attn_post_norm(self.attn(self.attn_pre_norm(x), context, execution=execution))
         mlp_out, aux_losses, router_stats = self.mlp.forward_with_output(
             self.ffn_pre_norm(x),
             name=f"layers.{layer_index}.mlp",

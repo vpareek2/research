@@ -6,9 +6,9 @@ from typing import Mapping, Literal
 from jaxtitan.errors import ContractError
 
 ParallelismMode = Literal["ddp", "zero2", "fsdp"]
-ExpertParallelAxis = Literal["auto", "ep", "fsdp"]
+ExpertParallelAxis = Literal["auto", "data", "ep", "fsdp"]
 _PARALLELISM_MODES = {"ddp", "zero2", "fsdp"}
-_EXPERT_PARALLEL_AXES = {"auto", "ep", "fsdp"}
+_EXPERT_PARALLEL_AXES = {"auto", "data", "ep", "fsdp"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,12 +36,15 @@ class ParallelismSpec:
     """Static distributed execution mode contract."""
 
     mode: ParallelismMode = "ddp"
+    tensor_parallel: bool = False
     expert_parallel: bool = False
     expert_parallel_axis: ExpertParallelAxis = "auto"
 
     def __post_init__(self) -> None:
         if self.mode not in _PARALLELISM_MODES:
             raise ContractError(f"parallelism.mode must be one of {sorted(_PARALLELISM_MODES)}, got {self.mode!r}")
+        if not isinstance(self.tensor_parallel, bool):
+            raise ContractError("parallelism.tensor_parallel must be a boolean")
         if not isinstance(self.expert_parallel, bool):
             raise ContractError("parallelism.expert_parallel must be a boolean")
         if self.expert_parallel_axis not in _EXPERT_PARALLEL_AXES:
@@ -82,6 +85,15 @@ def resolve_expert_parallel_axis(
             axis="ep",
             axis_size=axis_sizes["ep"],
             axis_sharing="dedicated_ep",
+        )
+    if axis == "data":
+        if "data" not in axis_sizes:
+            raise ContractError("parallelism.expert_parallel_axis='data' requires a mesh data axis")
+        return ExpertParallelAxisPolicy(
+            enabled=True,
+            axis="data",
+            axis_size=axis_sizes["data"],
+            axis_sharing="shared_with_data",
         )
     if axis == "fsdp":
         if parallelism.mode != "fsdp":

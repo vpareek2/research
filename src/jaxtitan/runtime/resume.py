@@ -50,6 +50,19 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
         "mesh": _normalize(spec.mesh),
         "parallelism": {
             **_normalize(spec.parallelism),
+            "tensor_parallel_policy": {
+                "enabled": spec.parallelism.tensor_parallel,
+                "axis": "tp" if spec.parallelism.tensor_parallel else None,
+                "axis_size": axis_sizes.get("tp", 1) if spec.parallelism.tensor_parallel else 1,
+                "residual_stream": "replicated_block_boundary",
+                "embedding": "replicated",
+                "lm_head": "vocab_parallel" if spec.parallelism.tensor_parallel else "replicated",
+                "loss_parallel": {
+                    "enabled": spec.parallelism.tensor_parallel,
+                    "mode": "exact_vocab_sharded_logits" if spec.parallelism.tensor_parallel else None,
+                },
+                "routed_experts": "not_tensor_parallel_sharded",
+            },
             "expert_parallel_policy": expert_parallel_policy_payload(
                 enabled=spec.parallelism.expert_parallel,
                 axis_name=expert_axis.axis,

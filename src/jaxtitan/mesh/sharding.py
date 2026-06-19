@@ -14,6 +14,7 @@ from jaxtitan.errors import ContractError
 from jaxtitan.models import ExpertLayout, ParamLayout
 from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.parallelism import ParallelismSpec, resolve_expert_fsdp_axis, resolve_expert_parallel_axis
+from jaxtitan.models.execution import expert_parallel_dispatcher_backend
 
 SUPPORTED_AXES = {"data", "fsdp", "tp", "ep", "expert_fsdp"}
 
@@ -45,6 +46,12 @@ class MeshContext:
         if "ep" not in self.spec.axis_names:
             return 1
         return self.spec.axis_sizes[self.spec.axis_names.index("ep")]
+
+    @property
+    def tp_axis_size(self) -> int:
+        if "tp" not in self.spec.axis_names:
+            return 1
+        return self.spec.axis_sizes[self.spec.axis_names.index("tp")]
 
     @property
     def expert_fsdp_axis_size(self) -> int:
@@ -87,9 +94,12 @@ class ShardingPlan:
     expert_parallel_axis: str | None = None
     expert_parallel_axis_size: int = 1
     expert_parallel_axis_sharing: str | None = None
+    expert_parallel_dispatcher: str | None = None
     expert_fsdp_axis: str | None = None
     expert_fsdp_axis_size: int = 1
     expert_fsdp_axis_sharing: str | None = None
+    tensor_parallel_axis: str | None = None
+    tensor_parallel_axis_size: int = 1
     expert_param_paths: tuple[tuple[str, ...], ...] = ()
     kv_cache: Any | None = None
 
@@ -133,6 +143,10 @@ def build_sharding_plan(
     expert_fsdp_policy = resolve_expert_fsdp_axis(parallelism, axis_sizes)
     if parallelism.mode in {"zero2", "fsdp"} and "fsdp" not in context.spec.axis_names:
         raise ContractError(f"parallelism.mode='{parallelism.mode}' requires a mesh fsdp axis")
+    if context.tp_axis_size > 1 and not parallelism.tensor_parallel:
+        raise ContractError("mesh tp axis size greater than 1 requires parallelism.tensor_parallel=true")
+    if parallelism.tensor_parallel and "tp" not in context.spec.axis_names:
+        raise ContractError("parallelism.tensor_parallel=true requires a mesh tp axis")
     if parallelism.expert_parallel and not expert_layouts:
         raise ContractError("parallelism.expert_parallel=true requires routed expert layout metadata")
     batch_matrix = NamedSharding(context.mesh, P("data", None))
@@ -164,9 +178,12 @@ def build_sharding_plan(
         expert_parallel_axis=expert_axis_policy.axis,
         expert_parallel_axis_size=expert_axis_policy.axis_size,
         expert_parallel_axis_sharing=expert_axis_policy.axis_sharing,
+        expert_parallel_dispatcher=expert_parallel_dispatcher_backend(expert_axis_policy.axis_sharing),
         expert_fsdp_axis=expert_fsdp_policy.axis,
         expert_fsdp_axis_size=expert_fsdp_policy.axis_size,
         expert_fsdp_axis_sharing=expert_fsdp_policy.axis_sharing,
+        tensor_parallel_axis="tp" if parallelism.tensor_parallel else None,
+        tensor_parallel_axis_size=context.tp_axis_size if parallelism.tensor_parallel else 1,
         expert_param_paths=tuple(layout.path for layout in expert_layouts) if expert_axis_policy.enabled else (),
     )
 
@@ -232,7 +249,7 @@ def place_replicated(tree: Any, plan: ShardingPlan) -> Any:
 def place_model_state(tree: Any, plan: ShardingPlan) -> Any:
     """Place model state leaves according to the sharding plan's parameter policy."""
 
-    if plan.parallelism.mode in {"ddp", "zero2"} and not plan.parallelism.expert_parallel:
+    if plan.parallelism.mode in {"ddp", "zero2"} and not plan.parallelism.expert_parallel and not plan.parallelism.tensor_parallel:
         return place_replicated(tree, plan)
     return _place_params_by_policy(tree, plan)
 
@@ -240,7 +257,7 @@ def place_model_state(tree: Any, plan: ShardingPlan) -> Any:
 def place_optimizer_init_state(tree: Any, plan: ShardingPlan) -> Any:
     """Place a model-shaped tree used only to initialize optimizer state."""
 
-    if plan.parallelism.mode == "ddp" and not plan.parallelism.expert_parallel:
+    if plan.parallelism.mode == "ddp" and not plan.parallelism.expert_parallel and not plan.parallelism.tensor_parallel:
         return place_replicated(tree, plan)
     return _place_params_by_policy(tree, plan)
 
@@ -248,7 +265,7 @@ def place_optimizer_init_state(tree: Any, plan: ShardingPlan) -> Any:
 def gradient_shardings_like(tree: Any, plan: ShardingPlan) -> Any:
     """Build a model-shaped sharding tree for gradients and optimizer updates."""
 
-    if plan.parallelism.mode == "ddp" and not plan.parallelism.expert_parallel:
+    if plan.parallelism.mode == "ddp" and not plan.parallelism.expert_parallel and not plan.parallelism.tensor_parallel:
         return jax.tree.map(lambda _leaf: plan.replicated, tree)
 
     def leaf_sharding(path, _leaf):
@@ -314,8 +331,8 @@ def _validate_supported_spec(spec: MeshSpec) -> None:
     for axis_name, axis_size in zip(spec.axis_names, spec.axis_sizes, strict=True):
         if axis_name not in SUPPORTED_AXES:
             raise ContractError(f"unsupported mesh axis {axis_name!r}; supported axes are {sorted(SUPPORTED_AXES)}")
-        if axis_name == "tp" and axis_size != 1:
-            raise ContractError(f"mesh axis {axis_name!r} is reserved for later and must have size 1 for now")
+        if axis_name == "tp" and axis_size < 1:
+            raise ContractError("mesh tp axis size must be positive")
 
 
 def _validate_batch_leading_dims(batch: Batch) -> None:
@@ -371,11 +388,22 @@ def _param_shardings(
                 expert_fsdp_axis_name=expert_fsdp_axis_name,
             )
             continue
-        if parallelism.mode == "ddp":
-            shardings[layout.path] = replicated
+        spec = [None] * len(layout.shape)
+        if parallelism.tensor_parallel and layout.tp_axis is not None:
+            if len(layout.shape) <= layout.tp_axis:
+                raise ContractError(f"parameter {'.'.join(layout.path)!r} has invalid tp axis {layout.tp_axis}")
+            tp_dim_size = layout.shape[layout.tp_axis]
+            if tp_dim_size % context.tp_axis_size != 0:
+                raise ContractError(
+                    f"parameter {'.'.join(layout.path)!r} dimension {layout.tp_axis} "
+                    f"with size {tp_dim_size} must be divisible by tp axis size {context.tp_axis_size}"
+                )
+            spec[layout.tp_axis] = "tp"
+        if parallelism.mode == "ddp" or layout.fsdp_axis is None:
+            shardings[layout.path] = NamedSharding(context.mesh, P(*spec)) if any(axis is not None for axis in spec) else replicated
             continue
-        if layout.fsdp_axis is None:
-            shardings[layout.path] = replicated
+        if parallelism.tensor_parallel and layout.fsdp_axis == layout.tp_axis:
+            shardings[layout.path] = NamedSharding(context.mesh, P(*spec)) if any(axis is not None for axis in spec) else replicated
             continue
         if len(layout.shape) <= layout.fsdp_axis:
             raise ContractError(f"parameter {'.'.join(layout.path)!r} has invalid fsdp axis {layout.fsdp_axis}")
@@ -385,7 +413,6 @@ def _param_shardings(
                 f"parameter {'.'.join(layout.path)!r} dimension {layout.fsdp_axis} "
                 f"with size {dim_size} must be divisible by fsdp axis size {fsdp_axis_size}"
             )
-        spec = [None] * len(layout.shape)
         spec[layout.fsdp_axis] = "fsdp"
         shardings[layout.path] = NamedSharding(context.mesh, P(*spec))
     return shardings

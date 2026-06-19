@@ -521,6 +521,11 @@ def _resolve_backend(requested_backend: str, item: ParamMetadata, leaf: Any) -> 
         return _resolve_expert_muon_backend(item, leaf)
     if item.tag not in _MUON_MATRIX_TAGS:
         return requested_backend, None, None
+    if _axis_sharded(leaf, "tp"):
+        raise ContractError(
+            f"Muon matrix route for parameter {'.'.join(item.path)!r} is not supported with tensor-parallel "
+            "sharding yet; use optimizer.name='adamw'"
+        )
     matrix_axis = _fsdp_matrix_axis(leaf)
     if matrix_axis is None:
         return "muon", None, None
@@ -530,7 +535,7 @@ def _resolve_backend(requested_backend: str, item: ParamMetadata, leaf: Any) -> 
 def _resolve_expert_muon_backend(item: ParamMetadata, leaf: Any) -> tuple[str, int | None, str | None]:
     if len(item.shape) != 3:
         return "muon", None, None
-    sharded_axes = _sharded_axes(leaf, {"fsdp", "ep", "expert_fsdp"})
+    sharded_axes = _sharded_axes(leaf, {"data", "fsdp", "tp", "ep", "expert_fsdp"})
     matrix_sharded_axes = sorted(axis for axis in sharded_axes if axis in {1, 2})
     if matrix_sharded_axes:
         raise ContractError(
@@ -615,6 +620,11 @@ def _fsdp_matrix_axis(leaf: Any) -> int | None:
     if len(fsdp_axes) != 1:
         raise ContractError(f"Muon matrix route expects at most one fsdp-sharded parameter axis, got {axes}")
     return fsdp_axes[0]
+
+
+def _axis_sharded(leaf: Any, axis_name: str) -> bool:
+    axes = _partition_axes(leaf)
+    return False if axes is None else any(_axis_contains(axis, axis_name) for axis in axes)
 
 
 def _sharded_axes(leaf: Any, names: set[str]) -> set[int]:

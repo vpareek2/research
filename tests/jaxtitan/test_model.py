@@ -15,6 +15,7 @@ from jaxtitan.models.components import (
     ExpertSwiGLU,
     GroupedQueryAttention,
     LocalExpertDispatcher,
+    RdepStaticExpertDispatcher,
     SigmoidTopKRouter,
     SparseMoE,
     TrinityDenseBlock,
@@ -527,6 +528,88 @@ def test_all_to_all_expert_dispatcher_matches_local_dispatcher_on_data_ep_mesh()
     assert jnp.allclose(actual, expected, atol=1e-5)
 
 
+def test_rdep_static_expert_dispatcher_matches_local_dispatcher_on_data_mesh() -> None:
+    mesh = Mesh(np.asarray(jax.devices()[:4], dtype=object).reshape((4,)), ("data",))
+    expected_experts = ExpertSwiGLU(
+        hidden_size=3,
+        intermediate_size=5,
+        num_experts=4,
+        dtype=jnp.float32,
+        param_dtype=jnp.float32,
+        rngs=nnx.Rngs(0),
+    )
+    actual_experts = ExpertSwiGLU(
+        hidden_size=3,
+        intermediate_size=5,
+        num_experts=4,
+        dtype=jnp.float32,
+        param_dtype=jnp.float32,
+        rngs=nnx.Rngs(1),
+    )
+    gate = jnp.arange(4 * 3 * 5, dtype=jnp.float32).reshape(4, 3, 5) / 37.0
+    up = jnp.arange(4 * 3 * 5, dtype=jnp.float32).reshape(4, 3, 5)[::-1] / 41.0
+    down = jnp.arange(4 * 5 * 3, dtype=jnp.float32).reshape(4, 5, 3) / 43.0
+    expected_experts.gate[...] = gate
+    expected_experts.up[...] = up
+    expected_experts.down[...] = down
+    actual_experts.gate[...] = jax.device_put(gate, NamedSharding(mesh, P("data", None, None)))
+    actual_experts.up[...] = jax.device_put(up, NamedSharding(mesh, P("data", None, None)))
+    actual_experts.down[...] = jax.device_put(down, NamedSharding(mesh, P("data", None, None)))
+    x = jax.device_put(
+        jnp.arange(4 * 3 * 3, dtype=jnp.float32).reshape(4, 3, 3) / 17.0,
+        NamedSharding(mesh, P("data", None, None)),
+    )
+    expert_ids = jax.device_put(
+        jnp.asarray(
+            [
+                [[0, 1], [0, 1], [0, 1]],
+                [[1, 0], [1, 0], [1, 0]],
+                [[2, 3], [3, 2], [2, 3]],
+                [[3, 2], [2, 3], [3, 2]],
+            ],
+            dtype=jnp.int32,
+        ),
+        NamedSharding(mesh, P("data", None, None)),
+    )
+    weights = jax.device_put(
+        jnp.asarray(
+            [
+                [[0.25, 0.75], [0.5, 0.5], [0.4, 0.6]],
+                [[0.55, 0.45], [0.3, 0.7], [0.65, 0.35]],
+                [[0.2, 0.8], [0.6, 0.4], [0.45, 0.55]],
+                [[0.7, 0.3], [0.35, 0.65], [0.15, 0.85]],
+            ],
+            dtype=jnp.float32,
+        ),
+        NamedSharding(mesh, P("data", None, None)),
+    )
+    expected = LocalExpertDispatcher()(expected_experts, x, expert_ids, weights)
+
+    actual = RdepStaticExpertDispatcher(mesh)(actual_experts, x, expert_ids, weights)
+
+    assert actual.sharding.spec == P("data", None, None)
+    assert jnp.allclose(actual, expected, atol=1e-5)
+
+
+def test_rdep_static_expert_dispatcher_lowers_collectives() -> None:
+    mesh = Mesh(np.asarray(jax.devices()[:4], dtype=object).reshape((4,)), ("data",))
+    experts = ExpertSwiGLU(
+        hidden_size=2,
+        intermediate_size=2,
+        num_experts=4,
+        dtype=jnp.float32,
+        param_dtype=jnp.float32,
+        rngs=nnx.Rngs(0),
+    )
+    x = jnp.ones((4, 2, 2), dtype=jnp.float32)
+    expert_ids = jnp.asarray([[[0, 1], [2, 3]], [[1, 0], [3, 2]], [[2, 3], [0, 1]], [[3, 2], [1, 0]]], dtype=jnp.int32)
+    weights = jnp.ones((4, 2, 2), dtype=jnp.float32) / 2.0
+
+    jaxpr = str(jax.make_jaxpr(lambda hidden, ids, route_weights: RdepStaticExpertDispatcher(mesh)(experts, hidden, ids, route_weights))(x, expert_ids, weights))
+
+    assert "all_to_all" in jaxpr
+
+
 def test_all_to_all_expert_dispatcher_lowers_collectives() -> None:
     mesh = Mesh(np.asarray(jax.devices()[:4], dtype=object).reshape((1, 4)), ("data", "ep"))
     experts = ExpertSwiGLU(
@@ -623,6 +706,46 @@ def test_apply_model_output_uses_expert_parallel_context() -> None:
     assert len(actual.router_stats) == len(expected.router_stats)
 
 
+def test_apply_model_output_uses_tensor_parallel_context() -> None:
+    mesh = Mesh(np.asarray(jax.devices()[:2], dtype=object).reshape((1, 2)), ("data", "tp"))
+    result = build_model(_tiny_spec(compute_dtype="float32"), seed=0)
+    input_ids = jax.device_put(
+        jnp.arange(16, dtype=jnp.int32).reshape(2, 8),
+        NamedSharding(mesh, P("data", None)),
+    )
+    expected = apply_model_output(result.graph, result.state, input_ids)
+
+    actual = apply_model_output(
+        result.graph,
+        result.state,
+        input_ids,
+        execution=ModelExecutionContext(tensor_parallel_mesh=mesh),
+    )
+
+    assert jnp.allclose(actual.logits, expected.logits, atol=1e-5)
+    assert getattr(actual.logits, "sharding", None).spec == P("data", None, "tp")
+
+
+def test_trinity_apply_model_output_uses_vocab_parallel_lm_head() -> None:
+    mesh = Mesh(np.asarray(jax.devices()[:2], dtype=object).reshape((1, 2)), ("data", "tp"))
+    result = build_model(_tiny_trinity_spec(compute_dtype="float32"), seed=0)
+    input_ids = jax.device_put(
+        jnp.arange(16, dtype=jnp.int32).reshape(2, 8),
+        NamedSharding(mesh, P("data", None)),
+    )
+    expected = apply_model_output(result.graph, result.state, input_ids)
+
+    actual = apply_model_output(
+        result.graph,
+        result.state,
+        input_ids,
+        execution=ModelExecutionContext(tensor_parallel_mesh=mesh),
+    )
+
+    assert jnp.allclose(actual.logits, expected.logits, atol=1e-5)
+    assert getattr(actual.logits, "sharding", None).spec == P("data", None, "tp")
+
+
 def test_metadata_covers_every_parameter_leaf_once() -> None:
     result = build_model(_tiny_spec(num_layers=2), seed=0)
     flat_state = nnx.to_flat_state(result.state)
@@ -670,6 +793,8 @@ def test_decoder_param_layouts_record_fsdp_policy() -> None:
         assert len(layout.shape) == len(layout.logical_axes)
         if layout.fsdp_axis is not None:
             assert 0 <= layout.fsdp_axis < len(layout.shape)
+
+    assert layouts["lm_head"].tp_axis == 1
 
 
 def test_metadata_has_optimizer_routing_tags() -> None:
@@ -764,6 +889,7 @@ def test_dense_trinity_param_layouts_record_fsdp_policy() -> None:
         assert layouts[tag].fsdp_axis == 1
     for tag in ("attention_o", "mlp_down", "lm_head"):
         assert layouts[tag].fsdp_axis == 0
+    assert layouts["lm_head"].tp_axis == 1
 
 
 def test_trinity_moe_param_layouts_leave_sparse_experts_replicated() -> None:

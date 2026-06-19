@@ -176,6 +176,44 @@ def test_resume_fingerprint_changes_for_expert_parallel_axis(tmp_path: Path, pre
     }
 
 
+def test_resume_fingerprint_changes_for_data_axis_rdep(tmp_path: Path, prepared_dataset_factory) -> None:
+    manifest = _manifest(prepared_dataset_factory, "rdep")
+    product_ep = _runtime_spec(
+        tmp_path,
+        manifest,
+        axis_names=("data", "ep"),
+        axis_sizes=(1, 2),
+        expert_parallel=True,
+        trinity_moe_num_experts=4,
+        hidden_size=16,
+        intermediate_size=32,
+        num_heads=4,
+        n_kv_heads=4,
+    )
+    rdep = _runtime_spec(
+        tmp_path,
+        manifest,
+        axis_names=("data",),
+        axis_sizes=(2,),
+        expert_parallel=True,
+        expert_parallel_axis="data",
+        trinity_moe_num_experts=4,
+        hidden_size=16,
+        intermediate_size=32,
+        num_heads=4,
+        n_kv_heads=4,
+    )
+
+    rdep_payload = build_resume_compat(rdep).payload["parallelism"]["expert_parallel_policy"]
+    assert build_resume_compat(product_ep).runtime_fingerprint != build_resume_compat(rdep).runtime_fingerprint
+    assert rdep_payload["axis"] == "data"
+    assert rdep_payload["axis_sharing"] == "shared_with_data"
+    assert rdep_payload["dispatcher_backend"] == "rdep_static"
+    assert rdep_payload["token_partition"] == "route_row_source_data_axis"
+    assert rdep_payload["combine_policy"] == "return_by_route_row_identity"
+    assert rdep_payload["route_row_identity"] == "((source_rank * T) + token) * top_k + slot"
+
+
 def test_resume_fingerprint_changes_for_folded_expert_parallel_axis(
     tmp_path: Path,
     prepared_dataset_factory,
@@ -442,6 +480,7 @@ def _config_text(
     trinity_moe_num_experts: int = 3,
     sequence_aux_loss_weight: float = 1e-4,
     expert_parallel: bool = False,
+    expert_parallel_axis: str = "auto",
 ) -> str:
     total_steps_line = "" if total_steps is None else f"total_steps = {total_steps}\n"
     shuffle_seed_line = "" if shuffle_seed is None else f"shuffle_seed = {shuffle_seed}\n"
@@ -523,6 +562,7 @@ axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 [parallelism]
 mode = "{parallelism_mode}"
 expert_parallel = {str(expert_parallel).lower()}
+expert_parallel_axis = "{expert_parallel_axis}"
 """
 
 

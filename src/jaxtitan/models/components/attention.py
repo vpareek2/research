@@ -10,6 +10,7 @@ from jaxtitan.errors import ContractError
 from jaxtitan.models.components.dtypes import dtype_from_name
 from jaxtitan.models.components.masks import cache_attention_mask, full_sequence_attention_mask
 from jaxtitan.models.components.position import apply_rope, apply_rope_at_positions
+from jaxtitan.models.execution import ModelExecutionContext, column_parallel_linear, row_parallel_linear
 from jaxtitan.specs.model import ModelSpec
 
 
@@ -139,18 +140,23 @@ class GroupedQueryAttention(nnx.Module):
         else:
             self.gate = None
 
-    def __call__(self, x: jax.Array, context: FullAttentionContext) -> jax.Array:
+    def __call__(
+        self,
+        x: jax.Array,
+        context: FullAttentionContext,
+        execution: ModelExecutionContext | None = None,
+    ) -> jax.Array:
         batch_size, seq_len, _ = x.shape
-        q = self.q(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim)
-        k = self.k(x).reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
-        v = self.v(x).reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
+        q = column_parallel_linear(self.q, x, execution).reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+        k = column_parallel_linear(self.k, x, execution).reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
+        v = column_parallel_linear(self.v, x, execution).reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
 
         q, k = self._prepare_qk(q, k, context)
 
         mask = full_sequence_attention_mask(seq_len, mode=self.mask, local_window=self.local_window)
         out = scaled_dot_product_attention(q, k, v, mask)
-        out = self._apply_gate(x, out)
-        return self.o(out.reshape(batch_size, seq_len, self.hidden_size))
+        out = self._apply_gate(x, out, execution)
+        return row_parallel_linear(self.o, out.reshape(batch_size, seq_len, self.hidden_size), execution)
 
     def prefill(
         self,
@@ -241,10 +247,20 @@ class GroupedQueryAttention(nnx.Module):
             apply_rope_at_positions(k, positions, self.head_dim, theta=rope_theta),
         )
 
-    def _apply_gate(self, x: jax.Array, out: jax.Array) -> jax.Array:
+    def _apply_gate(
+        self,
+        x: jax.Array,
+        out: jax.Array,
+        execution: ModelExecutionContext | None = None,
+    ) -> jax.Array:
         if self.gate is None:
             return out
-        gate = jax.nn.sigmoid(self.gate(x)).reshape(x.shape[0], x.shape[1], self.num_heads, self.head_dim)
+        gate = jax.nn.sigmoid(column_parallel_linear(self.gate, x, execution)).reshape(
+            x.shape[0],
+            x.shape[1],
+            self.num_heads,
+            self.head_dim,
+        )
         return out * gate
 
 

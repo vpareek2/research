@@ -422,6 +422,49 @@ def test_run_preflight_accepts_zero2_parallelism_without_artifacts(
     assert not (tmp_path / "runs" / "loop").exists()
 
 
+def test_run_preflight_reports_tensor_parallel_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("tp-preflight", shard_token_groups=(tuple(range(0, 80)),), train_tokens=50)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            axis_names=("data", "tp"),
+            axis_sizes=(2, 2),
+            tensor_parallel=True,
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=4,
+            n_kv_heads=4,
+            global_batch_size=4,
+            target_tokens=16,
+        )
+    )
+
+    report = run_preflight(config_path)
+    payload = report.payload
+    text = format_preflight_report(report)
+
+    assert payload["parallelism"]["tensor_parallel"] is True
+    assert payload["parallelism"]["execution_mode"] == "replicated_data_parallel+tp"
+    assert payload["parallelism"]["tensor_parallel_policy"]["axis_size"] == 2
+    assert payload["parallelism"]["tensor_parallel_policy"]["lm_head"] == "vocab_parallel"
+    assert payload["parallelism"]["tensor_parallel_policy"]["loss_parallel"] == {
+        "enabled": True,
+        "mode": "exact_vocab_sharded_logits",
+    }
+    assert payload["parallelism"]["mesh"]["tp_axis_size"] == 2
+    assert payload["sharding"]["model_state"]["tp_sharded_leaves"] > 0
+    assert payload["training"]["compile"] == "passed"
+    assert "mode=replicated_data_parallel+tp" in text
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
 def test_run_preflight_reports_expert_parallel_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -480,6 +523,58 @@ def test_run_preflight_reports_expert_parallel_policy(
     assert payload["optimizer"]["policy"]["route_counts"]["muon"] >= 3
     assert "mode=replicated_data_parallel+ep" in text
     assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_reports_data_axis_rdep_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("rdep-preflight", shard_token_groups=(tuple(range(0, 80)),), train_tokens=50)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_text = _preflight_config(
+        manifest,
+        optimizer_name="adamw",
+        axis_names=("data",),
+        axis_sizes=(4,),
+        global_batch_size=4,
+        target_tokens=16,
+        hidden_size=16,
+        intermediate_size=32,
+        num_layers=2,
+        num_heads=4,
+        n_kv_heads=4,
+        model_name="trinity",
+        trinity=True,
+        trinity_moe=True,
+        expert_parallel=True,
+    ).replace("expert_parallel = true", 'expert_parallel = true\nexpert_parallel_axis = "data"')
+    config_path.write_text(config_text)
+
+    report = run_preflight(config_path)
+    payload = report.payload
+
+    assert payload["parallelism"]["expert_parallel_policy"] == {
+        "enabled": True,
+        "axis": "data",
+        "axis_size": 4,
+        "axis_sharing": "shared_with_data",
+        "expert_fsdp_axis": None,
+        "expert_fsdp_axis_size": 1,
+        "expert_fsdp_axis_sharing": None,
+        "num_experts": 4,
+        "experts_per_rank": 1,
+        "dispatcher_backend": "rdep_static",
+        "capacity_policy": "strict_dropless_static_source_buckets",
+        "token_partition": "route_row_source_data_axis",
+        "combine_policy": "return_by_route_row_identity",
+        "rdep_pool_axis": "data",
+        "route_row_identity": "((source_rank * T) + token) * top_k + slot",
+    }
+    assert payload["sharding"]["reserved"]["ep"]["dispatcher_backend"] == "rdep_static"
+    assert payload["sharding"]["model_state"]["expert_parallel_axis"] == "data"
 
 
 def test_run_preflight_reports_folded_fsdp_expert_parallel_policy(
@@ -780,7 +875,7 @@ def test_run_preflight_rejects_non_divisible_global_batch(
     assert not (tmp_path / "runs" / "loop").exists()
 
 
-def test_run_preflight_rejects_reserved_parallel_axes_greater_than_one(
+def test_run_preflight_rejects_tp_axis_without_tensor_parallel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     prepared_dataset_factory,
@@ -799,7 +894,7 @@ def test_run_preflight_rejects_reserved_parallel_axes_greater_than_one(
         )
     )
 
-    with pytest.raises(ContractError, match="reserved for later"):
+    with pytest.raises(ConfigError, match="tensor_parallel"):
         run_preflight(config_path)
 
     assert not (tmp_path / "runs" / "loop").exists()
@@ -911,6 +1006,7 @@ def _preflight_config(
     trinity: bool = False,
     trinity_moe: bool = False,
     expert_parallel: bool = False,
+    tensor_parallel: bool = False,
     gradient_accumulation_steps: int = 1,
     remat: str = "none",
     eval_every_steps: int | None = None,
@@ -1018,6 +1114,7 @@ axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 [parallelism]
 mode = "{parallelism_mode}"
 expert_parallel = {str(expert_parallel).lower()}
+tensor_parallel = {str(tensor_parallel).lower()}
 {profiling_block}
 {eval_block}
 """

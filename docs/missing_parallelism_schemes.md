@@ -87,19 +87,18 @@ matrix optimizer is added.
 
 ## 3. RDEP / Replicated Expert Parallelism
 
-RDEP means there are multiple replicas of the expert-parallel group. It helps
-when expert load imbalance or all-to-all communication makes one giant EP group
-inefficient.
+Status: semantic JAX baseline implemented locally for data-axis RDEP.
 
-Instead of one EP group across every rank, the world is split into several EP
-groups. Each group owns a copy of the expert set or a partition strategy, and
-data is distributed across those groups. This can reduce communication radius,
-improve load balance, and make expert routing less sensitive to a single hot
-expert.
+Jaxtitan now supports `parallelism.expert_parallel_axis = "data"` for Trinity
+MoE. In this mode the data axis is also the routed expert-owner axis: dense and
+shared paths stay ordinary data-parallel/FSDP computation, routed experts shard
+over `data`, route rows are pooled across the data-axis group, owners compute
+their local experts, and outputs return to the original source tokens.
 
-RDEP should come after basic EP and folded FSDP+EP are validated because it
-adds another grouping dimension and makes diagnostics/checkpoint compatibility
-more complex.
+This is intentionally a correctness-first `rdep_static` backend implemented
+with JAX collectives. It gives us the Noumena-style route-row semantics and
+artifact/fingerprint contracts before CUDA IPC, ragged dispatch, or DeepEP-like
+transport work.
 
 ## 4. Optimized MoE Dispatch Backends
 
@@ -122,8 +121,29 @@ if the user cannot fit the model in the first place.
 
 ## 5. Tensor Parallelism And Expert Tensor Parallelism
 
+Status: semantic dense TP foundation is implemented locally and covered by
+fake-device CPU tests. It is not complete until cloud validation, sequence
+parallelism, expert tensor parallelism, and optimizer/kernel follow-through are
+done.
+
 Tensor parallelism shards individual dense matrix multiplies. Expert tensor
-parallelism shards individual expert matrices.
+parallelism shards individual expert matrices. Jaxtitan now has the first
+correctness-oriented TP slice:
+
+- `[parallelism] tensor_parallel = true` enables a real `tp` mesh axis.
+- Decoder and Trinity rank-2 dense projections have model-owned TP layout
+  metadata.
+- Attention Q/K/V/gate and MLP gate/up/shared gate/up are column-parallel.
+- Attention O and MLP down/shared down are row-parallel.
+- `lm_head` is vocab-parallel over the output vocab dimension.
+- Causal LM loss and z-loss run exactly over vocab-sharded logical logits.
+- Diagnostics, preflight, sharding summaries, and resume compatibility record
+  the resolved TP and loss-parallel policy.
+
+The current implementation deliberately keeps the residual stream replicated at
+block boundaries. That is the right semantic baseline: it composes cleanly with
+FSDP, ZeRO-2, EP, RDEP, checkpoints, eval, and sampling before we optimize
+away collectives.
 
 These become important when:
 
@@ -135,10 +155,145 @@ Megatron treats TP and expert TP as standard scaling tools. MaxText also has
 multiple TP variants, including transpose-style TP for models where the usual
 MLP dimensions make the communication tradeoff different.
 
-For Jaxtitan, TP is not the next step because the near-term target is sparse
-models where expert ownership and FSDP solve the first memory wall. TP should
-stay reserved until one matrix no longer fits or profiling shows a dense
-intra-layer bottleneck that FSDP/EP cannot solve.
+For Jaxtitan, TP is now a partially implemented scaling axis, not just a
+reserved concept. The remaining work before calling TP complete is below.
+
+### 5.1 Cloud Validation
+
+The CPU fake-device tests prove sharding semantics and numerical parity, but TP
+must be validated on real GPU collectives before it is trusted for research
+runs.
+
+Required cloud checks:
+
+- dense decoder TP preflight, train, eval checkpoint, sample checkpoint, and
+  inspect;
+- dense Trinity TP preflight/train/eval/sample;
+- Trinity MoE with shared-expert TP and routed experts replicated or EP-owned;
+- TP combined with FSDP and ZeRO-2 on separate `data x fsdp x tp` meshes;
+- TP combined with folded FSDP+EP and data-axis RDEP where the mesh permits it;
+- profile traces confirming TP collectives appear where expected and full
+  logits are not silently replicated on every rank.
+
+Acceptance for this step is not speed. It is exactness, no hidden fallback,
+clean checkpoint restore, and artifact summaries that match the physical
+placement.
+
+### 5.2 Sequence Parallelism
+
+The current residual stream is replicated across TP ranks. That is simple and
+correct, but it leaves activation memory on the table. Sequence parallelism
+shards selected activation tensors over the sequence or token dimension between
+TP collectives, then gathers or reduces at module boundaries that need full
+hidden vectors.
+
+This is the main missing piece for TP to become a serious memory-scaling mode.
+Without it, TP reduces parameter and optimizer-state memory for rank-2
+matrices, but activation memory remains closer to replicated execution.
+
+First Jaxtitan sequence-parallel slice should:
+
+- add an internal execution policy, not a new user knob;
+- shard normalized residual activations over the `tp` axis where the model can
+  preserve exact semantics;
+- keep embeddings, attention masks, RoPE tables, logits, metrics, and router
+  diagnostics contract-compatible;
+- prove train/eval parity against replicated TP on fake CPU devices;
+- record `sequence_parallel.enabled` and activation sharding policy in
+  diagnostics/resume metadata.
+
+### 5.3 Expert Tensor Parallelism
+
+Routed expert weights are currently rank-3 tensors and intentionally stay
+outside dense TP. That keeps MoE semantics simple, but it means a single expert
+matrix must still fit on its owner rank except for expert-region FSDP.
+
+Expert TP is needed when each expert is large enough that EP plus expert FSDP
+is not enough or when grouped expert GEMMs become the throughput bottleneck.
+
+The clean design is region-specific:
+
+- dense TP handles ordinary rank-2 attention/MLP/shared-expert matrices;
+- EP/RDEP decides expert ownership and dispatch;
+- expert FSDP shards owned expert matrices for memory;
+- expert TP shards the matrix multiply inside each owned expert group.
+
+This should not be bolted onto the dense TP path. It needs a routed-expert
+layout policy that can express expert axis, expert FSDP axis, and expert TP
+matrix axis at the same time.
+
+### 5.4 Optimizer Semantics Under TP
+
+AdamW is elementwise and naturally shard-safe under TP. Muon is still blocked
+with TP because exact orthogonalized matrix updates depend on whole-matrix
+semantics. Dion2 currently resolves from sharded Muon intent for FSDP/ZeRO
+matrix state, but TP changes the matrix partition geometry again.
+
+Before Muon is allowed with TP, Jaxtitan needs one of:
+
+- exact full-matrix Muon semantics over TP-sharded rank-2 matrices;
+- a Dion-style distributed matrix optimizer with explicit support for TP
+  row/column partitioning;
+- a documented decision that TP+Muon uses AdamW fallback for specific matrix
+  regions, with artifacts making that obvious.
+
+This is a correctness requirement, not a performance nice-to-have. TP should
+stay AdamW-only until the optimizer policy is explicit and tested.
+
+### 5.5 Chunked / Fused Loss Path
+
+The current vocab-parallel loss is exact and keeps the public loss API stable.
+It still materializes logical `[batch, seq, vocab]` logits, physically sharded
+over vocab. That is acceptable for correctness, but it is not the final
+high-performance path.
+
+A later loss slice should follow the TorchTitan-style shape:
+
+- model can return final hidden states without immediately applying `lm_head`;
+- loss code applies `lm_head` chunk-by-chunk over sequence;
+- cross entropy accumulates numerator and token count without keeping the full
+  logical logits tensor live;
+- vocab-parallel `lm_head` and exact global softmax semantics are preserved;
+- z-loss remains separately accounted for.
+
+This should be driven by profiling. If XLA already optimizes the current path
+well enough for Jaxtitan-scale runs, the chunked path can wait.
+
+### 5.6 Kernel And Communication Optimization
+
+The current TP helpers use normal JAX einsums plus sharding constraints. That
+is correct and inspectable. It is not the final performance story.
+
+Potential optimization targets:
+
+- fused row/column parallel linear kernels;
+- fused RMSNorm plus TP-friendly projection input layout;
+- FlashAttention/attention kernels that understand TP head partitioning;
+- fused vocab-parallel cross entropy;
+- better collective scheduling around row-parallel reductions;
+- grouped GEMM for shared/routed expert paths once expert TP exists.
+
+These should be added only after GPU profiles identify actual bottlenecks.
+The automatic kernel backend should be allowed to select optimized kernels when
+available, but correctness must remain defined by the JAX reference path.
+
+### 5.7 Completion Criteria
+
+TP is complete for Jaxtitan when all of the following are true:
+
+- dense decoder and dense Trinity TP run on cloud GPUs through train, eval,
+  checkpoint restore, and sampling;
+- Trinity MoE TP composes with EP/RDEP and FSDP policies without changing
+  model semantics;
+- sequence parallel reduces activation replication where it matters;
+- expert TP has a clear routed-expert layout and train-step contract;
+- AdamW TP is validated and Muon/Dion behavior is either exact or explicitly
+  disallowed with clear artifacts;
+- preflight, diagnostics, inspect, final summaries, checkpoints, and resume
+  compatibility record the full TP policy;
+- profiles show the expected collectives and no accidental full replication of
+  large TP-sharded matrices/logits;
+- full fake-device CPU tests and targeted cloud smoke runs are green.
 
 ## 6. Context / Sequence Parallelism
 
@@ -170,11 +325,10 @@ next sparse-training milestone.
 
 ## Recommended Order
 
-1. Exact distributed Muon/Dion-style optimization for internally sharded routed experts.
-2. RDEP to improve expert load balance and reduce all-to-all pressure.
-3. Optimized MoE dispatch backends after profiling the JAX reference path.
-4. Tensor parallelism and expert tensor parallelism when individual matrices
-   become the memory or throughput bottleneck.
+1. Cloud-validate folded FSDP+EP, expert-region FSDP, RDEP, and dense TP on real GPUs.
+2. Finish TP as a scaling axis: sequence parallelism, expert TP, and TP-aware optimizer policy.
+3. Exact distributed Muon/Dion-style optimization for internally sharded routed experts.
+4. Optimized MoE dispatch backends after profiling the JAX reference path.
 5. Context parallelism when long-context experiments become a priority.
 6. Pipeline parallelism only when depth or global model size requires it.
 

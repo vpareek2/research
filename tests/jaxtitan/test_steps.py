@@ -14,6 +14,7 @@ from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.parallelism import ParallelismSpec
 from jaxtitan.steps import causal_lm_loss, eval_step, make_eval_step
 import jaxtitan.steps.eval as eval_module
+import jaxtitan.steps.train as train_module
 
 FAKE_DEVICE_COUNT = 4
 
@@ -54,6 +55,35 @@ def test_causal_lm_loss_uses_boolean_validity_mask() -> None:
 
     assert jnp.allclose(output.loss_sum, expected)
     assert output.token_count == 2
+
+
+def test_causal_lm_loss_matches_replicated_for_vocab_sharded_logits() -> None:
+    require_fake_devices()
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:2], dtype=object).reshape((1, 2)), ("data", "tp"))
+    logits = jnp.arange(2 * 3 * 8, dtype=jnp.float32).reshape(2, 3, 8) / 17.0
+    sharded_logits = jax.device_put(logits, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("data", None, "tp")))
+    target_ids = jnp.asarray([[0, 7, 3], [4, 1, 6]], dtype=jnp.int32)
+    loss_mask = jnp.asarray([[True, True, False], [True, False, True]], dtype=jnp.bool_)
+
+    replicated = causal_lm_loss(logits, target_ids, loss_mask)
+    sharded = causal_lm_loss(sharded_logits, target_ids, loss_mask)
+
+    assert jnp.allclose(sharded.loss_sum, replicated.loss_sum, atol=1e-6)
+    assert sharded.token_count == replicated.token_count
+    assert jnp.allclose(sharded.loss, replicated.loss, atol=1e-6)
+
+
+def test_z_loss_matches_replicated_for_vocab_sharded_logits() -> None:
+    require_fake_devices()
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:2], dtype=object).reshape((1, 2)), ("data", "tp"))
+    logits = jnp.arange(2 * 3 * 8, dtype=jnp.float32).reshape(2, 3, 8) / 19.0
+    sharded_logits = jax.device_put(logits, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("data", None, "tp")))
+    loss_mask = jnp.asarray([[True, True, False], [True, False, True]], dtype=jnp.bool_)
+
+    replicated = train_module._z_loss_sum(logits, loss_mask)
+    sharded = train_module._z_loss_sum(sharded_logits, loss_mask)
+
+    assert jnp.allclose(sharded, replicated, atol=1e-6)
 
 
 def test_causal_lm_loss_rejects_shape_mismatches() -> None:

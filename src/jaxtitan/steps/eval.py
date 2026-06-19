@@ -92,14 +92,17 @@ def make_eval_step(
 
 
 def _model_execution_context(sharding: ShardingPlan | None) -> ModelExecutionContext | None:
-    if sharding is None or not sharding.parallelism.expert_parallel:
+    if sharding is None or (not sharding.parallelism.expert_parallel and not sharding.parallelism.tensor_parallel):
         return None
-    if sharding.expert_parallel_axis is None:
+    if sharding.parallelism.expert_parallel and sharding.expert_parallel_axis is None:
         raise ContractError("expert parallel sharding plan is missing a resolved expert axis")
     return ModelExecutionContext(
-        expert_parallel_mesh=sharding.mesh.mesh,
-        expert_parallel_axis_name=sharding.expert_parallel_axis,
+        expert_parallel_mesh=sharding.mesh.mesh if sharding.parallelism.expert_parallel else None,
+        expert_parallel_axis_name=sharding.expert_parallel_axis or "ep",
         expert_fsdp_axis_name=sharding.expert_fsdp_axis,
+        expert_parallel_dispatcher=sharding.expert_parallel_dispatcher or "all_to_all",
+        tensor_parallel_mesh=sharding.mesh.mesh if sharding.parallelism.tensor_parallel else None,
+        tensor_parallel_axis_name=sharding.tensor_parallel_axis or "tp",
     )
 
 

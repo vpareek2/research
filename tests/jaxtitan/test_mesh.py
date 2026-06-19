@@ -73,11 +73,22 @@ def test_build_mesh_context_rejects_unknown_axis() -> None:
         build_mesh_context(MeshSpec(axis_names=("data", "pipeline"), axis_sizes=(1, 1)))
 
 
-def test_build_mesh_context_rejects_non_data_axis_size_greater_than_one() -> None:
+def test_build_mesh_context_accepts_tp_axis() -> None:
     require_fake_devices()
 
-    with pytest.raises(ContractError, match="reserved for later"):
-        build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(2, 2)))
+    context = build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(2, 2)))
+
+    assert context.mesh.devices.shape == (2, 2)
+    assert context.data_axis_size == 2
+    assert context.tp_axis_size == 2
+
+
+def test_sharding_plan_rejects_real_tp_axis_without_tensor_parallel() -> None:
+    require_fake_devices()
+    context = build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(2, 2)))
+
+    with pytest.raises(ContractError, match="tensor_parallel"):
+        build_sharding_plan(context)
 
 
 def test_build_mesh_context_accepts_fsdp_axis() -> None:
@@ -151,6 +162,32 @@ def test_fsdp_sharding_plan_maps_decoder_layouts_to_partition_specs() -> None:
     assert plan.batch.accumulated_input_ids.spec == P(None, "data", None)
 
 
+def test_tp_sharding_plan_maps_decoder_layouts_to_partition_specs() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(2, 2)))
+
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(tensor_parallel=True),
+        param_layouts=built.param_layouts,
+    )
+
+    by_tag = {layout.tag: plan.param_shardings[layout.path] for layout in built.param_layouts}
+    assert plan.tensor_parallel_axis == "tp"
+    assert plan.tensor_parallel_axis_size == 2
+    assert by_tag["embedding"].spec == P()
+    assert by_tag["attention_q"].spec == P(None, "tp")
+    assert by_tag["attention_k"].spec == P(None, "tp")
+    assert by_tag["attention_v"].spec == P(None, "tp")
+    assert by_tag["attention_o"].spec == P("tp", None)
+    assert by_tag["mlp_gate"].spec == P(None, "tp")
+    assert by_tag["mlp_up"].spec == P(None, "tp")
+    assert by_tag["mlp_down"].spec == P("tp", None)
+    assert by_tag["lm_head"].spec == P(None, "tp")
+    assert plan.batch.accumulated_input_ids.spec == P(None, "data", None)
+
+
 def test_ep_sharding_plan_maps_routed_experts_to_expert_axis() -> None:
     require_fake_devices()
     built = build_model(
@@ -218,6 +255,43 @@ def test_folded_fsdp_ep_sharding_plan_maps_routed_experts_to_fsdp_axis() -> None
     assert by_tag["attention_q"].spec == P(None, "fsdp")
     assert by_tag["moe_shared_gate"].spec == P(None, "fsdp")
     assert by_tag["moe_shared_down"].spec == P("fsdp", None)
+    assert by_tag["moe_router"].spec == P()
+    assert by_tag["moe_expert_bias"].spec == P()
+
+
+def test_data_axis_rdep_sharding_plan_maps_routed_experts_to_data_axis() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_spec(
+            name="trinity",
+            num_layers=2,
+            trinity={
+                "initial_dense_layers": 1,
+                "local_window": 8,
+                "local_layers_per_global": 3,
+                "moe": {"num_experts": 4, "top_k": 2, "num_shared_experts": 1},
+            },
+        ),
+        seed=0,
+    )
+    context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
+
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(mode="ddp", expert_parallel=True, expert_parallel_axis="data"),
+        param_layouts=built.param_layouts,
+        expert_layouts=built.expert_layouts,
+    )
+
+    by_tag = {layout.tag: plan.param_shardings[layout.path] for layout in built.param_layouts}
+    assert plan.expert_parallel_axis == "data"
+    assert plan.expert_parallel_axis_sharing == "shared_with_data"
+    assert plan.expert_parallel_dispatcher == "rdep_static"
+    assert by_tag["moe_gate"].spec == P("data", None, None)
+    assert by_tag["moe_up"].spec == P("data", None, None)
+    assert by_tag["moe_down"].spec == P("data", None, None)
+    assert by_tag["attention_q"].spec == P()
+    assert by_tag["moe_shared_gate"].spec == P()
     assert by_tag["moe_router"].spec == P()
     assert by_tag["moe_expert_bias"].spec == P()
 

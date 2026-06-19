@@ -782,6 +782,53 @@ def test_expert_region_fsdp_train_step_runs_with_adamw() -> None:
     )
 
 
+def test_data_axis_rdep_train_step_runs_with_adamw() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_trinity_spec(
+            num_layers=2,
+            initial_dense_layers=1,
+            moe={"num_experts": 4, "top_k": 2, "num_shared_experts": 1},
+            compute_dtype="float32",
+        ),
+        seed=0,
+    )
+    context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(mode="ddp", expert_parallel=True, expert_parallel_axis="data"),
+        param_layouts=built.param_layouts,
+        expert_layouts=built.expert_layouts,
+    )
+    model_state = place_model_state(built.state, plan)
+    optimizer = _optimizer(model_state, built.metadata, optimizer_name="adamw")
+    state = initialize_train_state(model_state, optimizer.transform, seed=1)
+    step = make_train_step(
+        built.graph,
+        optimizer,
+        sharding=plan,
+        state_template=state,
+        donate_state=True,
+        expected_batch_shape=(1, 4, 4),
+    )
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
+
+    next_state, metrics = step(state, place_batch(batch, plan))
+
+    assert plan.expert_parallel_axis == "data"
+    assert plan.expert_parallel_axis_sharing == "shared_with_data"
+    assert plan.expert_parallel_dispatcher == "rdep_static"
+    assert next_state.step == 1
+    assert next_state.tokens_seen == 16
+    assert metrics.token_count == 16
+    assert metrics.loss_sum.shape == ()
+    assert any(
+        getattr(leaf, "sharding", None).spec == jax.sharding.PartitionSpec("data", None, None)
+        for leaf in jax.tree.leaves(next_state.model)
+        if hasattr(getattr(leaf, "sharding", None), "spec")
+    )
+
+
 def test_folded_fsdp_ep_train_step_uses_dion2_for_dense_and_muon_for_routed_experts() -> None:
     require_fake_devices()
     built = build_model(
@@ -922,6 +969,42 @@ def test_data_axis_sharded_train_step_matches_one_device_global_batch() -> None:
         atol=1e-5,
     )
     assert _trees_close(next_four.model, next_one.model)
+
+
+def test_tensor_parallel_train_step_matches_replicated_global_batch() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
+
+    one_context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(1,)))
+    one_plan = build_sharding_plan(one_context)
+    one_model = place_replicated(built.state, one_plan)
+    one_optimizer = _optimizer(one_model, built.metadata)
+    one_state = initialize_train_state(one_model, one_optimizer.transform, seed=1)
+    one_step = make_train_step(built.graph, one_optimizer, sharding=one_plan, state_template=one_state)
+    next_one, metrics_one = one_step(one_state, place_batch(batch, one_plan))
+
+    tp_context = build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(2, 2)))
+    tp_plan = build_sharding_plan(
+        tp_context,
+        parallelism=ParallelismSpec(tensor_parallel=True),
+        param_layouts=built.param_layouts,
+    )
+    tp_model = place_model_state(built.state, tp_plan)
+    tp_optimizer = _optimizer(tp_model, built.metadata)
+    tp_state = initialize_train_state(tp_model, tp_optimizer.transform, seed=1)
+    tp_step = make_train_step(built.graph, tp_optimizer, sharding=tp_plan, state_template=tp_state)
+    next_tp, metrics_tp = tp_step(tp_state, place_batch(batch, tp_plan))
+
+    assert _scalar_int(metrics_tp.token_count) == _scalar_int(metrics_one.token_count) == 16
+    assert np.allclose(
+        np.asarray(jax.device_get(metrics_tp.loss_sum)),
+        np.asarray(jax.device_get(metrics_one.loss_sum)),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert any(getattr(leaf, "sharding", None).spec == jax.sharding.PartitionSpec(None, "tp") for leaf in jax.tree.leaves(next_tp.model))
+    assert _trees_close(next_tp.model, next_one.model)
 
 
 def test_fsdp_train_step_reports_global_metrics_and_sharded_state() -> None:

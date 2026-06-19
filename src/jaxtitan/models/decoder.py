@@ -14,7 +14,7 @@ from jaxtitan.models.components.attention import FullAttentionContext
 from jaxtitan.models.components.blocks import DecoderBlock
 from jaxtitan.models.components.dtypes import dtype_from_name
 from jaxtitan.models.components.position import precompute_rope
-from jaxtitan.models.execution import ModelExecutionContext, apply_layer
+from jaxtitan.models.execution import ModelExecutionContext, apply_layer, vocab_parallel_lm_head
 from jaxtitan.models.output import ModelOutput, ensure_model_output
 from jaxtitan.specs.model import ModelSpec
 
@@ -39,6 +39,7 @@ class ParamLayout:
     shape: tuple[int, ...]
     logical_axes: tuple[str, ...]
     fsdp_axis: int | None
+    tp_axis: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +212,6 @@ class DecoderModel(nnx.Module):
         )
 
     def __call__(self, input_ids: Any, execution: ModelExecutionContext | None = None) -> jax.Array:
-        del execution
         input_ids = jnp.asarray(input_ids)
         if input_ids.ndim != 2:
             raise ContractError(f"input_ids must have shape [batch, seq], got {input_ids.shape}")
@@ -228,8 +228,11 @@ class DecoderModel(nnx.Module):
         )
         context = FullAttentionContext(cos=cos, sin=sin)
         for layer in self.layers:
-            x = apply_layer(layer, x, context, remat=self.spec.remat)
-        return self.lm_head(self.norm(x))
+            def layer_call(hidden, layer_context, *, current_layer=layer):
+                return current_layer(hidden, layer_context, execution=execution)
+
+            x = apply_layer(layer_call, x, context, remat=self.spec.remat)
+        return vocab_parallel_lm_head(self.lm_head, self.norm(x), execution)
 
     def prefill(self, input_ids: Any, positions: Any, attention_mask: Any, cache: Any) -> tuple[jax.Array, jax.Array, Any]:
         input_ids = jnp.asarray(input_ids)
@@ -346,7 +349,7 @@ _ROUTED_EXPERT_TAGS = frozenset({"moe_gate", "moe_up", "moe_down"})
 
 
 def _layout_for_metadata(item: ParamMetadata) -> ParamLayout:
-    logical_axes, fsdp_axis = _layout_policy(item)
+    logical_axes, fsdp_axis, tp_axis = _layout_policy(item)
     if len(logical_axes) != len(item.shape):
         raise ContractError(
             f"parameter layout for {'.'.join(item.path)!r} has rank {len(logical_axes)}, "
@@ -354,12 +357,15 @@ def _layout_for_metadata(item: ParamMetadata) -> ParamLayout:
         )
     if fsdp_axis is not None and not (0 <= fsdp_axis < len(item.shape)):
         raise ContractError(f"parameter layout for {'.'.join(item.path)!r} has invalid fsdp axis {fsdp_axis}")
+    if tp_axis is not None and not (0 <= tp_axis < len(item.shape)):
+        raise ContractError(f"parameter layout for {'.'.join(item.path)!r} has invalid tp axis {tp_axis}")
     return ParamLayout(
         path=item.path,
         tag=item.tag,
         shape=item.shape,
         logical_axes=logical_axes,
         fsdp_axis=fsdp_axis,
+        tp_axis=tp_axis,
     )
 
 
@@ -385,32 +391,32 @@ def _expert_layout_for_metadata(item: ParamMetadata) -> ExpertLayout:
     )
 
 
-def _layout_policy(item: ParamMetadata) -> tuple[tuple[str, ...], int | None]:
+def _layout_policy(item: ParamMetadata) -> tuple[tuple[str, ...], int | None, int | None]:
     tag = item.tag
     if tag == "embedding":
-        return ("vocab", "hidden"), None
+        return ("vocab", "hidden"), None, None
     if tag == "lm_head":
-        return ("hidden", "vocab"), 0
+        return ("hidden", "vocab"), 0, 1
     if tag in {"attention_q", "attention_k", "attention_v", "attention_gate"}:
-        return ("hidden_in", "hidden_out"), 1
+        return ("hidden_in", "hidden_out"), 1, 1
     if tag == "attention_o":
-        return ("hidden_in", "hidden_out"), 0
+        return ("hidden_in", "hidden_out"), 0, 0
     if tag in {"mlp_gate", "mlp_up"}:
-        return ("hidden", "intermediate"), 1
+        return ("hidden", "intermediate"), 1, 1
     if tag == "mlp_down":
-        return ("intermediate", "hidden"), 0
+        return ("intermediate", "hidden"), 0, 0
     if tag == "moe_router":
-        return ("hidden", "expert"), None
+        return ("hidden", "expert"), None, None
     if tag == "moe_expert_bias":
-        return ("expert",), None
+        return ("expert",), None, None
     if tag in {"moe_gate", "moe_up"}:
-        return ("expert", "hidden", "intermediate"), None
+        return ("expert", "hidden", "intermediate"), None, None
     if tag == "moe_down":
-        return ("expert", "intermediate", "hidden"), None
+        return ("expert", "intermediate", "hidden"), None, None
     if tag in {"moe_shared_gate", "moe_shared_up"}:
-        return ("hidden", "intermediate"), 1
+        return ("hidden", "intermediate"), 1, 1
     if tag == "moe_shared_down":
-        return ("intermediate", "hidden"), 0
+        return ("intermediate", "hidden"), 0, 0
     if tag in {
         "attention_q_norm",
         "attention_k_norm",
@@ -422,5 +428,5 @@ def _layout_policy(item: ParamMetadata) -> tuple[tuple[str, ...], int | None]:
         "ffn_post_norm",
         "final_norm",
     }:
-        return tuple("norm" for _dim in item.shape), None
-    return tuple("replicated" for _dim in item.shape), None
+        return tuple("norm" for _dim in item.shape), None, None
+    return tuple("replicated" for _dim in item.shape), None, None

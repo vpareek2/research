@@ -10,7 +10,7 @@ from jax.sharding import PartitionSpec as P
 
 from jaxtitan.errors import ContractError
 from jaxtitan.models.components.dtypes import dtype_from_name
-from jaxtitan.models.execution import ModelExecutionContext
+from jaxtitan.models.execution import ModelExecutionContext, column_parallel_linear, row_parallel_linear
 from jaxtitan.models.output import AuxLoss, RouterStats
 from jaxtitan.specs.model import ModelSpec, TrinityMoeSpec
 
@@ -194,6 +194,31 @@ class AllToAllExpertDispatcher:
         )
 
 
+class RdepStaticExpertDispatcher:
+    """Semantic RDEP dispatcher that pools route rows across the data axis."""
+
+    def __init__(self, mesh: Any, *, axis_name: str = "data"):
+        if axis_name not in mesh.axis_names:
+            raise ContractError(f"RDEP dispatcher requires mesh axis {axis_name!r}")
+        self.mesh = mesh
+        self.axis_name = axis_name
+
+    def __call__(self, experts: ExpertSwiGLU, x: jax.Array, expert_ids: jax.Array, weights: jax.Array) -> jax.Array:
+        gate = jnp.asarray(experts.gate[...], dtype=experts.dtype)
+        up = jnp.asarray(experts.up[...], dtype=experts.dtype)
+        down = jnp.asarray(experts.down[...], dtype=experts.dtype)
+        return _rdep_static_expert_swiglu(
+            x=jnp.asarray(x, dtype=experts.dtype),
+            expert_ids=jnp.asarray(expert_ids, dtype=jnp.int32),
+            weights=jnp.asarray(weights, dtype=experts.dtype),
+            gate=gate,
+            up=up,
+            down=down,
+            mesh=self.mesh,
+            axis_name=self.axis_name,
+        )
+
+
 class SharedSwiGLU(nnx.Module):
     """Always-on shared expert path with ordinary dense FFN matrices."""
 
@@ -236,8 +261,10 @@ class SharedSwiGLU(nnx.Module):
             **linear_kwargs,
         )
 
-    def __call__(self, x: jax.Array) -> jax.Array:
-        return self.down(jax.nn.silu(self.gate(x)) * self.up(x))
+    def __call__(self, x: jax.Array, execution: ModelExecutionContext | None = None) -> jax.Array:
+        gate = column_parallel_linear(self.gate, x, execution)
+        up = column_parallel_linear(self.up, x, execution)
+        return row_parallel_linear(self.down, jax.nn.silu(gate) * up, execution)
 
 
 class SparseMoE(nnx.Module):
@@ -288,7 +315,7 @@ class SparseMoE(nnx.Module):
         route = self.route(x)
         output = self._dispatcher(execution)(self.experts, x, route.expert_ids, route.weights)
         if hasattr(self, "shared_experts"):
-            output = output + self.shared_experts(x)
+            output = output + self.shared_experts(x, execution=execution)
         return output
 
     def forward_with_output(
@@ -302,7 +329,7 @@ class SparseMoE(nnx.Module):
         route = self.route(x)
         output = self._dispatcher(execution)(self.experts, x, route.expert_ids, route.weights)
         if hasattr(self, "shared_experts"):
-            output = output + self.shared_experts(x)
+            output = output + self.shared_experts(x, execution=execution)
         stats = _router_stats(
             name=name,
             layer_index=layer_index,
@@ -328,6 +355,13 @@ class SparseMoE(nnx.Module):
                     execution.expert_parallel_mesh,
                     axis_name=execution.expert_parallel_axis_name,
                     expert_fsdp_axis_name=execution.expert_fsdp_axis_name,
+                )
+            if execution.expert_parallel_dispatcher == "rdep_static":
+                if execution.expert_fsdp_axis_name is not None:
+                    raise ContractError("RDEP dispatcher does not support expert_fsdp in this slice")
+                return RdepStaticExpertDispatcher(
+                    execution.expert_parallel_mesh,
+                    axis_name=execution.expert_parallel_axis_name,
                 )
             if execution.expert_parallel_dispatcher == "psum":
                 return ExpertParallelDispatcher(
@@ -498,6 +532,100 @@ def _all_to_all_expert_swiglu(
             P(axis_name, expert_fsdp_axis_name, None),
         ),
         out_specs=P("data", None, None),
+    )
+    return mapped(x, expert_ids, weights, gate, up, down)
+
+
+def _rdep_static_expert_swiglu(
+    *,
+    x: jax.Array,
+    expert_ids: jax.Array,
+    weights: jax.Array,
+    gate: jax.Array,
+    up: jax.Array,
+    down: jax.Array,
+    mesh: Any,
+    axis_name: str,
+) -> jax.Array:
+    if x.ndim != 3:
+        raise ContractError(f"RDEP expert dispatcher requires x shape [batch, seq, hidden], got {x.shape}")
+    if expert_ids.shape != weights.shape or expert_ids.ndim != 3:
+        raise ContractError("RDEP route ids and weights must have shape [batch, seq, top_k]")
+    for name, value in (("gate", gate), ("up", up), ("down", down)):
+        if value.ndim != 3:
+            raise ContractError(f"RDEP expert {name} matrix must be rank 3, got {value.shape}")
+    axis_size = int(mesh.shape[axis_name])
+    if gate.shape[0] <= 0 or gate.shape[0] % axis_size != 0:
+        raise ContractError(
+            f"expert count {gate.shape[0]} must be positive and divisible by RDEP axis size {axis_size}"
+        )
+
+    def local_dispatch(local_x, local_expert_ids, local_weights, local_gate, local_up, local_down):
+        local_expert_count = local_gate.shape[0]
+        token_count = local_x.shape[0] * local_x.shape[1]
+        top_k = local_expert_ids.shape[-1]
+        assignment_count = token_count * top_k
+        source_capacity = assignment_count
+        flat_x = jnp.repeat(jnp.reshape(local_x, (token_count, local_x.shape[-1])), top_k, axis=0)
+        flat_expert_ids = jnp.reshape(local_expert_ids, (assignment_count,))
+        flat_weights = jnp.reshape(local_weights, (assignment_count,))
+        flat_assignment_ids = jnp.arange(assignment_count, dtype=jnp.int32)
+        owner_rank = flat_expert_ids // local_expert_count
+        token_ids = flat_assignment_ids // top_k
+
+        def bucket_for_owner(owner):
+            mask = owner_rank == owner
+            order_key = jnp.where(mask, flat_assignment_ids, assignment_count + flat_assignment_ids)
+            order = jnp.argsort(order_key)[:source_capacity]
+            valid = mask[order]
+            local_ids = flat_expert_ids[order] - owner * local_expert_count
+            return (
+                flat_x[order],
+                jnp.clip(local_ids, 0, local_expert_count - 1).astype(jnp.int32),
+                flat_weights[order],
+                token_ids[order],
+                valid,
+            )
+
+        owners = jnp.arange(axis_size, dtype=jnp.int32)
+        send_x, send_local_ids, send_weights, send_token_ids, send_valid = jax.vmap(bucket_for_owner)(owners)
+        recv_x = jax.lax.all_to_all(send_x, axis_name, split_axis=0, concat_axis=0, tiled=True)
+        recv_local_ids = jax.lax.all_to_all(send_local_ids, axis_name, split_axis=0, concat_axis=0, tiled=True)
+        recv_weights = jax.lax.all_to_all(send_weights, axis_name, split_axis=0, concat_axis=0, tiled=True)
+        recv_token_ids = jax.lax.all_to_all(send_token_ids, axis_name, split_axis=0, concat_axis=0, tiled=True)
+        recv_valid = jax.lax.all_to_all(send_valid, axis_name, split_axis=0, concat_axis=0, tiled=True)
+
+        selected_gate = local_gate[recv_local_ids]
+        selected_up = local_up[recv_local_ids]
+        selected_down = local_down[recv_local_ids]
+        gate_x = jnp.einsum("...h,...hi->...i", recv_x, selected_gate)
+        up_x = jnp.einsum("...h,...hi->...i", recv_x, selected_up)
+        expert_hidden = jax.nn.silu(gate_x) * up_x
+        recv_output = jnp.einsum("...i,...ih->...h", expert_hidden, selected_down)
+        recv_output = jnp.where(recv_valid[..., None], recv_output * recv_weights[..., None], 0)
+
+        return_by_source = jnp.reshape(recv_output, (axis_size, source_capacity, local_x.shape[-1]))
+        token_by_source = jnp.reshape(recv_token_ids, (axis_size, source_capacity))
+        valid_by_source = jnp.reshape(recv_valid, (axis_size, source_capacity))
+        returned_output = jax.lax.all_to_all(return_by_source, axis_name, split_axis=0, concat_axis=0, tiled=True)
+        returned_token_ids = jax.lax.all_to_all(token_by_source, axis_name, split_axis=0, concat_axis=0, tiled=True)
+        returned_valid = jax.lax.all_to_all(valid_by_source, axis_name, split_axis=0, concat_axis=0, tiled=True)
+        flat_output = jnp.zeros((token_count, local_x.shape[-1]), dtype=local_x.dtype)
+        flat_output = flat_output.at[returned_token_ids].add(jnp.where(returned_valid[..., None], returned_output, 0))
+        return jnp.reshape(flat_output, local_x.shape)
+
+    mapped = jax.shard_map(
+        local_dispatch,
+        mesh=mesh,
+        in_specs=(
+            P(axis_name, None, None),
+            P(axis_name, None, None),
+            P(axis_name, None, None),
+            P(axis_name, None, None),
+            P(axis_name, None, None),
+            P(axis_name, None, None),
+        ),
+        out_specs=P(axis_name, None, None),
     )
     return mapped(x, expert_ids, weights, gate, up, down)
 
