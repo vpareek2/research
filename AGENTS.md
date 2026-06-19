@@ -26,6 +26,8 @@ This section exists because principles alone do not prevent repeated failures. T
 ### Session Start (Always)
 
 - Read `AGENTS.md`, then `AGENTS.md.local` if present.
+- Read `runbook/index.md` before non-trivial Jaxtitan work. If the task maps to
+  an active stream or reference, read that file too.
 - Confirm mode and print it at the top of every response: `Mode: No-Edits` or `Mode: Execution`.
 - If executing: confirm branch (`git branch --show-current`) and working tree (`git status -sb`).
 
@@ -70,6 +72,36 @@ This section exists because principles alone do not prevent repeated failures. T
 
 - If asked for "full diff/log output", do not truncate.
 - Provide complete copy/paste-ready commands, including `cd`, env vars, config paths, and flags.
+
+### Runbook Protocol
+
+- The tracked `runbook/` directory is shared project memory, not private scratch.
+- Update the relevant `runbook/streams/*.md` file when work changes run status,
+  validation results, artifact locations, known constraints, or next actions.
+- Use headers like `## YYYY-MM-DD [codex] short title`.
+- Write terse, factual entries. Prefer bullets and fenced commands over prose.
+- Every substantive entry should include:
+  - `Context`: what changed or what was being investigated.
+  - `Commands`: exact commands run, with `cd`, env vars, config paths, and flags.
+  - `Artifacts`: run dirs, config paths, manifest paths/hashes, profile paths,
+    checkpoint selectors, eval/sample outputs, or commit hashes.
+  - `Result`: observed pass/fail status, metrics, error messages, or measured
+    numbers. Do not summarize a run as "works" without artifact evidence.
+  - `Next`: the next concrete action or the reason no action remains.
+- If no command was run, say that explicitly and record the source of the
+  conclusion, such as code inspection, doc update, or design decision.
+- When logging experiments, include local artifact evidence first:
+  `run inspect`, `final.json`, `metrics/train.jsonl`, checkpoint eval/sample,
+  profiler metadata, and registry rows when relevant. W&B links are optional
+  mirrors and never sufficient on their own.
+- When logging failures, include the failing command, the exact error line, the
+  suspected cause, and the retry/remediation plan.
+- When creating a new workstream, add it to `runbook/index.md` and seed it with
+  the current objective, known state, and immediate next action.
+- Do not record secrets, cloud IPs, hostnames, SSH keys, provider account
+  details, or tokens.
+- Move completed streams to `runbook/archive/YYYY/` only when the stream is
+  genuinely done, and update the archive index.
 
 ### Ultrathink Protocol (When Asked)
 
