@@ -11,3 +11,4 @@ runs/**/wandb_id.txt
 ref/
 
 runs/
+cloud_results/
