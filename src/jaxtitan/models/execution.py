@@ -33,6 +33,8 @@ class ModelExecutionContext:
     expert_parallel_dispatcher: str = EXPERT_PARALLEL_DISPATCHER_BACKEND
     tensor_parallel_mesh: Any | None = None
     tensor_parallel_axis_name: str = "tp"
+    context_parallel_mesh: Any | None = None
+    context_parallel_axis_name: str = "cp"
     sequence_parallel: bool = True
 
     @property
@@ -44,8 +46,16 @@ class ModelExecutionContext:
         return self.tensor_parallel_mesh is not None
 
     @property
+    def context_parallel_enabled(self) -> bool:
+        return self.context_parallel_mesh is not None
+
+    @property
+    def spmd_mesh(self) -> Any | None:
+        return self.tensor_parallel_mesh or self.context_parallel_mesh or self.expert_parallel_mesh
+
+    @property
     def sequence_parallel_enabled(self) -> bool:
-        return self.tensor_parallel_enabled and self.sequence_parallel
+        return self.tensor_parallel_enabled and self.sequence_parallel and not self.context_parallel_enabled
 
 
 def expert_parallel_dispatcher_backend(axis_sharing: str | None) -> str | None:
@@ -140,8 +150,10 @@ def apply_layer(layer: Any, *args: Any, remat: str) -> Any:
 def column_parallel_linear(linear: Any, x: jax.Array, execution: ModelExecutionContext | None) -> jax.Array:
     """Apply a linear whose output/features axis is tensor-parallel sharded."""
 
-    if execution is None or not execution.tensor_parallel_enabled:
+    if execution is None or (not execution.tensor_parallel_enabled and not execution.context_parallel_enabled):
         return linear(x)
+    if not execution.tensor_parallel_enabled:
+        return feature_parallel_activation(_linear(linear, x), execution)
     if execution.sequence_parallel_enabled:
         x = replicated_activation(x, execution)
     out = _linear(linear, x)
@@ -151,8 +163,10 @@ def column_parallel_linear(linear: Any, x: jax.Array, execution: ModelExecutionC
 def row_parallel_linear(linear: Any, x: jax.Array, execution: ModelExecutionContext | None) -> jax.Array:
     """Apply a linear whose input/features axis is tensor-parallel sharded."""
 
-    if execution is None or not execution.tensor_parallel_enabled:
+    if execution is None or (not execution.tensor_parallel_enabled and not execution.context_parallel_enabled):
         return linear(x)
+    if not execution.tensor_parallel_enabled:
+        return sequence_parallel_activation(_linear(linear, x), execution)
     out = _linear(linear, x)
     if execution.sequence_parallel_enabled:
         return sequence_parallel_activation(out, execution)
@@ -162,8 +176,10 @@ def row_parallel_linear(linear: Any, x: jax.Array, execution: ModelExecutionCont
 def vocab_parallel_lm_head(linear: Any, x: jax.Array, execution: ModelExecutionContext | None) -> jax.Array:
     """Apply an LM head whose vocab/output axis is tensor-parallel sharded."""
 
-    if execution is None or not execution.tensor_parallel_enabled:
+    if execution is None or (not execution.tensor_parallel_enabled and not execution.context_parallel_enabled):
         return linear(x)
+    if not execution.tensor_parallel_enabled:
+        return feature_parallel_activation(_linear(linear, x), execution)
     if execution.sequence_parallel_enabled:
         x = replicated_activation(x, execution)
     out = _linear(linear, x)
@@ -173,15 +189,20 @@ def vocab_parallel_lm_head(linear: Any, x: jax.Array, execution: ModelExecutionC
 def replicated_activation(x: jax.Array, execution: ModelExecutionContext | None) -> jax.Array:
     """Constrain a batch/sequence/hidden activation to replicated sequence/features."""
 
-    if execution is None or not execution.tensor_parallel_enabled:
+    if execution is None or (not execution.tensor_parallel_enabled and not execution.context_parallel_enabled):
         return x
-    return _constrain_activation(x, execution, P("data", None, None))
+    seq_axis = execution.context_parallel_axis_name if execution.context_parallel_enabled else None
+    return _constrain_activation(x, execution, P("data", seq_axis, None))
 
 
 def sequence_parallel_activation(x: jax.Array, execution: ModelExecutionContext | None) -> jax.Array:
     """Constrain a batch/sequence/hidden activation to sequence parallel placement."""
 
-    if execution is None or not execution.sequence_parallel_enabled:
+    if execution is None:
+        return x
+    if execution.context_parallel_enabled:
+        return _constrain_activation(x, execution, P("data", execution.context_parallel_axis_name, None))
+    if not execution.sequence_parallel_enabled:
         return x
     return _constrain_activation(x, execution, P("data", execution.tensor_parallel_axis_name, None))
 
@@ -189,9 +210,11 @@ def sequence_parallel_activation(x: jax.Array, execution: ModelExecutionContext 
 def feature_parallel_activation(x: jax.Array, execution: ModelExecutionContext | None) -> jax.Array:
     """Constrain a batch/sequence/features activation to feature/vocab parallel placement."""
 
-    if execution is None or not execution.tensor_parallel_enabled:
+    if execution is None or (not execution.tensor_parallel_enabled and not execution.context_parallel_enabled):
         return x
-    return _constrain_activation(x, execution, P("data", None, execution.tensor_parallel_axis_name))
+    seq_axis = execution.context_parallel_axis_name if execution.context_parallel_enabled else None
+    feature_axis = execution.tensor_parallel_axis_name if execution.tensor_parallel_enabled else None
+    return _constrain_activation(x, execution, P("data", seq_axis, feature_axis))
 
 
 def _linear(linear: Any, x: jax.Array) -> jax.Array:
@@ -206,4 +229,7 @@ def _linear(linear: Any, x: jax.Array) -> jax.Array:
 def _constrain_activation(x: jax.Array, execution: ModelExecutionContext, spec: P) -> jax.Array:
     if x.ndim != len(spec):
         return x
-    return jax.lax.with_sharding_constraint(x, NamedSharding(execution.tensor_parallel_mesh, spec))
+    mesh = execution.spmd_mesh
+    if mesh is None:
+        return x
+    return jax.lax.with_sharding_constraint(x, NamedSharding(mesh, spec))

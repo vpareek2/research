@@ -45,7 +45,7 @@ def tensor_parallel_causal_lm_loss(
 ) -> LossOutput:
     """Compute exact causal LM loss from vocab-sharded logical logits."""
 
-    if execution is None or not execution.tensor_parallel_enabled:
+    if execution is None or (not execution.tensor_parallel_enabled and not execution.context_parallel_enabled):
         return causal_lm_loss(logits, target_ids, loss_mask)
     logits = feature_parallel_activation(logits, execution)
     return causal_lm_loss(logits, target_ids, loss_mask)
@@ -106,7 +106,11 @@ def make_eval_step(
 
 
 def _model_execution_context(sharding: ShardingPlan | None) -> ModelExecutionContext | None:
-    if sharding is None or (not sharding.parallelism.expert_parallel and not sharding.parallelism.tensor_parallel):
+    if sharding is None or (
+        not sharding.parallelism.expert_parallel
+        and not sharding.parallelism.tensor_parallel
+        and not sharding.parallelism.context_parallel
+    ):
         return None
     if sharding.parallelism.expert_parallel and sharding.expert_parallel_axis is None:
         raise ContractError("expert parallel sharding plan is missing a resolved expert axis")
@@ -117,6 +121,8 @@ def _model_execution_context(sharding: ShardingPlan | None) -> ModelExecutionCon
         expert_parallel_dispatcher=sharding.expert_parallel_dispatcher or "all_to_all",
         tensor_parallel_mesh=sharding.mesh.mesh if sharding.parallelism.tensor_parallel else None,
         tensor_parallel_axis_name=sharding.tensor_parallel_axis or "tp",
+        context_parallel_mesh=sharding.mesh.mesh if sharding.parallelism.context_parallel else None,
+        context_parallel_axis_name=sharding.context_parallel_axis or "cp",
     )
 
 

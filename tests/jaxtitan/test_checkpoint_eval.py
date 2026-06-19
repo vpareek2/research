@@ -135,6 +135,35 @@ def test_evaluate_zero2_checkpoint_restores_with_sharded_optimizer_template(
     assert payload["eval"]["token_count"] == 16
 
 
+def test_evaluate_context_parallel_checkpoint_restores_with_cp_template(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("cp-eval", shard_token_groups=(tuple(range(0, 80)),), train_tokens=50)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            checkpoint_every_steps=1,
+            axis_names=("data", "cp"),
+            axis_sizes=(2, 2),
+            context_parallel=True,
+            global_batch_size=4,
+        )
+    )
+    run_training(config_path)
+
+    payload = evaluate_checkpoint(tmp_path / "runs" / "loop", "latest")
+
+    assert payload["status"] == "completed"
+    assert payload["checkpoint"]["step"] == 1
+    assert payload["eval"]["token_count"] == 16
+
+
 def test_evaluate_checkpoint_rejects_invalid_selector(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -259,6 +288,7 @@ def _training_config(
     axis_names: tuple[str, ...] = ("data",),
     axis_sizes: tuple[int, ...] = (1,),
     parallelism_mode: str = "ddp",
+    context_parallel: bool = False,
 ) -> str:
     return f"""
 [run]
@@ -303,6 +333,7 @@ axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 
 [parallelism]
 mode = "{parallelism_mode}"
+context_parallel = {str(context_parallel).lower()}
 
 [[evals]]
 name = "validation"

@@ -5,8 +5,9 @@ They intentionally do not point at the local PleIAs synth dataset. Prefer
 preparing data from Hugging Face on the cloud instance:
 
 ```bash
-uv run jaxtitan data prepare --overwrite configs/data/tinystories_gpt2_smoke.toml
-uv run jaxtitan data inspect data/tinystories_gpt2_smoke/manifest.json --tokenizer gpt2 --verify-checksums --seq-len 512
+uv run jaxtitan data prepare --overwrite configs/data/tinystories_gpt2_cloud_validation.toml
+uv run jaxtitan data inspect data/tinystories_gpt2_cloud_validation/manifest.json --tokenizer gpt2 --verify-checksums --seq-len 1024
+uv run jaxtitan data check data/tinystories_gpt2_cloud_validation/manifest.json --tokenizer gpt2 --verify-checksums
 ```
 
 The older dense smoke configs still use:
@@ -18,6 +19,119 @@ data/cloud_smoke_gpt2/manifest.json
 For those configs, either prepare or copy a GPT-2-tokenized Jaxtitan manifest to
 that path, or edit each config's `data.train_manifest` to the cloud-local
 manifest path.
+
+## 4-GPU Parallelism Validation Bundle
+
+This is the current primary cloud validation matrix. It is designed for a
+single-node 4x A100 80GB allocation and validates composed sharding semantics
+before distributed optimizer work.
+
+| Config | Purpose |
+| --- | --- |
+| `configs/jaxtitan/cloud_4gpu_dense_ddp_adamw_validation.toml` | data-parallel AdamW baseline |
+| `configs/jaxtitan/cloud_4gpu_dense_fsdp_adamw_validation.toml` | dense FSDP AdamW |
+| `configs/jaxtitan/cloud_4gpu_dense_zero2_adamw_validation.toml` | dense ZeRO-2 AdamW |
+| `configs/jaxtitan/cloud_4gpu_dense_tp_adamw_validation.toml` | dense tensor parallelism |
+| `configs/jaxtitan/cloud_4gpu_dense_cp_adamw_validation.toml` | dense context parallelism |
+| `configs/jaxtitan/cloud_4gpu_dense_tp_cp_adamw_validation.toml` | dense TP+CP composition |
+| `configs/jaxtitan/cloud_4gpu_dense_fsdp_tp_adamw_validation.toml` | dense FSDP+TP composition |
+| `configs/jaxtitan/cloud_4gpu_dense_zero2_tp_adamw_validation.toml` | dense ZeRO-2+TP composition |
+| `configs/jaxtitan/cloud_4gpu_trinity_moe_ep_adamw_validation.toml` | Trinity MoE expert parallelism |
+| `configs/jaxtitan/cloud_4gpu_trinity_moe_tp_ep_adamw_validation.toml` | shared-expert TP plus routed-expert EP |
+| `configs/jaxtitan/cloud_4gpu_trinity_moe_cp_ep_adamw_validation.toml` | context parallelism plus routed-expert EP |
+| `configs/jaxtitan/cloud_4gpu_trinity_moe_rdep_adamw_validation.toml` | data-axis RDEP |
+| `configs/jaxtitan/cloud_4gpu_trinity_moe_folded_fsdp_ep_muon_validation.toml` | folded FSDP+EP with Muon intent |
+| `configs/jaxtitan/cloud_4gpu_trinity_moe_product_fsdp_ep_muon_validation.toml` | product-axis FSDP+EP with Muon intent |
+| `configs/jaxtitan/cloud_4gpu_trinity_moe_expert_fsdp_adamw_validation.toml` | EP plus expert-internal FSDP |
+
+TP configs intentionally use AdamW. Current Jaxtitan rejects Muon with tensor
+parallelism until exact distributed matrix-optimizer semantics are implemented.
+
+Run each config with:
+
+```bash
+cfg=configs/jaxtitan/<config>.toml
+run=<run_id>
+
+uv run jaxtitan config check "$cfg"
+uv run jaxtitan run preflight "$cfg"
+uv run jaxtitan run train --overwrite "$cfg"
+uv run jaxtitan run inspect "runs/$run"
+uv run jaxtitan eval checkpoint "runs/$run" --checkpoint latest --json
+```
+
+For non-CP runs, checkpoint sampling must succeed:
+
+```bash
+uv run jaxtitan sample checkpoint "runs/$run" \
+  --checkpoint latest \
+  --prompt-ids "15496,11" \
+  --max-new-tokens 8 \
+  --top-k 1 \
+  --json
+```
+
+For CP runs, checkpoint sampling must fail cleanly with the explicit CP
+KV-cache guardrail. Checkpoint eval must still succeed.
+
+Post-run checks:
+
+```bash
+jq '.parallelism, .sharding, .runtime' "runs/$run/diagnostics/runtime.json"
+jq '{status, traced_step_range, trace_files}' "runs/$run/diagnostics/profiling.json"
+tail -n 1 "runs/$run/metrics/train.jsonl" | jq '{
+  step,
+  loss,
+  total_loss,
+  grad_norm,
+  optimizer_route_backend_counts,
+  optimizer_groups_with_zero_grad,
+  optimizer_groups_with_zero_update,
+  router_dead_experts_count,
+  router_mean_load_cv,
+  router_mean_importance_cv
+}'
+jq '{status, step, tokens_seen, final_eval_loss}' "runs/$run/summaries/final.json"
+jq '.checkpoints' "runs/$run/checkpoints/index.json"
+```
+
+Collect lightweight result artifacts without checkpoints:
+
+```bash
+cd ~/research
+stamp=$(date +%F)
+out=/tmp/jaxtitan_parallel_validation_$stamp
+mkdir -p "$out"
+
+for run in \
+  cloud_4gpu_dense_ddp_adamw_validation \
+  cloud_4gpu_dense_fsdp_adamw_validation \
+  cloud_4gpu_dense_zero2_adamw_validation \
+  cloud_4gpu_dense_tp_adamw_validation \
+  cloud_4gpu_dense_cp_adamw_validation \
+  cloud_4gpu_dense_tp_cp_adamw_validation \
+  cloud_4gpu_dense_fsdp_tp_adamw_validation \
+  cloud_4gpu_dense_zero2_tp_adamw_validation \
+  cloud_4gpu_trinity_moe_ep_adamw_validation \
+  cloud_4gpu_trinity_moe_tp_ep_adamw_validation \
+  cloud_4gpu_trinity_moe_cp_ep_adamw_validation \
+  cloud_4gpu_trinity_moe_rdep_adamw_validation \
+  cloud_4gpu_trinity_moe_folded_fsdp_ep_muon_validation \
+  cloud_4gpu_trinity_moe_product_fsdp_ep_muon_validation \
+  cloud_4gpu_trinity_moe_expert_fsdp_adamw_validation
+do
+  mkdir -p "$out/$run"
+  cp "runs/$run/summaries/final.json" "$out/$run/final.json"
+  cp "runs/$run/diagnostics/runtime.json" "$out/$run/runtime.json"
+  cp "runs/$run/diagnostics/profiling.json" "$out/$run/profiling.json"
+  cp "runs/$run/checkpoints/index.json" "$out/$run/checkpoints_index.json"
+  tail -n 1 "runs/$run/metrics/train.jsonl" > "$out/$run/last_train.jsonl"
+  find "runs/$run/profiles" -type f 2>/dev/null | sort > "$out/$run/profile_files.txt"
+done
+
+tar -czf "/tmp/jaxtitan_parallel_validation_$stamp.tgz" -C /tmp "jaxtitan_parallel_validation_$stamp"
+ls -lh "/tmp/jaxtitan_parallel_validation_$stamp.tgz"
+```
 
 ## Config Matrix
 
@@ -140,3 +254,23 @@ For EP configs, additionally check:
 Only treat performance numbers as real after a dedicated benchmark run. These
 smokes are for correctness, artifact readability, resume/eval/sample restore,
 and distributed optimizer sanity.
+
+## Acceptance Criteria
+
+A validation run passes only if:
+
+- `config check`, `preflight`, `train`, `inspect`, and checkpoint eval all succeed.
+- Non-CP checkpoint sampling succeeds; CP checkpoint sampling fails with the
+  explicit CP KV-cache guardrail.
+- `diagnostics/runtime.json` reports the expected mesh axes, parallelism flags,
+  and sharding policies.
+- `diagnostics/profiling.json` has `status="completed"` and at least one
+  Perfetto trace file.
+- Final train/eval losses are finite and no NaNs appear in metrics.
+- Optimizer zero-grad/zero-update groups are zero except expected non-gradient
+  state such as `moe_expert_bias`.
+- Route counts match intent: TP configs use AdamW only; FSDP/ZeRO Muon configs
+  auto-route matrix leaves to Dion2; EP Muon configs show routed/shared Muon
+  routes where expected.
+- MoE runs emit `moe_router_layers`; dead experts and load CV are recorded but
+  are not hard failures for tiny smokes.

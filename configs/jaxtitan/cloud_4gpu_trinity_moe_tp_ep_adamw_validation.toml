@@ -1,0 +1,100 @@
+[run]
+id = "cloud_4gpu_trinity_moe_tp_ep_adamw_validation"
+seed = 123
+output_dir = "runs"
+
+[model]
+name = "trinity"
+variant = "cloud-4gpu-trinity-moe-tp-ep-adamw-validation"
+vocab_size = 50304
+hidden_size = 256
+intermediate_size = 1024
+num_layers = 2
+num_heads = 4
+n_kv_heads = 2
+max_seq_len = 512
+rope_theta = 1000000.0
+norm_epsilon = 0.000001
+tied_embeddings = false
+param_dtype = "float32"
+compute_dtype = "bfloat16"
+remat = "block"
+
+[model.trinity]
+initial_dense_layers = 1
+local_window = 512
+local_layers_per_global = 3
+norm_policy = "afmoe_dual"
+
+[model.trinity.moe]
+num_experts = 8
+top_k = 2
+expert_intermediate_size = 512
+num_shared_experts = 1
+route_scale = 1.0
+
+[model.trinity.moe.balance]
+name = "smebu"
+load_lr = 0.0005
+momentum = 0.5
+clamp = 2.0
+sequence_aux_loss_weight = 0.0001
+
+[optimizer]
+name = "adamw"
+weight_decay = 0.1
+grad_clip_norm = 1.0
+
+[optimizer.schedule]
+name = "cosine"
+peak_lr = 0.0006
+warmup_steps = 2
+total_steps = 16
+min_lr_ratio = 0.1
+
+[data]
+train_manifest = "data/tinystories_gpt2_cloud_validation/manifest.json"
+tokenizer_id = "gpt2"
+order = "document_buffer"
+shuffle_seed = 123
+worker_count = 0
+worker_buffer_size = 1
+prefetch = false
+document_buffer_size = 128
+document_refill_size = 128
+
+[training]
+seq_len = 512
+global_batch_size = 4
+gradient_accumulation_steps = 1
+target_tokens = 32768
+precision = "bf16"
+log_every_steps = 1
+checkpoint_every_steps = 10
+
+[training.loss]
+z_loss_weight = 0.000001
+
+[mesh]
+axis_names = ["data", "tp", "ep"]
+axis_sizes = [1, 2, 2]
+
+[parallelism]
+mode = "ddp"
+tensor_parallel = true
+expert_parallel = true
+
+[profiling]
+enabled = true
+trace_start_step = 4
+trace_steps = 2
+create_perfetto_trace = true
+create_perfetto_link = false
+
+[[evals]]
+name = "validation"
+every_steps = 5
+num_batches = 1
+
+[artifacts]
+wandb_enabled = false

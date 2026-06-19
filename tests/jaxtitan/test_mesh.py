@@ -83,11 +83,29 @@ def test_build_mesh_context_accepts_tp_axis() -> None:
     assert context.tp_axis_size == 2
 
 
+def test_build_mesh_context_accepts_cp_axis() -> None:
+    require_fake_devices()
+
+    context = build_mesh_context(MeshSpec(axis_names=("data", "cp"), axis_sizes=(2, 2)))
+
+    assert context.mesh.devices.shape == (2, 2)
+    assert context.data_axis_size == 2
+    assert context.cp_axis_size == 2
+
+
 def test_sharding_plan_rejects_real_tp_axis_without_tensor_parallel() -> None:
     require_fake_devices()
     context = build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(2, 2)))
 
     with pytest.raises(ContractError, match="tensor_parallel"):
+        build_sharding_plan(context)
+
+
+def test_sharding_plan_rejects_real_cp_axis_without_context_parallel() -> None:
+    require_fake_devices()
+    context = build_mesh_context(MeshSpec(axis_names=("data", "cp"), axis_sizes=(2, 2)))
+
+    with pytest.raises(ContractError, match="context_parallel"):
         build_sharding_plan(context)
 
 
@@ -186,6 +204,46 @@ def test_tp_sharding_plan_maps_decoder_layouts_to_partition_specs() -> None:
     assert by_tag["mlp_down"].spec == P("tp", None)
     assert by_tag["lm_head"].spec == P(None, "tp")
     assert plan.batch.accumulated_input_ids.spec == P(None, "data", None)
+
+
+def test_context_parallel_sharding_plan_shards_batch_sequence_axis() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "cp"), axis_sizes=(2, 2)))
+
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(context_parallel=True),
+        param_layouts=built.param_layouts,
+    )
+
+    assert plan.context_parallel_axis == "cp"
+    assert plan.context_parallel_axis_size == 2
+    assert plan.batch.input_ids.spec == P("data", "cp")
+    assert plan.batch.target_ids.spec == P("data", "cp")
+    assert plan.batch.loss_mask.spec == P("data", "cp")
+    assert plan.batch.accumulated_input_ids.spec == P(None, "data", "cp")
+    assert all(sharding.spec == P() for sharding in plan.param_shardings.values())
+
+
+def test_context_and_tensor_parallel_sharding_plan_keeps_independent_axes() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "cp", "tp"), axis_sizes=(1, 2, 2)))
+
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(context_parallel=True, tensor_parallel=True),
+        param_layouts=built.param_layouts,
+    )
+
+    by_tag = {layout.tag: plan.param_shardings[layout.path] for layout in built.param_layouts}
+    assert plan.context_parallel_axis == "cp"
+    assert plan.tensor_parallel_axis == "tp"
+    assert plan.batch.input_ids.spec == P("data", "cp")
+    assert plan.batch.accumulated_input_ids.spec == P(None, "data", "cp")
+    assert by_tag["attention_q"].spec == P(None, "tp")
+    assert by_tag["attention_o"].spec == P("tp", None)
 
 
 def test_ep_sharding_plan_maps_routed_experts_to_expert_axis() -> None:
@@ -678,6 +736,23 @@ def test_place_batch_shards_arrays_over_data_axis() -> None:
     assert {shard.data.shape for shard in placed.input_ids.addressable_shards} == {(2, 4)}
 
 
+def test_place_batch_shards_arrays_over_data_and_cp_axes() -> None:
+    require_fake_devices()
+    context = build_mesh_context(MeshSpec(axis_names=("data", "cp"), axis_sizes=(2, 2)))
+    plan = build_sharding_plan(context, parallelism=ParallelismSpec(context_parallel=True))
+    batch = Batch(
+        input_ids=np.arange(32, dtype=np.int32).reshape(4, 8),
+        target_ids=np.arange(32, 64, dtype=np.int32).reshape(4, 8),
+        loss_mask=np.ones((4, 8), dtype=np.bool_),
+    )
+
+    placed = place_batch(batch, plan)
+
+    assert placed.input_ids.sharding == plan.batch.input_ids
+    assert placed.input_ids.sharding.spec == P("data", "cp")
+    assert {shard.data.shape for shard in placed.input_ids.addressable_shards} == {(2, 4)}
+
+
 def test_place_batch_places_doc_ids_when_present() -> None:
     require_fake_devices()
     context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
@@ -712,6 +787,23 @@ def test_place_accumulated_batch_shards_batch_axis_over_data_axis() -> None:
     assert placed.target_ids.sharding == plan.batch.accumulated_target_ids
     assert placed.loss_mask.sharding == plan.batch.accumulated_loss_mask
     assert placed.doc_ids is None
+    assert {shard.data.shape for shard in placed.input_ids.addressable_shards} == {(2, 2, 4)}
+
+
+def test_place_accumulated_batch_shards_sequence_axis_over_cp_axis() -> None:
+    require_fake_devices()
+    context = build_mesh_context(MeshSpec(axis_names=("data", "cp"), axis_sizes=(2, 2)))
+    plan = build_sharding_plan(context, parallelism=ParallelismSpec(context_parallel=True))
+    batch = Batch(
+        input_ids=np.arange(64, dtype=np.int32).reshape(2, 4, 8),
+        target_ids=np.arange(64, 128, dtype=np.int32).reshape(2, 4, 8),
+        loss_mask=np.ones((2, 4, 8), dtype=np.bool_),
+    )
+
+    placed = place_accumulated_batch(batch, plan)
+
+    assert placed.input_ids.sharding == plan.batch.accumulated_input_ids
+    assert placed.input_ids.sharding.spec == P(None, "data", "cp")
     assert {shard.data.shape for shard in placed.input_ids.addressable_shards} == {(2, 2, 4)}
 
 

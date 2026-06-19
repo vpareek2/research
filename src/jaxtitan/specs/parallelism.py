@@ -37,6 +37,7 @@ class ParallelismSpec:
 
     mode: ParallelismMode = "ddp"
     tensor_parallel: bool = False
+    context_parallel: bool = False
     expert_parallel: bool = False
     expert_parallel_axis: ExpertParallelAxis = "auto"
 
@@ -45,6 +46,8 @@ class ParallelismSpec:
             raise ContractError(f"parallelism.mode must be one of {sorted(_PARALLELISM_MODES)}, got {self.mode!r}")
         if not isinstance(self.tensor_parallel, bool):
             raise ContractError("parallelism.tensor_parallel must be a boolean")
+        if not isinstance(self.context_parallel, bool):
+            raise ContractError("parallelism.context_parallel must be a boolean")
         if not isinstance(self.expert_parallel, bool):
             raise ContractError("parallelism.expert_parallel must be a boolean")
         if self.expert_parallel_axis not in _EXPERT_PARALLEL_AXES:

@@ -103,6 +103,21 @@ def test_sample_checkpoint_rejects_invalid_inputs(
         sample_checkpoint(run_dir, "middle", "1", max_new_tokens=1, top_k=1)
 
 
+def test_sample_checkpoint_rejects_context_parallel_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("cp-sample", shard_token_groups=(tuple(range(0, 50)),), train_tokens=25)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_training_config(manifest, target_tokens=8, checkpoint_every_steps=1, context_parallel=True))
+    run_training(config_path)
+
+    with pytest.raises(ContractError, match="context-parallel"):
+        sample_checkpoint(tmp_path / "runs" / "loop", "latest", "1,2", max_new_tokens=1, top_k=1)
+
+
 def test_cli_sample_checkpoint_json_success_and_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -170,7 +185,16 @@ def test_cli_sample_checkpoint_json_success_and_failure(
     assert "Traceback" not in failure.stderr
 
 
-def _training_config(train_manifest: Path, *, target_tokens: int, checkpoint_every_steps: int) -> str:
+def _training_config(
+    train_manifest: Path,
+    *,
+    target_tokens: int,
+    checkpoint_every_steps: int,
+    context_parallel: bool = False,
+) -> str:
+    axis_names = '["data", "cp"]' if context_parallel else '["data"]'
+    axis_sizes = "[1, 2]" if context_parallel else "[1]"
+    parallelism = "\n[parallelism]\ncontext_parallel = true\n" if context_parallel else ""
     return f"""
 [run]
 id = "loop"
@@ -209,8 +233,9 @@ log_every_steps = 1
 checkpoint_every_steps = {checkpoint_every_steps}
 
 [mesh]
-axis_names = ["data"]
-axis_sizes = [1]
+axis_names = {axis_names}
+axis_sizes = {axis_sizes}
+{parallelism}
 
 [[evals]]
 name = "validation"

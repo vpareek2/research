@@ -727,6 +727,46 @@ def test_apply_model_output_uses_tensor_parallel_context() -> None:
     assert getattr(actual.logits, "sharding", None).spec == P("data", None, "tp")
 
 
+def test_apply_model_output_uses_context_parallel_context() -> None:
+    mesh = Mesh(np.asarray(jax.devices()[:2], dtype=object).reshape((1, 2)), ("data", "cp"))
+    result = build_model(_tiny_spec(compute_dtype="float32"), seed=0)
+    input_ids = jax.device_put(
+        jnp.arange(16, dtype=jnp.int32).reshape(2, 8),
+        NamedSharding(mesh, P("data", "cp")),
+    )
+    expected = apply_model_output(result.graph, result.state, input_ids)
+
+    actual = apply_model_output(
+        result.graph,
+        result.state,
+        input_ids,
+        execution=ModelExecutionContext(context_parallel_mesh=mesh),
+    )
+
+    assert jnp.allclose(actual.logits, expected.logits, atol=1e-5)
+    assert getattr(actual.logits, "sharding", None).spec == P("data", "cp", None)
+
+
+def test_apply_model_output_uses_context_and_tensor_parallel_context() -> None:
+    mesh = Mesh(np.asarray(jax.devices()[:4], dtype=object).reshape((1, 2, 2)), ("data", "cp", "tp"))
+    result = build_model(_tiny_spec(compute_dtype="float32"), seed=0)
+    input_ids = jax.device_put(
+        jnp.arange(16, dtype=jnp.int32).reshape(2, 8),
+        NamedSharding(mesh, P("data", "cp")),
+    )
+    expected = apply_model_output(result.graph, result.state, input_ids)
+
+    actual = apply_model_output(
+        result.graph,
+        result.state,
+        input_ids,
+        execution=ModelExecutionContext(tensor_parallel_mesh=mesh, context_parallel_mesh=mesh),
+    )
+
+    assert jnp.allclose(actual.logits, expected.logits, atol=1e-5)
+    assert getattr(actual.logits, "sharding", None).spec == P("data", "cp", "tp")
+
+
 def test_sequence_parallel_activation_uses_sequence_axis() -> None:
     mesh = Mesh(np.asarray(jax.devices()[:2], dtype=object).reshape((1, 2)), ("data", "tp"))
     x = jax.device_put(
@@ -737,6 +777,22 @@ def test_sequence_parallel_activation_uses_sequence_axis() -> None:
     actual = sequence_parallel_activation(x, ModelExecutionContext(tensor_parallel_mesh=mesh))
 
     assert getattr(actual, "sharding", None).spec == P("data", "tp", None)
+    assert jnp.allclose(actual, x)
+
+
+def test_context_parallel_activation_takes_precedence_over_sequence_parallel() -> None:
+    mesh = Mesh(np.asarray(jax.devices()[:4], dtype=object).reshape((1, 2, 2)), ("data", "cp", "tp"))
+    x = jax.device_put(
+        jnp.arange(2 * 8 * 4, dtype=jnp.float32).reshape(2, 8, 4),
+        NamedSharding(mesh, P("data", None, None)),
+    )
+
+    actual = sequence_parallel_activation(
+        x,
+        ModelExecutionContext(tensor_parallel_mesh=mesh, context_parallel_mesh=mesh),
+    )
+
+    assert getattr(actual, "sharding", None).spec == P("data", "cp", None)
     assert jnp.allclose(actual, x)
 
 

@@ -478,6 +478,50 @@ def test_run_preflight_reports_tensor_parallel_policy(
     assert not (tmp_path / "runs" / "loop").exists()
 
 
+def test_run_preflight_reports_context_parallel_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("cp-preflight", shard_token_groups=(tuple(range(0, 80)),), train_tokens=50)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            axis_names=("data", "cp"),
+            axis_sizes=(2, 2),
+            context_parallel=True,
+            global_batch_size=4,
+            target_tokens=16,
+        )
+    )
+
+    report = run_preflight(config_path)
+    payload = report.payload
+    text = format_preflight_report(report)
+
+    assert payload["parallelism"]["context_parallel"] is True
+    assert payload["parallelism"]["execution_mode"] == "replicated_data_parallel+cp"
+    assert payload["parallelism"]["context_parallel_policy"] == {
+        "enabled": True,
+        "axis": "cp",
+        "axis_size": 2,
+        "attention": "logical_spmd_exact",
+        "activation_spec": "batch,cp_sequence,hidden",
+        "batch_sharding": "batch,cp_sequence",
+        "kv_cache": "unsupported",
+        "inference": "checkpoint_eval_only",
+    }
+    assert payload["parallelism"]["mesh"]["cp_axis_size"] == 2
+    assert payload["compile"]["train"]["input_shardings"]["input_ids"]["partition_spec"] == "PartitionSpec(None, 'data', 'cp')"
+    assert payload["compile"]["eval"]["input_shardings"]["input_ids"]["partition_spec"] == "PartitionSpec('data', 'cp')"
+    assert payload["training"]["compile"] == "passed"
+    assert "mode=replicated_data_parallel+cp" in text
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
 def test_run_preflight_reports_moe_tensor_parallel_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1062,6 +1106,7 @@ def _preflight_config(
     trinity_moe: bool = False,
     expert_parallel: bool = False,
     tensor_parallel: bool = False,
+    context_parallel: bool = False,
     gradient_accumulation_steps: int = 1,
     remat: str = "none",
     eval_every_steps: int | None = None,
@@ -1170,6 +1215,7 @@ axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 mode = "{parallelism_mode}"
 expert_parallel = {str(expert_parallel).lower()}
 tensor_parallel = {str(tensor_parallel).lower()}
+context_parallel = {str(context_parallel).lower()}
 {profiling_block}
 {eval_block}
 """

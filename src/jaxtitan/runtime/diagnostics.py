@@ -212,6 +212,7 @@ def build_runtime_diagnostics(
             "fsdp_axis_size": context.fsdp_axis_size,
             "ep_axis_size": context.ep_axis_size,
             "tp_axis_size": context.tp_axis_size,
+            "cp_axis_size": context.cp_axis_size,
             "global_mesh_size": _product(spec.mesh.axis_sizes),
             "selected_device_count": device_count,
             "selected_addressable_device_count": device_count,
@@ -324,6 +325,7 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
             "schema_version": 1,
             "mode": spec.parallelism.mode,
             "tensor_parallel": spec.parallelism.tensor_parallel,
+            "context_parallel": spec.parallelism.context_parallel,
             "expert_parallel": spec.parallelism.expert_parallel,
             "tensor_parallel_policy": {
                 "enabled": spec.parallelism.tensor_parallel,
@@ -346,6 +348,16 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
                     tensor_parallel=spec.parallelism.tensor_parallel,
                     has_moe=has_moe,
                 ),
+            },
+            "context_parallel_policy": {
+                "enabled": spec.parallelism.context_parallel,
+                "axis": "cp" if spec.parallelism.context_parallel else None,
+                "axis_size": axis_sizes.get("cp", 1) if spec.parallelism.context_parallel else 1,
+                "attention": "logical_spmd_exact" if spec.parallelism.context_parallel else None,
+                "activation_spec": "batch,cp_sequence,hidden" if spec.parallelism.context_parallel else None,
+                "batch_sharding": "batch,cp_sequence" if spec.parallelism.context_parallel else None,
+                "kv_cache": "unsupported" if spec.parallelism.context_parallel else None,
+                "inference": "checkpoint_eval_only" if spec.parallelism.context_parallel else None,
             },
             "expert_parallel_policy": expert_parallel_policy_payload(
                 enabled=spec.parallelism.expert_parallel,
@@ -378,8 +390,11 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
                 "fsdp_axis_size": context.fsdp_axis_size,
                 "ep_axis_size": context.ep_axis_size,
                 "tp_axis_size": context.tp_axis_size,
+                "cp_axis_size": context.cp_axis_size,
                 "tensor_parallel_axis": "tp" if spec.parallelism.tensor_parallel else None,
                 "tensor_parallel_axis_size": axis_sizes.get("tp", 1) if spec.parallelism.tensor_parallel else 1,
+                "context_parallel_axis": "cp" if spec.parallelism.context_parallel else None,
+                "context_parallel_axis_size": axis_sizes.get("cp", 1) if spec.parallelism.context_parallel else 1,
                 "expert_parallel_axis": expert_axis.axis,
                 "expert_parallel_axis_size": expert_axis.axis_size,
                 "expert_parallel_axis_sharing": expert_axis.axis_sharing,
@@ -481,6 +496,18 @@ def sharding_policy_summary(plan: Any, *, has_moe: bool = False) -> dict[str, An
                         has_moe=has_moe,
                     ),
                 },
+                "cp": None
+                if not plan.parallelism.context_parallel
+                else {
+                    "enabled": True,
+                    "axis": plan.context_parallel_axis,
+                    "axis_size": plan.context_parallel_axis_size,
+                    "attention": "logical_spmd_exact",
+                    "activation_spec": "batch,cp_sequence,hidden",
+                    "batch_sharding": "batch,cp_sequence",
+                    "kv_cache": "unsupported",
+                    "inference": "checkpoint_eval_only",
+                },
                 "kv_cache": None,
             },
         }
@@ -519,6 +546,8 @@ def _state_policy_summary(plan: Any, *, placement: str) -> dict[str, Any]:
         "mode": plan.parallelism.mode,
         "tensor_parallel": plan.parallelism.tensor_parallel,
         "tensor_parallel_axis": plan.tensor_parallel_axis,
+        "context_parallel": plan.parallelism.context_parallel,
+        "context_parallel_axis": plan.context_parallel_axis,
         "expert_parallel": plan.parallelism.expert_parallel,
         "expert_parallel_axis": plan.expert_parallel_axis,
         "expert_parallel_axis_sharing": plan.expert_parallel_axis_sharing,
@@ -687,6 +716,8 @@ def runtime_execution_mode(spec: RunSpec) -> str:
         suffixes.append("ep")
     if spec.parallelism.tensor_parallel:
         suffixes.append("tp")
+    if spec.parallelism.context_parallel:
+        suffixes.append("cp")
     if spec.parallelism.mode in {"zero2", "fsdp"}:
         return spec.parallelism.mode if not suffixes else f"{spec.parallelism.mode}+{'+'.join(suffixes)}"
     if suffixes:

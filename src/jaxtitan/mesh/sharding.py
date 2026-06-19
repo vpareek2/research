@@ -16,7 +16,7 @@ from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.parallelism import ParallelismSpec, resolve_expert_fsdp_axis, resolve_expert_parallel_axis
 from jaxtitan.models.execution import expert_parallel_dispatcher_backend
 
-SUPPORTED_AXES = {"data", "fsdp", "tp", "ep", "expert_fsdp"}
+SUPPORTED_AXES = {"data", "fsdp", "tp", "cp", "ep", "expert_fsdp"}
 ROUTED_EXPERT_TAGS = frozenset({"moe_gate", "moe_up", "moe_down"})
 
 
@@ -53,6 +53,12 @@ class MeshContext:
         if "tp" not in self.spec.axis_names:
             return 1
         return self.spec.axis_sizes[self.spec.axis_names.index("tp")]
+
+    @property
+    def cp_axis_size(self) -> int:
+        if "cp" not in self.spec.axis_names:
+            return 1
+        return self.spec.axis_sizes[self.spec.axis_names.index("cp")]
 
     @property
     def expert_fsdp_axis_size(self) -> int:
@@ -101,6 +107,8 @@ class ShardingPlan:
     expert_fsdp_axis_sharing: str | None = None
     tensor_parallel_axis: str | None = None
     tensor_parallel_axis_size: int = 1
+    context_parallel_axis: str | None = None
+    context_parallel_axis_size: int = 1
     expert_param_paths: tuple[tuple[str, ...], ...] = ()
     kv_cache: Any | None = None
 
@@ -148,10 +156,15 @@ def build_sharding_plan(
         raise ContractError("mesh tp axis size greater than 1 requires parallelism.tensor_parallel=true")
     if parallelism.tensor_parallel and "tp" not in context.spec.axis_names:
         raise ContractError("parallelism.tensor_parallel=true requires a mesh tp axis")
+    if context.cp_axis_size > 1 and not parallelism.context_parallel:
+        raise ContractError("mesh cp axis size greater than 1 requires parallelism.context_parallel=true")
+    if parallelism.context_parallel and "cp" not in context.spec.axis_names:
+        raise ContractError("parallelism.context_parallel=true requires a mesh cp axis")
     if parallelism.expert_parallel and not expert_layouts:
         raise ContractError("parallelism.expert_parallel=true requires routed expert layout metadata")
-    batch_matrix = NamedSharding(context.mesh, P("data", None))
-    accumulated_batch = NamedSharding(context.mesh, P(None, "data", None))
+    seq_axis = "cp" if parallelism.context_parallel else None
+    batch_matrix = NamedSharding(context.mesh, P("data", seq_axis))
+    accumulated_batch = NamedSharding(context.mesh, P(None, "data", seq_axis))
     replicated = NamedSharding(context.mesh, P())
     param_shardings = _param_shardings(
         context,
@@ -185,6 +198,8 @@ def build_sharding_plan(
         expert_fsdp_axis_sharing=expert_fsdp_policy.axis_sharing,
         tensor_parallel_axis="tp" if parallelism.tensor_parallel else None,
         tensor_parallel_axis_size=context.tp_axis_size if parallelism.tensor_parallel else 1,
+        context_parallel_axis="cp" if parallelism.context_parallel else None,
+        context_parallel_axis_size=context.cp_axis_size if parallelism.context_parallel else 1,
         expert_param_paths=tuple(layout.path for layout in expert_layouts) if expert_axis_policy.enabled else (),
     )
 
@@ -193,10 +208,11 @@ def place_batch(batch: Batch, plan: ShardingPlan) -> Batch:
     """Place a Batch on device according to the sharding plan."""
 
     _validate_batch_leading_dims(batch)
+    _validate_batch_partition_dims(batch.input_ids, plan)
     return Batch(
-        input_ids=place_batch_array(batch.input_ids, plan.mesh),
-        target_ids=place_batch_array(batch.target_ids, plan.mesh),
-        loss_mask=place_batch_array(batch.loss_mask, plan.mesh),
+        input_ids=jax.device_put(np.asarray(batch.input_ids), plan.batch.input_ids),
+        target_ids=jax.device_put(np.asarray(batch.target_ids), plan.batch.target_ids),
+        loss_mask=jax.device_put(np.asarray(batch.loss_mask), plan.batch.loss_mask),
         doc_ids=None if batch.doc_ids is None else place_batch_array(batch.doc_ids, plan.mesh),
     )
 
@@ -205,10 +221,11 @@ def place_accumulated_batch(batch: Batch, plan: ShardingPlan) -> Batch:
     """Place an accumulated Batch with shape [accum, global_batch, seq]."""
 
     _validate_accumulated_batch_dims(batch)
+    _validate_accumulated_batch_partition_dims(batch.input_ids, plan)
     return Batch(
-        input_ids=place_accumulated_batch_array(batch.input_ids, plan.mesh),
-        target_ids=place_accumulated_batch_array(batch.target_ids, plan.mesh),
-        loss_mask=place_accumulated_batch_array(batch.loss_mask, plan.mesh),
+        input_ids=jax.device_put(np.asarray(batch.input_ids), plan.batch.accumulated_input_ids),
+        target_ids=jax.device_put(np.asarray(batch.target_ids), plan.batch.accumulated_target_ids),
+        loss_mask=jax.device_put(np.asarray(batch.loss_mask), plan.batch.accumulated_loss_mask),
         doc_ids=None if batch.doc_ids is None else place_accumulated_batch_array(batch.doc_ids, plan.mesh),
     )
 
@@ -223,7 +240,8 @@ def place_batch_array(value: Any, context: MeshContext) -> jax.Array:
         raise ContractError(
             f"batch leading dimension {array.shape[0]} must be divisible by data axis size {context.data_axis_size}"
         )
-    sharding = NamedSharding(context.mesh, P("data", *([None] * (array.ndim - 1))))
+    tail = ["cp" if (context.cp_axis_size > 1 and index == 0) else None for index in range(array.ndim - 1)]
+    sharding = NamedSharding(context.mesh, P("data", *tail))
     return jax.device_put(array, sharding)
 
 
@@ -237,7 +255,8 @@ def place_accumulated_batch_array(value: Any, context: MeshContext) -> jax.Array
         raise ContractError(
             f"accumulated batch dimension {array.shape[1]} must be divisible by data axis size {context.data_axis_size}"
         )
-    sharding = NamedSharding(context.mesh, P(None, "data", *([None] * (array.ndim - 2))))
+    tail = ["cp" if (context.cp_axis_size > 1 and index == 0) else None for index in range(array.ndim - 2)]
+    sharding = NamedSharding(context.mesh, P(None, "data", *tail))
     return jax.device_put(array, sharding)
 
 
@@ -250,7 +269,11 @@ def place_replicated(tree: Any, plan: ShardingPlan) -> Any:
 def place_model_state(tree: Any, plan: ShardingPlan) -> Any:
     """Place model state leaves according to the sharding plan's parameter policy."""
 
-    if plan.parallelism.mode in {"ddp", "zero2"} and not plan.parallelism.expert_parallel and not plan.parallelism.tensor_parallel:
+    if (
+        plan.parallelism.mode in {"ddp", "zero2"}
+        and not plan.parallelism.expert_parallel
+        and not plan.parallelism.tensor_parallel
+    ):
         return place_replicated(tree, plan)
     return _place_params_by_policy(tree, plan)
 
@@ -258,7 +281,11 @@ def place_model_state(tree: Any, plan: ShardingPlan) -> Any:
 def place_optimizer_init_state(tree: Any, plan: ShardingPlan) -> Any:
     """Place a model-shaped tree used only to initialize optimizer state."""
 
-    if plan.parallelism.mode == "ddp" and not plan.parallelism.expert_parallel and not plan.parallelism.tensor_parallel:
+    if (
+        plan.parallelism.mode == "ddp"
+        and not plan.parallelism.expert_parallel
+        and not plan.parallelism.tensor_parallel
+    ):
         return place_replicated(tree, plan)
     return _place_params_by_policy(tree, plan)
 
@@ -266,7 +293,11 @@ def place_optimizer_init_state(tree: Any, plan: ShardingPlan) -> Any:
 def gradient_shardings_like(tree: Any, plan: ShardingPlan) -> Any:
     """Build a model-shaped sharding tree for gradients and optimizer updates."""
 
-    if plan.parallelism.mode == "ddp" and not plan.parallelism.expert_parallel and not plan.parallelism.tensor_parallel:
+    if (
+        plan.parallelism.mode == "ddp"
+        and not plan.parallelism.expert_parallel
+        and not plan.parallelism.tensor_parallel
+    ):
         return jax.tree.map(lambda _leaf: plan.replicated, tree)
 
     def leaf_sharding(path, _leaf):
@@ -334,6 +365,8 @@ def _validate_supported_spec(spec: MeshSpec) -> None:
             raise ContractError(f"unsupported mesh axis {axis_name!r}; supported axes are {sorted(SUPPORTED_AXES)}")
         if axis_name == "tp" and axis_size < 1:
             raise ContractError("mesh tp axis size must be positive")
+        if axis_name == "cp" and axis_size < 1:
+            raise ContractError("mesh cp axis size must be positive")
 
 
 def _validate_batch_leading_dims(batch: Batch) -> None:
@@ -350,6 +383,22 @@ def _validate_batch_leading_dims(batch: Batch) -> None:
         raise ContractError(f"all batch fields must share the same leading dimension, got {leading_dims}")
 
 
+def _validate_batch_partition_dims(value: Any, plan: ShardingPlan) -> None:
+    array = np.asarray(value)
+    if array.shape[0] % plan.mesh.data_axis_size != 0:
+        raise ContractError(
+            f"batch leading dimension {array.shape[0]} must be divisible by data axis size {plan.mesh.data_axis_size}"
+        )
+    if plan.parallelism.context_parallel:
+        if array.ndim < 2:
+            raise ContractError("context-parallel batch arrays must include a sequence dimension")
+        if array.shape[1] % plan.context_parallel_axis_size != 0:
+            raise ContractError(
+                f"batch sequence dimension {array.shape[1]} must be divisible by cp axis size "
+                f"{plan.context_parallel_axis_size}"
+            )
+
+
 def _validate_accumulated_batch_dims(batch: Batch) -> None:
     arrays = [batch.input_ids, batch.target_ids, batch.loss_mask]
     if batch.doc_ids is not None:
@@ -362,6 +411,22 @@ def _validate_accumulated_batch_dims(batch: Batch) -> None:
         prefix_dims.append(array.shape[:2])
     if len(set(prefix_dims)) != 1:
         raise ContractError(f"all accumulated batch fields must share accumulation/batch dimensions, got {prefix_dims}")
+
+
+def _validate_accumulated_batch_partition_dims(value: Any, plan: ShardingPlan) -> None:
+    array = np.asarray(value)
+    if array.shape[1] % plan.mesh.data_axis_size != 0:
+        raise ContractError(
+            f"accumulated batch dimension {array.shape[1]} must be divisible by data axis size {plan.mesh.data_axis_size}"
+        )
+    if plan.parallelism.context_parallel:
+        if array.ndim < 3:
+            raise ContractError("context-parallel accumulated batch arrays must include a sequence dimension")
+        if array.shape[2] % plan.context_parallel_axis_size != 0:
+            raise ContractError(
+                f"accumulated sequence dimension {array.shape[2]} must be divisible by cp axis size "
+                f"{plan.context_parallel_axis_size}"
+            )
 
 
 def _param_shardings(

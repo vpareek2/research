@@ -72,6 +72,16 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
                     has_moe=spec.model.trinity is not None and spec.model.trinity.moe is not None,
                 ),
             },
+            "context_parallel_policy": {
+                "enabled": spec.parallelism.context_parallel,
+                "axis": "cp" if spec.parallelism.context_parallel else None,
+                "axis_size": axis_sizes.get("cp", 1) if spec.parallelism.context_parallel else 1,
+                "attention": "logical_spmd_exact" if spec.parallelism.context_parallel else None,
+                "activation_spec": "batch,cp_sequence,hidden" if spec.parallelism.context_parallel else None,
+                "batch_sharding": "batch,cp_sequence" if spec.parallelism.context_parallel else None,
+                "kv_cache": "unsupported" if spec.parallelism.context_parallel else None,
+                "inference": "checkpoint_eval_only" if spec.parallelism.context_parallel else None,
+            },
             "expert_parallel_policy": expert_parallel_policy_payload(
                 enabled=spec.parallelism.expert_parallel,
                 axis_name=expert_axis.axis,

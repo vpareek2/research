@@ -1007,6 +1007,81 @@ def test_tensor_parallel_train_step_matches_replicated_global_batch() -> None:
     assert _trees_close(next_tp.model, next_one.model)
 
 
+def test_context_parallel_train_step_matches_replicated_global_batch() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
+
+    one_context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(1,)))
+    one_plan = build_sharding_plan(one_context)
+    one_model = place_replicated(built.state, one_plan)
+    one_optimizer = _optimizer(one_model, built.metadata)
+    one_state = initialize_train_state(one_model, one_optimizer.transform, seed=1)
+    one_step = make_train_step(built.graph, one_optimizer, sharding=one_plan, state_template=one_state)
+    next_one, metrics_one = one_step(one_state, place_batch(batch, one_plan))
+
+    cp_context = build_mesh_context(MeshSpec(axis_names=("data", "cp"), axis_sizes=(2, 2)))
+    cp_plan = build_sharding_plan(
+        cp_context,
+        parallelism=ParallelismSpec(context_parallel=True),
+        param_layouts=built.param_layouts,
+    )
+    cp_model = place_model_state(built.state, cp_plan)
+    cp_optimizer = _optimizer(cp_model, built.metadata)
+    cp_state = initialize_train_state(cp_model, cp_optimizer.transform, seed=1)
+    cp_step = make_train_step(built.graph, cp_optimizer, sharding=cp_plan, state_template=cp_state)
+    next_cp, metrics_cp = cp_step(cp_state, place_batch(batch, cp_plan))
+
+    assert _scalar_int(metrics_cp.token_count) == _scalar_int(metrics_one.token_count) == 16
+    assert np.allclose(
+        np.asarray(jax.device_get(metrics_cp.loss_sum)),
+        np.asarray(jax.device_get(metrics_one.loss_sum)),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert next_cp.tokens_seen == 16
+    assert _trees_close(next_cp.model, next_one.model)
+
+
+def test_context_and_tensor_parallel_train_step_matches_replicated_global_batch() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
+
+    one_context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(1,)))
+    one_plan = build_sharding_plan(one_context)
+    one_model = place_replicated(built.state, one_plan)
+    one_optimizer = _optimizer(one_model, built.metadata)
+    one_state = initialize_train_state(one_model, one_optimizer.transform, seed=1)
+    one_step = make_train_step(built.graph, one_optimizer, sharding=one_plan, state_template=one_state)
+    next_one, metrics_one = one_step(one_state, place_batch(batch, one_plan))
+
+    cp_tp_context = build_mesh_context(MeshSpec(axis_names=("data", "cp", "tp"), axis_sizes=(1, 2, 2)))
+    cp_tp_plan = build_sharding_plan(
+        cp_tp_context,
+        parallelism=ParallelismSpec(context_parallel=True, tensor_parallel=True),
+        param_layouts=built.param_layouts,
+    )
+    cp_tp_model = place_model_state(built.state, cp_tp_plan)
+    cp_tp_optimizer = _optimizer(cp_tp_model, built.metadata)
+    cp_tp_state = initialize_train_state(cp_tp_model, cp_tp_optimizer.transform, seed=1)
+    cp_tp_step = make_train_step(built.graph, cp_tp_optimizer, sharding=cp_tp_plan, state_template=cp_tp_state)
+    next_cp_tp, metrics_cp_tp = cp_tp_step(cp_tp_state, place_batch(batch, cp_tp_plan))
+
+    assert _scalar_int(metrics_cp_tp.token_count) == _scalar_int(metrics_one.token_count) == 16
+    assert np.allclose(
+        np.asarray(jax.device_get(metrics_cp_tp.loss_sum)),
+        np.asarray(jax.device_get(metrics_one.loss_sum)),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert any(
+        getattr(leaf, "sharding", None).spec == jax.sharding.PartitionSpec(None, "tp")
+        for leaf in jax.tree.leaves(next_cp_tp.model)
+    )
+    assert _trees_close(next_cp_tp.model, next_one.model)
+
+
 def test_tensor_parallel_trinity_moe_train_step_uses_shared_expert_tp_policy() -> None:
     require_fake_devices()
     built = build_model(
@@ -1037,6 +1112,36 @@ def test_tensor_parallel_trinity_moe_train_step_uses_shared_expert_tp_policy() -
     assert by_tag["moe_gate"].spec == jax.sharding.PartitionSpec()
     assert by_tag["moe_shared_gate"].spec == jax.sharding.PartitionSpec(None, "tp")
     assert any(getattr(leaf, "sharding", None).spec == jax.sharding.PartitionSpec(None, "tp") for leaf in jax.tree.leaves(next_state.model))
+    assert math.isfinite(float(jax.device_get(metrics.loss_sum)))
+
+
+def test_context_parallel_expert_parallel_moe_train_step_runs_and_reports_global_metrics() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_trinity_spec(
+            moe={"num_experts": 4, "top_k": 2, "num_shared_experts": 1},
+        ),
+        seed=0,
+    )
+    context = build_mesh_context(MeshSpec(axis_names=("data", "cp", "ep"), axis_sizes=(1, 2, 2)))
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(context_parallel=True, expert_parallel=True),
+        param_layouts=built.param_layouts,
+        expert_layouts=built.expert_layouts,
+    )
+    model_state = place_model_state(built.state, plan)
+    optimizer = _optimizer(model_state, built.metadata)
+    state = initialize_train_state(model_state, optimizer.transform, seed=1)
+    step = make_train_step(built.graph, optimizer, sharding=plan, state_template=state)
+    batch = _batch(batch_size=2, seq_len=4, vocab_size=16)
+
+    next_state, metrics = step(state, place_batch(batch, plan))
+
+    assert next_state.step == 1
+    assert _scalar_int(metrics.token_count) == 8
+    assert metrics.router_expert_counts.shape == (1, 4)
+    assert metrics.loss_sum.shape == ()
     assert math.isfinite(float(jax.device_get(metrics.loss_sum)))
 
 

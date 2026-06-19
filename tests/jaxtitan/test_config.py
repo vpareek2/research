@@ -74,6 +74,7 @@ def test_load_config_resolves_minimal_toml(tmp_path: Path) -> None:
     assert spec.mesh.axis_names == ("data",)
     assert spec.parallelism.mode == "ddp"
     assert spec.parallelism.tensor_parallel is False
+    assert spec.parallelism.context_parallel is False
     assert spec.parallelism.expert_parallel is False
     assert spec.artifacts.root == Path("runs")
     assert spec.artifacts.wandb_enabled is False
@@ -565,6 +566,56 @@ def test_load_config_accepts_tensor_parallelism(tmp_path: Path) -> None:
 
     assert spec.parallelism.tensor_parallel is True
     assert spec.mesh.axis_names == ("data", "tp")
+
+
+def test_load_config_accepts_context_parallelism(tmp_path: Path) -> None:
+    config_path = tmp_path / "cp.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('axis_names = ["data"]', 'axis_names = ["data", "cp"]').replace(
+            "axis_sizes = [1]",
+            "axis_sizes = [1, 4]",
+        )
+        + "\n[parallelism]\ncontext_parallel = true\n"
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.parallelism.context_parallel is True
+    assert spec.mesh.axis_names == ("data", "cp")
+
+
+def test_load_config_rejects_cp_axis_without_context_parallel(tmp_path: Path) -> None:
+    config_path = tmp_path / "cp-disabled.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('axis_names = ["data"]', 'axis_names = ["data", "cp"]').replace(
+            "axis_sizes = [1]",
+            "axis_sizes = [1, 2]",
+        )
+    )
+
+    with pytest.raises(ConfigError, match="context_parallel"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_context_parallel_without_cp_axis(tmp_path: Path) -> None:
+    config_path = tmp_path / "cp-missing.toml"
+    config_path.write_text(MINIMAL_CONFIG + "\n[parallelism]\ncontext_parallel = true\n")
+
+    with pytest.raises(ConfigError, match="mesh cp axis"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_context_parallel_non_divisible_sequence_length(tmp_path: Path) -> None:
+    config_path = tmp_path / "cp-bad-seq.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace("seq_len = 64", "seq_len = 62")
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "cp"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 4]")
+        + "\n[parallelism]\ncontext_parallel = true\n"
+    )
+
+    with pytest.raises(ConfigError, match="training.seq_len"):
+        load_config(config_path)
 
 
 def test_load_config_rejects_tp_axis_without_tensor_parallel(tmp_path: Path) -> None:

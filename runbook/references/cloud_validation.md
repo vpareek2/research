@@ -38,18 +38,18 @@ Prefer preparing or streaming data on the cloud host.
 
 ```sh
 cd ~/research
-uv run jaxtitan data prepare --overwrite configs/data/tinystories_gpt2_smoke.toml
-uv run jaxtitan data inspect data/tinystories_gpt2_smoke/manifest.json \
+uv run jaxtitan data prepare --overwrite configs/data/tinystories_gpt2_cloud_validation.toml
+uv run jaxtitan data inspect data/tinystories_gpt2_cloud_validation/manifest.json \
   --tokenizer gpt2 \
   --verify-checksums \
-  --seq-len 512
-uv run jaxtitan data check data/tinystories_gpt2_smoke/manifest.json \
+  --seq-len 1024
+uv run jaxtitan data check data/tinystories_gpt2_cloud_validation/manifest.json \
   --tokenizer gpt2 \
   --verify-checksums
 ```
 
-If preflight reports the validation split is too small, increase
-`val_fraction` in the data config and regenerate the manifest.
+Use the cloud validation data config for new parallelism checks. It has a
+larger validation split than the local smoke config.
 
 ## Run Pattern
 

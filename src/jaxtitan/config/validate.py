@@ -36,7 +36,17 @@ def validate_run_spec(spec: RunSpec) -> None:
     fsdp_axis_size = axis_sizes.get("fsdp", 1)
     ep_axis_size = axis_sizes.get("ep", 1)
     tp_axis_size = axis_sizes.get("tp", 1)
+    cp_axis_size = axis_sizes.get("cp", 1)
     expert_fsdp_axis_size = axis_sizes.get("expert_fsdp", 1)
+    if cp_axis_size != 1 and not spec.parallelism.context_parallel:
+        raise ConfigError("mesh cp axis size greater than 1 requires parallelism.context_parallel=true")
+    if spec.parallelism.context_parallel:
+        if "cp" not in axis_sizes:
+            raise ConfigError("parallelism.context_parallel=true requires a mesh cp axis")
+        if spec.training.seq_len % cp_axis_size != 0:
+            raise ConfigError(
+                f"training.seq_len ({spec.training.seq_len}) must be divisible by cp axis size ({cp_axis_size})"
+            )
     if tp_axis_size != 1 and not spec.parallelism.tensor_parallel:
         raise ConfigError("mesh tp axis size greater than 1 requires parallelism.tensor_parallel=true")
     if spec.parallelism.tensor_parallel:

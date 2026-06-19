@@ -138,6 +138,7 @@ class TomlMeshSection:
 class TomlParallelismSection:
     mode: str = "ddp"
     tensor_parallel: bool = False
+    context_parallel: bool = False
     expert_parallel: bool = False
     expert_parallel_axis: str = "auto"
 

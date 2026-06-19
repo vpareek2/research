@@ -81,3 +81,40 @@ Next:
 
 - Continue local TP completion work first. Update this file when a prerequisite
   is finished or when the cloud matrix changes.
+
+## 2026-06-19 [codex] Added 4-GPU parallelism validation bundle
+
+Context:
+
+- Added concrete 4-GPU cloud configs for DDP, FSDP, ZeRO-2, TP, CP, TP+CP,
+  FSDP+TP, ZeRO-2+TP, EP, TP+EP, CP+EP, RDEP, folded FSDP+EP, product
+  FSDP+EP, and expert-region FSDP.
+- Added a dedicated TinyStories cloud validation data config with a larger
+  validation split to avoid preflight failures from undersized val tokens.
+- TP configs use AdamW because Muon remains explicitly unsupported with TP.
+
+Commands:
+
+```bash
+cd /home/veer/Master/projects/research
+for cfg in configs/jaxtitan/cloud_4gpu_*_validation.toml; do
+  uv run jaxtitan config check "$cfg"
+done
+```
+
+Artifacts:
+
+- Data config: `configs/data/tinystories_gpt2_cloud_validation.toml`.
+- Run configs: `configs/jaxtitan/cloud_4gpu_*_validation.toml`.
+- Operator doc: `docs/cloud_validation.md`.
+
+Result:
+
+- All new 4-GPU validation TOMLs passed `uv run jaxtitan config check`.
+- No cloud runs were launched in this entry.
+
+Next:
+
+- On a 4x A100 80GB instance, prepare
+  `data/tinystories_gpt2_cloud_validation/manifest.json` and run the matrix in
+  `docs/cloud_validation.md`.
