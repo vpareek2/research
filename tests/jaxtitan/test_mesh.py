@@ -100,6 +100,16 @@ def test_build_mesh_context_accepts_ep_axis() -> None:
     assert context.ep_axis_size == 4
 
 
+def test_build_mesh_context_accepts_expert_fsdp_axis() -> None:
+    require_fake_devices()
+
+    context = build_mesh_context(MeshSpec(axis_names=("data", "ep", "expert_fsdp"), axis_sizes=(1, 2, 2)))
+
+    assert context.mesh.devices.shape == (1, 2, 2)
+    assert context.ep_axis_size == 2
+    assert context.expert_fsdp_axis_size == 2
+
+
 def test_sharding_plan_contents() -> None:
     require_fake_devices()
     context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(4,)))
@@ -175,6 +185,81 @@ def test_ep_sharding_plan_maps_routed_experts_to_expert_axis() -> None:
     assert by_tag["attention_q"].spec == P()
 
 
+def test_folded_fsdp_ep_sharding_plan_maps_routed_experts_to_fsdp_axis() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_spec(
+            name="trinity",
+            num_layers=2,
+            trinity={
+                "initial_dense_layers": 1,
+                "local_window": 8,
+                "local_layers_per_global": 3,
+                "moe": {"num_experts": 4, "top_k": 2, "num_shared_experts": 1},
+            },
+        ),
+        seed=0,
+    )
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
+
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(mode="fsdp", expert_parallel=True),
+        param_layouts=built.param_layouts,
+        expert_layouts=built.expert_layouts,
+    )
+
+    by_tag = {layout.tag: plan.param_shardings[layout.path] for layout in built.param_layouts}
+    assert plan.expert_parallel_axis == "fsdp"
+    assert plan.expert_parallel_axis_sharing == "shared_with_fsdp"
+    assert by_tag["moe_gate"].spec == P("fsdp", None, None)
+    assert by_tag["moe_up"].spec == P("fsdp", None, None)
+    assert by_tag["moe_down"].spec == P("fsdp", None, None)
+    assert by_tag["attention_q"].spec == P(None, "fsdp")
+    assert by_tag["moe_shared_gate"].spec == P(None, "fsdp")
+    assert by_tag["moe_shared_down"].spec == P("fsdp", None)
+    assert by_tag["moe_router"].spec == P()
+    assert by_tag["moe_expert_bias"].spec == P()
+
+
+def test_expert_fsdp_sharding_plan_maps_routed_experts_to_ep_and_expert_fsdp_axes() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_spec(
+            name="trinity",
+            num_layers=2,
+            trinity={
+                "initial_dense_layers": 1,
+                "local_window": 8,
+                "local_layers_per_global": 3,
+                "moe": {"num_experts": 4, "top_k": 2, "expert_intermediate_size": 16, "num_shared_experts": 1},
+            },
+        ),
+        seed=0,
+    )
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp", "ep", "expert_fsdp"), axis_sizes=(1, 1, 2, 2)))
+
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(mode="fsdp", expert_parallel=True),
+        param_layouts=built.param_layouts,
+        expert_layouts=built.expert_layouts,
+    )
+
+    by_tag = {layout.tag: plan.param_shardings[layout.path] for layout in built.param_layouts}
+    assert plan.expert_parallel_axis == "ep"
+    assert plan.expert_parallel_axis_sharing == "dedicated_ep"
+    assert plan.expert_fsdp_axis == "expert_fsdp"
+    assert plan.expert_fsdp_axis_sharing == "expert_region_internal"
+    assert by_tag["moe_gate"].spec == P("ep", None, "expert_fsdp")
+    assert by_tag["moe_up"].spec == P("ep", None, "expert_fsdp")
+    assert by_tag["moe_down"].spec == P("ep", "expert_fsdp", None)
+    assert by_tag["attention_q"].spec == P(None, "fsdp")
+    assert by_tag["moe_shared_gate"].spec == P(None, "fsdp")
+    assert by_tag["moe_router"].spec == P()
+    assert by_tag["moe_expert_bias"].spec == P()
+
+
 def test_ep_sharding_plan_rejects_non_divisible_expert_axis() -> None:
     require_fake_devices()
     built = build_model(
@@ -196,6 +281,32 @@ def test_ep_sharding_plan_rejects_non_divisible_expert_axis() -> None:
         build_sharding_plan(
             context,
             parallelism=ParallelismSpec(mode="ddp", expert_parallel=True),
+            param_layouts=built.param_layouts,
+            expert_layouts=built.expert_layouts,
+        )
+
+
+def test_folded_fsdp_ep_sharding_plan_rejects_non_divisible_expert_axis() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_spec(
+            name="trinity",
+            num_layers=2,
+            trinity={
+                "initial_dense_layers": 1,
+                "local_window": 8,
+                "local_layers_per_global": 3,
+                "moe": {"num_experts": 3, "top_k": 2},
+            },
+        ),
+        seed=0,
+    )
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 2)))
+
+    with pytest.raises(ContractError, match="divisible by fsdp axis size"):
+        build_sharding_plan(
+            context,
+            parallelism=ParallelismSpec(mode="fsdp", expert_parallel=True),
             param_layouts=built.param_layouts,
             expert_layouts=built.expert_layouts,
         )
@@ -265,6 +376,47 @@ def test_place_model_state_uses_ep_param_shardings_for_routed_experts() -> None:
     assert model_by_path[dense_path].sharding == plan.replicated
     assert opt_by_path[dense_path].sharding == plan.replicated
     assert grad_by_path[dense_path] == plan.replicated
+
+
+def test_place_model_state_uses_expert_fsdp_param_shardings_for_routed_experts() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_spec(
+            name="trinity",
+            num_layers=2,
+            trinity={
+                "initial_dense_layers": 1,
+                "local_window": 8,
+                "local_layers_per_global": 3,
+                "moe": {"num_experts": 4, "top_k": 2, "expert_intermediate_size": 16},
+            },
+        ),
+        seed=0,
+    )
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp", "ep", "expert_fsdp"), axis_sizes=(1, 1, 2, 2)))
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(mode="fsdp", expert_parallel=True),
+        param_layouts=built.param_layouts,
+        expert_layouts=built.expert_layouts,
+    )
+
+    model_state = place_model_state(built.state, plan)
+    optimizer_init_state = place_optimizer_init_state(built.state, plan)
+    grad_shardings = gradient_shardings_like(model_state, plan)
+    model_by_path = {_metadata_path(path): value for path, value in jax.tree_util.tree_flatten_with_path(model_state)[0]}
+    opt_by_path = {_metadata_path(path): value for path, value in jax.tree_util.tree_flatten_with_path(optimizer_init_state)[0]}
+    grad_by_path = {_metadata_path(path): value for path, value in jax.tree_util.tree_flatten_with_path(grad_shardings)[0]}
+    layout_by_tag = {layout.tag: layout for layout in built.param_layouts}
+
+    gate_path = layout_by_tag["moe_gate"].path
+    down_path = layout_by_tag["moe_down"].path
+    assert model_by_path[gate_path].sharding.spec == P("ep", None, "expert_fsdp")
+    assert opt_by_path[gate_path].sharding.spec == P("ep", None, "expert_fsdp")
+    assert grad_by_path[gate_path].spec == P("ep", None, "expert_fsdp")
+    assert model_by_path[down_path].sharding.spec == P("ep", "expert_fsdp", None)
+    assert opt_by_path[down_path].sharding.spec == P("ep", "expert_fsdp", None)
+    assert grad_by_path[down_path].spec == P("ep", "expert_fsdp", None)
 
 
 def test_fsdp_sharding_plan_rejects_non_divisible_parameter_axis() -> None:

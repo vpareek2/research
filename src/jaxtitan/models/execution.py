@@ -18,6 +18,8 @@ class ModelExecutionContext:
     """Static runtime execution context for model-owned component policies."""
 
     expert_parallel_mesh: Any | None = None
+    expert_parallel_axis_name: str = "ep"
+    expert_fsdp_axis_name: str | None = None
     expert_parallel_dispatcher: str = EXPERT_PARALLEL_DISPATCHER_BACKEND
 
     @property
@@ -28,18 +30,27 @@ class ModelExecutionContext:
 def expert_parallel_policy_payload(
     *,
     enabled: bool,
-    ep_axis_size: int,
-    num_experts: int | None,
+    axis_name: str | None,
+    axis_size: int,
+    axis_sharing: str | None,
+    expert_fsdp_axis_name: str | None = None,
+    expert_fsdp_axis_size: int = 1,
+    expert_fsdp_axis_sharing: str | None = None,
+    num_experts: int | None = None,
 ) -> dict[str, Any]:
     """Build the stable artifact payload for EP dispatcher semantics."""
 
     experts_per_rank = None
     if enabled and num_experts is not None:
-        experts_per_rank = num_experts // ep_axis_size
+        experts_per_rank = num_experts // axis_size
     return {
         "enabled": enabled,
-        "axis": "ep" if enabled else None,
-        "axis_size": ep_axis_size if enabled else 1,
+        "axis": axis_name if enabled else None,
+        "axis_size": axis_size if enabled else 1,
+        "axis_sharing": axis_sharing if enabled else None,
+        "expert_fsdp_axis": expert_fsdp_axis_name if enabled else None,
+        "expert_fsdp_axis_size": expert_fsdp_axis_size if enabled else 1,
+        "expert_fsdp_axis_sharing": expert_fsdp_axis_sharing if enabled else None,
         "num_experts": num_experts,
         "experts_per_rank": experts_per_rank,
         "dispatcher_backend": EXPERT_PARALLEL_DISPATCHER_BACKEND if enabled else None,

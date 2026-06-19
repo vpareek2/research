@@ -307,6 +307,7 @@ def _parallelism_section(raw: Mapping[str, Any]) -> TomlParallelismSection:
     return TomlParallelismSection(
         mode=_optional_str(raw, "mode", "parallelism", default="ddp"),
         expert_parallel=_optional_bool(raw, "expert_parallel", "parallelism", default=False),
+        expert_parallel_axis=_optional_str(raw, "expert_parallel_axis", "parallelism", default="auto"),
     )
 
 

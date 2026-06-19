@@ -461,6 +461,10 @@ def test_run_preflight_reports_expert_parallel_policy(
         "enabled": True,
         "axis": "ep",
         "axis_size": 4,
+        "axis_sharing": "dedicated_ep",
+        "expert_fsdp_axis": None,
+        "expert_fsdp_axis_size": 1,
+        "expert_fsdp_axis_sharing": None,
         "num_experts": 4,
         "experts_per_rank": 1,
         "dispatcher_backend": "all_to_all",
@@ -476,6 +480,104 @@ def test_run_preflight_reports_expert_parallel_policy(
     assert payload["optimizer"]["policy"]["route_counts"]["muon"] >= 3
     assert "mode=replicated_data_parallel+ep" in text
     assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_reports_folded_fsdp_expert_parallel_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "folded-ep-preflight",
+        shard_token_groups=(tuple(range(0, 80)),),
+        train_tokens=50,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            optimizer_name="muon",
+            axis_names=("data", "fsdp"),
+            axis_sizes=(1, 4),
+            parallelism_mode="fsdp",
+            global_batch_size=4,
+            target_tokens=16,
+            hidden_size=16,
+            intermediate_size=32,
+            num_layers=2,
+            num_heads=4,
+            n_kv_heads=4,
+            model_name="trinity",
+            trinity=True,
+            trinity_moe=True,
+            expert_parallel=True,
+        )
+    )
+
+    report = run_preflight(config_path)
+    payload = report.payload
+
+    assert payload["parallelism"]["execution_mode"] == "fsdp+ep"
+    assert payload["parallelism"]["expert_parallel_policy"]["axis"] == "fsdp"
+    assert payload["parallelism"]["expert_parallel_policy"]["axis_size"] == 4
+    assert payload["parallelism"]["expert_parallel_policy"]["axis_sharing"] == "shared_with_fsdp"
+    assert payload["parallelism"]["mesh"]["expert_parallel_axis"] == "fsdp"
+    assert payload["sharding"]["model_state"]["expert_parallel_axis"] == "fsdp"
+    assert payload["sharding"]["model_state"]["ep_sharded_leaves"] == 3
+    assert payload["optimizer"]["policy"]["route_counts"]["dion2"] > 0
+    assert payload["optimizer"]["policy"]["route_counts"]["muon"] > 0
+
+
+def test_run_preflight_reports_expert_region_fsdp_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "expert-fsdp-preflight",
+        shard_token_groups=(tuple(range(0, 80)),),
+        train_tokens=50,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            optimizer_name="adamw",
+            axis_names=("data", "fsdp", "ep", "expert_fsdp"),
+            axis_sizes=(1, 1, 2, 2),
+            parallelism_mode="fsdp",
+            global_batch_size=4,
+            target_tokens=16,
+            hidden_size=16,
+            intermediate_size=32,
+            num_layers=2,
+            num_heads=4,
+            n_kv_heads=4,
+            model_name="trinity",
+            trinity=True,
+            trinity_moe=True,
+            expert_parallel=True,
+        )
+    )
+
+    report = run_preflight(config_path)
+    payload = report.payload
+
+    assert payload["parallelism"]["execution_mode"] == "fsdp+ep"
+    assert payload["parallelism"]["expert_parallel_policy"]["expert_fsdp_axis"] == "expert_fsdp"
+    assert payload["parallelism"]["expert_parallel_policy"]["expert_fsdp_axis_size"] == 2
+    assert payload["parallelism"]["expert_parallel_policy"]["expert_fsdp_axis_sharing"] == "expert_region_internal"
+    assert payload["parallelism"]["mesh"]["expert_parallel_axis"] == "ep"
+    assert payload["parallelism"]["mesh"]["expert_fsdp_axis"] == "expert_fsdp"
+    assert payload["sharding"]["model_state"]["expert_parallel_axis"] == "ep"
+    assert payload["sharding"]["model_state"]["expert_fsdp_axis"] == "expert_fsdp"
+    assert payload["sharding"]["model_state"]["ep_sharded_leaves"] == 3
+    assert payload["sharding"]["model_state"]["expert_fsdp_sharded_leaves"] == 3
+    assert payload["optimizer"]["policy"]["route_counts"]["adamw"] > 0
 
 
 def test_run_preflight_reports_gradient_accumulation(

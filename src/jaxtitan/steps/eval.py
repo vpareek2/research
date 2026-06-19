@@ -94,7 +94,13 @@ def make_eval_step(
 def _model_execution_context(sharding: ShardingPlan | None) -> ModelExecutionContext | None:
     if sharding is None or not sharding.parallelism.expert_parallel:
         return None
-    return ModelExecutionContext(expert_parallel_mesh=sharding.mesh.mesh)
+    if sharding.expert_parallel_axis is None:
+        raise ContractError("expert parallel sharding plan is missing a resolved expert axis")
+    return ModelExecutionContext(
+        expert_parallel_mesh=sharding.mesh.mesh,
+        expert_parallel_axis_name=sharding.expert_parallel_axis,
+        expert_fsdp_axis_name=sharding.expert_fsdp_axis,
+    )
 
 
 def _validate_batch(batch: Batch, *, expected_batch_shape: tuple[int, int] | None = None) -> None:

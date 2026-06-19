@@ -139,11 +139,14 @@ class ExpertParallelDispatcher:
     experts it owns, and a psum combines the partial outputs.
     """
 
-    def __init__(self, mesh: Any, *, axis_name: str = "ep"):
+    def __init__(self, mesh: Any, *, axis_name: str = "ep", expert_fsdp_axis_name: str | None = None):
         if axis_name not in mesh.axis_names:
             raise ContractError(f"expert parallel dispatcher requires mesh axis {axis_name!r}")
+        if expert_fsdp_axis_name is not None and expert_fsdp_axis_name not in mesh.axis_names:
+            raise ContractError(f"expert FSDP dispatcher requires mesh axis {expert_fsdp_axis_name!r}")
         self.mesh = mesh
         self.axis_name = axis_name
+        self.expert_fsdp_axis_name = expert_fsdp_axis_name
 
     def __call__(self, experts: ExpertSwiGLU, x: jax.Array, expert_ids: jax.Array, weights: jax.Array) -> jax.Array:
         gate = jnp.asarray(experts.gate[...], dtype=experts.dtype)
@@ -158,17 +161,21 @@ class ExpertParallelDispatcher:
             down=down,
             mesh=self.mesh,
             axis_name=self.axis_name,
+            expert_fsdp_axis_name=self.expert_fsdp_axis_name,
         )
 
 
 class AllToAllExpertDispatcher:
     """Fixed-shape EP dispatcher using explicit all-to-all token exchange."""
 
-    def __init__(self, mesh: Any, *, axis_name: str = "ep"):
+    def __init__(self, mesh: Any, *, axis_name: str = "ep", expert_fsdp_axis_name: str | None = None):
         if axis_name not in mesh.axis_names:
             raise ContractError(f"all-to-all expert dispatcher requires mesh axis {axis_name!r}")
+        if expert_fsdp_axis_name is not None and expert_fsdp_axis_name not in mesh.axis_names:
+            raise ContractError(f"all-to-all expert FSDP dispatcher requires mesh axis {expert_fsdp_axis_name!r}")
         self.mesh = mesh
         self.axis_name = axis_name
+        self.expert_fsdp_axis_name = expert_fsdp_axis_name
 
     def __call__(self, experts: ExpertSwiGLU, x: jax.Array, expert_ids: jax.Array, weights: jax.Array) -> jax.Array:
         gate = jnp.asarray(experts.gate[...], dtype=experts.dtype)
@@ -183,6 +190,7 @@ class AllToAllExpertDispatcher:
             down=down,
             mesh=self.mesh,
             axis_name=self.axis_name,
+            expert_fsdp_axis_name=self.expert_fsdp_axis_name,
         )
 
 
@@ -316,9 +324,17 @@ class SparseMoE(nnx.Module):
     def _dispatcher(self, execution: ModelExecutionContext | None) -> LocalExpertDispatcher | ExpertParallelDispatcher:
         if execution is not None and execution.expert_parallel_enabled:
             if execution.expert_parallel_dispatcher == "all_to_all":
-                return AllToAllExpertDispatcher(execution.expert_parallel_mesh)
+                return AllToAllExpertDispatcher(
+                    execution.expert_parallel_mesh,
+                    axis_name=execution.expert_parallel_axis_name,
+                    expert_fsdp_axis_name=execution.expert_fsdp_axis_name,
+                )
             if execution.expert_parallel_dispatcher == "psum":
-                return ExpertParallelDispatcher(execution.expert_parallel_mesh)
+                return ExpertParallelDispatcher(
+                    execution.expert_parallel_mesh,
+                    axis_name=execution.expert_parallel_axis_name,
+                    expert_fsdp_axis_name=execution.expert_fsdp_axis_name,
+                )
             raise ContractError(f"unsupported expert parallel dispatcher {execution.expert_parallel_dispatcher!r}")
         return self.dispatcher
 
@@ -333,6 +349,7 @@ def _expert_parallel_swiglu(
     down: jax.Array,
     mesh: Any,
     axis_name: str,
+    expert_fsdp_axis_name: str | None,
 ) -> jax.Array:
     if x.ndim != 3:
         raise ContractError(f"expert parallel dispatcher requires x shape [batch, seq, hidden], got {x.shape}")
@@ -355,6 +372,8 @@ def _expert_parallel_swiglu(
         up_x = jnp.einsum("...h,...khi->...ki", local_x, selected_up)
         expert_hidden = jax.nn.silu(gate_x) * up_x
         expert_output = jnp.einsum("...ki,...kih->...kh", expert_hidden, selected_down)
+        if expert_fsdp_axis_name is not None:
+            expert_output = jax.lax.psum(expert_output, expert_fsdp_axis_name)
         weighted = expert_output * local_weights[..., None]
         local_output = jnp.sum(jnp.where(selected_here[..., None], weighted, 0), axis=-2)
         return jax.lax.psum(local_output, axis_name)
@@ -366,9 +385,9 @@ def _expert_parallel_swiglu(
             P("data", None, None),
             P("data", None, None),
             P("data", None, None),
-            P(axis_name, None, None),
-            P(axis_name, None, None),
-            P(axis_name, None, None),
+            P(axis_name, None, expert_fsdp_axis_name),
+            P(axis_name, None, expert_fsdp_axis_name),
+            P(axis_name, expert_fsdp_axis_name, None),
         ),
         out_specs=P("data", None, None),
     )
@@ -385,6 +404,7 @@ def _all_to_all_expert_swiglu(
     down: jax.Array,
     mesh: Any,
     axis_name: str,
+    expert_fsdp_axis_name: str | None,
 ) -> jax.Array:
     if x.ndim != 3:
         raise ContractError(f"all-to-all expert dispatcher requires x shape [batch, seq, hidden], got {x.shape}")
@@ -448,6 +468,8 @@ def _all_to_all_expert_swiglu(
         up_x = jnp.einsum("...h,...hi->...i", recv_x, selected_up)
         expert_hidden = jax.nn.silu(gate_x) * up_x
         recv_output = jnp.einsum("...i,...ih->...h", expert_hidden, selected_down)
+        if expert_fsdp_axis_name is not None:
+            recv_output = jax.lax.psum(recv_output, expert_fsdp_axis_name)
         recv_output = jnp.where(recv_valid[..., None], recv_output * recv_weights[..., None], 0)
 
         returned_output = jax.lax.all_to_all(recv_output, axis_name, split_axis=0, concat_axis=0, tiled=True)
@@ -471,9 +493,9 @@ def _all_to_all_expert_swiglu(
             P("data", None, None),
             P("data", None, None),
             P("data", None, None),
-            P(axis_name, None, None),
-            P(axis_name, None, None),
-            P(axis_name, None, None),
+            P(axis_name, None, expert_fsdp_axis_name),
+            P(axis_name, None, expert_fsdp_axis_name),
+            P(axis_name, expert_fsdp_axis_name, None),
         ),
         out_specs=P("data", None, None),
     )

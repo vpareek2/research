@@ -138,6 +138,7 @@ class TomlMeshSection:
 class TomlParallelismSection:
     mode: str = "ddp"
     expert_parallel: bool = False
+    expert_parallel_axis: str = "auto"
 
 
 @dataclass(frozen=True, slots=True)

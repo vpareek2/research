@@ -15,6 +15,7 @@ from jaxtitan.errors import ContractError
 from jaxtitan.models.execution import expert_parallel_policy_payload
 from jaxtitan.optim import optimizer_policy_summary
 from jaxtitan.services import CheckpointRestore
+from jaxtitan.specs.parallelism import resolve_expert_fsdp_axis, resolve_expert_parallel_axis
 from jaxtitan.specs.run import RunSpec
 
 RESUME_METADATA_SCHEMA_VERSION = 1
@@ -32,6 +33,9 @@ class ResumeCompatibility:
 def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
     """Build the deterministic compatibility payload for an effective runtime spec."""
 
+    axis_sizes = dict(zip(spec.mesh.axis_names, spec.mesh.axis_sizes, strict=True))
+    expert_axis = resolve_expert_parallel_axis(spec.parallelism, axis_sizes)
+    expert_fsdp_axis = resolve_expert_fsdp_axis(spec.parallelism, axis_sizes)
     payload = {
         "seed": spec.seed,
         "model": _normalize(spec.model),
@@ -48,9 +52,20 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
             **_normalize(spec.parallelism),
             "expert_parallel_policy": expert_parallel_policy_payload(
                 enabled=spec.parallelism.expert_parallel,
-                ep_axis_size=dict(zip(spec.mesh.axis_names, spec.mesh.axis_sizes, strict=True)).get("ep", 1),
+                axis_name=expert_axis.axis,
+                axis_size=expert_axis.axis_size,
+                axis_sharing=expert_axis.axis_sharing,
+                expert_fsdp_axis_name=expert_fsdp_axis.axis,
+                expert_fsdp_axis_size=expert_fsdp_axis.axis_size,
+                expert_fsdp_axis_sharing=expert_fsdp_axis.axis_sharing,
                 num_experts=_moe_num_experts(spec),
             ),
+            "expert_fsdp_policy": {
+                "enabled": expert_fsdp_axis.enabled,
+                "axis": expert_fsdp_axis.axis,
+                "axis_size": expert_fsdp_axis.axis_size,
+                "axis_sharing": expert_fsdp_axis.axis_sharing,
+            },
         },
         "data": _data_compat_payload(spec),
         "training": {

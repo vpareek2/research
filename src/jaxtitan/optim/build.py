@@ -530,7 +530,7 @@ def _resolve_backend(requested_backend: str, item: ParamMetadata, leaf: Any) -> 
 def _resolve_expert_muon_backend(item: ParamMetadata, leaf: Any) -> tuple[str, int | None, str | None]:
     if len(item.shape) != 3:
         return "muon", None, None
-    sharded_axes = _sharded_axes(leaf, {"fsdp", "ep"})
+    sharded_axes = _sharded_axes(leaf, {"fsdp", "ep", "expert_fsdp"})
     matrix_sharded_axes = sorted(axis for axis in sharded_axes if axis in {1, 2})
     if matrix_sharded_axes:
         raise ContractError(

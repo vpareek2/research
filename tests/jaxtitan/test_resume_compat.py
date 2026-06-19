@@ -163,6 +163,10 @@ def test_resume_fingerprint_changes_for_expert_parallel_axis(tmp_path: Path, pre
         "enabled": True,
         "axis": "ep",
         "axis_size": 2,
+        "axis_sharing": "dedicated_ep",
+        "expert_fsdp_axis": None,
+        "expert_fsdp_axis_size": 1,
+        "expert_fsdp_axis_sharing": None,
         "num_experts": 4,
         "experts_per_rank": 2,
         "dispatcher_backend": "all_to_all",
@@ -170,6 +174,91 @@ def test_resume_fingerprint_changes_for_expert_parallel_axis(tmp_path: Path, pre
         "token_partition": "assignment_index_mod_ep",
         "combine_policy": "reverse_all_to_all_then_psum",
     }
+
+
+def test_resume_fingerprint_changes_for_folded_expert_parallel_axis(
+    tmp_path: Path,
+    prepared_dataset_factory,
+) -> None:
+    manifest = _manifest(prepared_dataset_factory, "folded-ep")
+    product_ep = _runtime_spec(
+        tmp_path,
+        manifest,
+        axis_names=("data", "ep"),
+        axis_sizes=(1, 2),
+        expert_parallel=True,
+        trinity_moe_num_experts=4,
+        hidden_size=16,
+        intermediate_size=32,
+        num_heads=4,
+        n_kv_heads=4,
+    )
+    folded_ep = _runtime_spec(
+        tmp_path,
+        manifest,
+        axis_names=("data", "fsdp"),
+        axis_sizes=(1, 2),
+        parallelism_mode="fsdp",
+        expert_parallel=True,
+        trinity_moe_num_experts=4,
+        hidden_size=16,
+        intermediate_size=32,
+        num_heads=4,
+        n_kv_heads=4,
+    )
+
+    product_payload = build_resume_compat(product_ep).payload
+    folded_payload = build_resume_compat(folded_ep).payload
+
+    assert product_payload["parallelism"]["expert_parallel_policy"]["axis"] == "ep"
+    assert folded_payload["parallelism"]["expert_parallel_policy"]["axis"] == "fsdp"
+    assert folded_payload["parallelism"]["expert_parallel_policy"]["axis_sharing"] == "shared_with_fsdp"
+    assert build_resume_compat(product_ep).runtime_fingerprint != build_resume_compat(folded_ep).runtime_fingerprint
+
+
+def test_resume_fingerprint_changes_for_expert_region_fsdp_axis(
+    tmp_path: Path,
+    prepared_dataset_factory,
+) -> None:
+    manifest = _manifest(prepared_dataset_factory, "expert-fsdp")
+    product_ep = _runtime_spec(
+        tmp_path,
+        manifest,
+        axis_names=("data", "fsdp", "ep"),
+        axis_sizes=(1, 2, 2),
+        parallelism_mode="fsdp",
+        expert_parallel=True,
+        trinity_moe_num_experts=4,
+        hidden_size=16,
+        intermediate_size=32,
+        num_heads=4,
+        n_kv_heads=4,
+    )
+    expert_fsdp = _runtime_spec(
+        tmp_path,
+        manifest,
+        axis_names=("data", "fsdp", "ep", "expert_fsdp"),
+        axis_sizes=(1, 1, 2, 2),
+        parallelism_mode="fsdp",
+        expert_parallel=True,
+        trinity_moe_num_experts=4,
+        hidden_size=16,
+        intermediate_size=32,
+        num_heads=4,
+        n_kv_heads=4,
+    )
+
+    product_payload = build_resume_compat(product_ep).payload
+    expert_fsdp_payload = build_resume_compat(expert_fsdp).payload
+
+    assert product_payload["parallelism"]["expert_fsdp_policy"]["enabled"] is False
+    assert expert_fsdp_payload["parallelism"]["expert_fsdp_policy"] == {
+        "enabled": True,
+        "axis": "expert_fsdp",
+        "axis_size": 2,
+        "axis_sharing": "expert_region_internal",
+    }
+    assert build_resume_compat(product_ep).runtime_fingerprint != build_resume_compat(expert_fsdp).runtime_fingerprint
 
 
 def test_resume_metadata_contains_compatibility_payload(tmp_path: Path, prepared_dataset_factory) -> None:

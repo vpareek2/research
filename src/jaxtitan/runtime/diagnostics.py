@@ -22,6 +22,7 @@ from jaxtitan.models.execution import (
     EXPERT_PARALLEL_DISPATCHER_BACKEND,
     expert_parallel_policy_payload,
 )
+from jaxtitan.specs.parallelism import resolve_expert_fsdp_axis, resolve_expert_parallel_axis
 from jaxtitan.optim import optimizer_policy_summary
 from jaxtitan.runtime.profiling import profiling_runtime_summary
 from jaxtitan.specs.model import ModelSpec
@@ -312,6 +313,9 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
     micro_tokens_per_step = spec.training.global_batch_size * spec.training.seq_len
     global_tokens_per_step = micro_tokens_per_step * spec.training.gradient_accumulation_steps
     effective_global_batch_size = spec.training.global_batch_size * spec.training.gradient_accumulation_steps
+    axis_sizes = dict(zip(spec.mesh.axis_names, spec.mesh.axis_sizes, strict=True))
+    expert_axis = resolve_expert_parallel_axis(spec.parallelism, axis_sizes)
+    expert_fsdp_axis = resolve_expert_fsdp_axis(spec.parallelism, axis_sizes)
     return _normalize(
         {
             "schema_version": 1,
@@ -319,7 +323,12 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
             "expert_parallel": spec.parallelism.expert_parallel,
             "expert_parallel_policy": expert_parallel_policy_payload(
                 enabled=spec.parallelism.expert_parallel,
-                ep_axis_size=context.ep_axis_size,
+                axis_name=expert_axis.axis,
+                axis_size=expert_axis.axis_size,
+                axis_sharing=expert_axis.axis_sharing,
+                expert_fsdp_axis_name=expert_fsdp_axis.axis,
+                expert_fsdp_axis_size=expert_fsdp_axis.axis_size,
+                expert_fsdp_axis_sharing=expert_fsdp_axis.axis_sharing,
                 num_experts=_moe_num_experts(spec),
             ),
             "execution_mode": runtime_execution_mode(spec),
@@ -342,6 +351,12 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
                 "data_axis_size": context.data_axis_size,
                 "fsdp_axis_size": context.fsdp_axis_size,
                 "ep_axis_size": context.ep_axis_size,
+                "expert_parallel_axis": expert_axis.axis,
+                "expert_parallel_axis_size": expert_axis.axis_size,
+                "expert_parallel_axis_sharing": expert_axis.axis_sharing,
+                "expert_fsdp_axis": expert_fsdp_axis.axis,
+                "expert_fsdp_axis_size": expert_fsdp_axis.axis_size,
+                "expert_fsdp_axis_sharing": expert_fsdp_axis.axis_sharing,
             },
             "batch": {
                 "global_batch_size": spec.training.global_batch_size,
@@ -404,7 +419,12 @@ def sharding_policy_summary(plan: Any) -> dict[str, Any]:
                 if not plan.parallelism.expert_parallel
                 else {
                     "enabled": True,
-                    "axis_size": plan.mesh.ep_axis_size,
+                    "axis": plan.expert_parallel_axis,
+                    "axis_size": plan.expert_parallel_axis_size,
+                    "axis_sharing": plan.expert_parallel_axis_sharing,
+                    "expert_fsdp_axis": plan.expert_fsdp_axis,
+                    "expert_fsdp_axis_size": plan.expert_fsdp_axis_size,
+                    "expert_fsdp_axis_sharing": plan.expert_fsdp_axis_sharing,
                     "dispatcher_backend": EXPERT_PARALLEL_DISPATCHER_BACKEND,
                     "capacity_policy": EXPERT_PARALLEL_CAPACITY_POLICY,
                 },
@@ -423,15 +443,37 @@ def _state_policy_summary(plan: Any, *, placement: str) -> dict[str, Any]:
         fsdp_sharded = 0
     else:
         fsdp_sharded = sum(1 for sharding in shardings if "fsdp" in str(getattr(sharding, "spec", "")))
-    ep_sharded = sum(1 for sharding in shardings if "ep" in str(getattr(sharding, "spec", "")))
-    replicated = len(shardings) - fsdp_sharded - ep_sharded
+    expert_axis = plan.expert_parallel_axis
+    if plan.parallelism.expert_parallel and expert_axis is not None:
+        expert_shardings = tuple(
+            plan.param_shardings[path]
+            for path in getattr(plan, "expert_param_paths", ())
+            if path in plan.param_shardings
+        )
+        ep_sharded = sum(1 for sharding in expert_shardings if expert_axis in str(getattr(sharding, "spec", "")))
+    else:
+        ep_sharded = 0
+        expert_shardings = ()
+    expert_fsdp_axis = plan.expert_fsdp_axis
+    expert_fsdp_sharded = 0
+    if expert_fsdp_axis is not None:
+        expert_fsdp_sharded = sum(
+            1 for sharding in expert_shardings if expert_fsdp_axis in str(getattr(sharding, "spec", ""))
+        )
+    overlap = ep_sharded if expert_axis == "fsdp" and plan.parallelism.expert_parallel else 0
+    replicated = len(shardings) - fsdp_sharded - ep_sharded - expert_fsdp_sharded + overlap
     return {
         "mode": plan.parallelism.mode,
         "expert_parallel": plan.parallelism.expert_parallel,
+        "expert_parallel_axis": plan.expert_parallel_axis,
+        "expert_parallel_axis_sharing": plan.expert_parallel_axis_sharing,
+        "expert_fsdp_axis": plan.expert_fsdp_axis,
+        "expert_fsdp_axis_sharing": plan.expert_fsdp_axis_sharing,
         "partition_spec": _partition_spec_string(getattr(plan.replicated, "spec", None)),
         "parameter_leaves": len(shardings),
         "fsdp_sharded_leaves": fsdp_sharded,
         "ep_sharded_leaves": ep_sharded,
+        "expert_fsdp_sharded_leaves": expert_fsdp_sharded,
         "replicated_leaves": replicated,
     }
 

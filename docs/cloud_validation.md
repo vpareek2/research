@@ -33,14 +33,19 @@ manifest path.
 | `configs/jaxtitan/cloud_dense_zero2_muon_auto_dion2_smoke.toml` | ZeRO-2 Muon intent with auto-Dion2 matrix routes |
 | `configs/jaxtitan/cloud_2xa100_ep_trinity_moe_ddp_adamw.toml` | 2-GPU EP dispatcher correctness with AdamW |
 | `configs/jaxtitan/cloud_2xa100_ep_trinity_moe_ddp_muon.toml` | 2-GPU EP routed experts with per-expert Muon |
+| `configs/jaxtitan/cloud_2xa100_ep_trinity_moe_fsdp_muon.toml` | 2-GPU folded FSDP+EP with dense Dion2 and routed expert Muon |
 | `configs/jaxtitan/cloud_4gpu_ep_trinity_moe_ddp_muon.toml` | 4-GPU data+EP smoke |
 | `configs/jaxtitan/cloud_4gpu_ep_trinity_moe_fsdp_muon.toml` | 4-GPU FSDP+EP Muon/Dion2 smoke |
+| `configs/jaxtitan/cloud_4gpu_ep_trinity_moe_efsdp_adamw.toml` | 4-GPU EP plus expert-internal FSDP with AdamW |
 
-The distributed configs assume four visible GPUs. For a different GPU count,
-adjust `[mesh] axis_sizes` and keep `training.global_batch_size` divisible by
-the `data` axis. The `cloud_2xa100_ep_*` configs are the preferred first EP
-checks on a two-GPU instance. True dense FSDP plus EP needs at least four GPUs
-so the mesh can include both `fsdp > 1` and `ep > 1`.
+The `cloud_2xa100_ep_*` configs are the preferred first EP checks on a two-GPU
+instance. `cloud_2xa100_ep_trinity_moe_fsdp_muon.toml` uses folded FSDP+EP:
+the `fsdp` axis shards dense state and also owns routed experts. The 4-GPU
+FSDP+EP config keeps product-axis semantics with separate `fsdp` and `ep` axes.
+The `cloud_4gpu_ep_trinity_moe_efsdp_adamw.toml` config adds `expert_fsdp=2`
+to shard the internal routed expert matrix width; it intentionally uses AdamW
+because exact Muon for internally sharded routed experts is a separate optimizer
+task.
 
 ## Smoke Flow
 
@@ -87,6 +92,13 @@ uv run jaxtitan run train --overwrite configs/jaxtitan/cloud_2xa100_ep_trinity_m
 uv run jaxtitan run inspect runs/cloud_2xa100_ep_trinity_moe_ddp_muon
 uv run jaxtitan eval checkpoint runs/cloud_2xa100_ep_trinity_moe_ddp_muon --checkpoint latest --json
 uv run jaxtitan sample checkpoint runs/cloud_2xa100_ep_trinity_moe_ddp_muon --checkpoint latest --prompt-ids "15496,11" --max-new-tokens 8 --top-k 1 --json
+
+uv run jaxtitan config check configs/jaxtitan/cloud_2xa100_ep_trinity_moe_fsdp_muon.toml
+uv run jaxtitan run preflight configs/jaxtitan/cloud_2xa100_ep_trinity_moe_fsdp_muon.toml
+uv run jaxtitan run train --overwrite configs/jaxtitan/cloud_2xa100_ep_trinity_moe_fsdp_muon.toml
+uv run jaxtitan run inspect runs/cloud_2xa100_ep_trinity_moe_fsdp_muon
+uv run jaxtitan eval checkpoint runs/cloud_2xa100_ep_trinity_moe_fsdp_muon --checkpoint latest --json
+uv run jaxtitan sample checkpoint runs/cloud_2xa100_ep_trinity_moe_fsdp_muon --checkpoint latest --prompt-ids "15496,11" --max-new-tokens 8 --top-k 1 --json
 ```
 
 ## What To Check
@@ -101,7 +113,8 @@ uv run jaxtitan sample checkpoint runs/cloud_2xa100_ep_trinity_moe_ddp_muon --ch
 
 For EP configs, additionally check:
 
-- `run preflight` reports mesh axes including `ep=2` and `expert_parallel=true`.
+- `run preflight` reports `expert_parallel=true`; product-axis configs report
+  `ep=2`, while folded FSDP+EP reports `expert_parallel_axis=fsdp`.
 - `diagnostics/runtime.json` includes `expert_parallel_policy` with dispatcher backend `all_to_all`.
 - `optimizer` route counts show routed experts using per-expert Muon in the Muon config.
 - `metrics/train.jsonl` includes `moe_router_layers`, global router health, and optimizer groups for routed experts.
@@ -119,8 +132,10 @@ For EP configs, additionally check:
 8. `cloud_trinity_moe_smebu_ddp_muon_smoke`
 9. `cloud_2xa100_ep_trinity_moe_ddp_adamw`
 10. `cloud_2xa100_ep_trinity_moe_ddp_muon`
-11. `cloud_4gpu_ep_trinity_moe_ddp_muon` when four GPUs are available
-12. `cloud_4gpu_ep_trinity_moe_fsdp_muon` when four GPUs are available
+11. `cloud_2xa100_ep_trinity_moe_fsdp_muon`
+12. `cloud_4gpu_ep_trinity_moe_ddp_muon` when four GPUs are available
+13. `cloud_4gpu_ep_trinity_moe_fsdp_muon` when four GPUs are available
+14. `cloud_4gpu_ep_trinity_moe_efsdp_adamw` when four GPUs are available
 
 Only treat performance numbers as real after a dedicated benchmark run. These
 smokes are for correctness, artifact readability, resume/eval/sample restore,

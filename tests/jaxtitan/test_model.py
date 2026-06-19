@@ -416,6 +416,65 @@ def test_all_to_all_expert_dispatcher_matches_local_dispatcher_on_ep_mesh() -> N
     assert jnp.allclose(actual, expected, atol=1e-5)
 
 
+def test_all_to_all_expert_dispatcher_matches_local_dispatcher_on_ep_expert_fsdp_mesh() -> None:
+    mesh = Mesh(np.asarray(jax.devices()[:4], dtype=object).reshape((1, 2, 2)), ("data", "ep", "expert_fsdp"))
+    expected_experts = ExpertSwiGLU(
+        hidden_size=3,
+        intermediate_size=6,
+        num_experts=4,
+        dtype=jnp.float32,
+        param_dtype=jnp.float32,
+        rngs=nnx.Rngs(0),
+    )
+    actual_experts = ExpertSwiGLU(
+        hidden_size=3,
+        intermediate_size=6,
+        num_experts=4,
+        dtype=jnp.float32,
+        param_dtype=jnp.float32,
+        rngs=nnx.Rngs(1),
+    )
+    gate = jnp.arange(4 * 3 * 6, dtype=jnp.float32).reshape(4, 3, 6) / 37.0
+    up = jnp.arange(4 * 3 * 6, dtype=jnp.float32).reshape(4, 3, 6)[::-1] / 41.0
+    down = jnp.arange(4 * 6 * 3, dtype=jnp.float32).reshape(4, 6, 3) / 43.0
+    expected_experts.gate[...] = gate
+    expected_experts.up[...] = up
+    expected_experts.down[...] = down
+    actual_experts.gate[...] = jax.device_put(gate, NamedSharding(mesh, P("ep", None, "expert_fsdp")))
+    actual_experts.up[...] = jax.device_put(up, NamedSharding(mesh, P("ep", None, "expert_fsdp")))
+    actual_experts.down[...] = jax.device_put(down, NamedSharding(mesh, P("ep", "expert_fsdp", None)))
+    x = jax.device_put(
+        jnp.arange(2 * 4 * 3, dtype=jnp.float32).reshape(2, 4, 3) / 17.0,
+        NamedSharding(mesh, P("data", None, None)),
+    )
+    expert_ids = jax.device_put(
+        jnp.asarray(
+            [
+                [[0, 1], [2, 3], [1, 3], [0, 2]],
+                [[3, 1], [0, 2], [2, 1], [3, 0]],
+            ],
+            dtype=jnp.int32,
+        ),
+        NamedSharding(mesh, P("data", None, None)),
+    )
+    weights = jax.device_put(
+        jnp.asarray(
+            [
+                [[0.25, 0.75], [0.5, 0.5], [0.4, 0.6], [0.2, 0.8]],
+                [[0.55, 0.45], [0.3, 0.7], [0.65, 0.35], [0.1, 0.9]],
+            ],
+            dtype=jnp.float32,
+        ),
+        NamedSharding(mesh, P("data", None, None)),
+    )
+    expected = LocalExpertDispatcher()(expected_experts, x, expert_ids, weights)
+
+    actual = AllToAllExpertDispatcher(mesh, expert_fsdp_axis_name="expert_fsdp")(actual_experts, x, expert_ids, weights)
+
+    assert actual.sharding.spec == P("data", None, None)
+    assert jnp.allclose(actual, expected, atol=1e-5)
+
+
 def test_all_to_all_expert_dispatcher_matches_local_dispatcher_on_data_ep_mesh() -> None:
     mesh = Mesh(np.asarray(jax.devices()[:4], dtype=object).reshape((2, 2)), ("data", "ep"))
     experts = ExpertSwiGLU(
@@ -728,7 +787,9 @@ def test_trinity_moe_param_layouts_leave_sparse_experts_replicated() -> None:
     for tag in ("moe_gate", "moe_up", "moe_down"):
         assert expert_layouts[tag].expert_axis == 0
         assert expert_layouts[tag].matrix_axes == (1, 2)
-        assert expert_layouts[tag].fsdp_axis is None
+    assert expert_layouts["moe_gate"].fsdp_axis == 2
+    assert expert_layouts["moe_up"].fsdp_axis == 2
+    assert expert_layouts["moe_down"].fsdp_axis == 1
 
 
 def test_sliding_window_mask_limits_attention_span() -> None:

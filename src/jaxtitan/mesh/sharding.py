@@ -13,9 +13,9 @@ from jaxtitan.batch import Batch
 from jaxtitan.errors import ContractError
 from jaxtitan.models import ExpertLayout, ParamLayout
 from jaxtitan.specs.mesh import MeshSpec
-from jaxtitan.specs.parallelism import ParallelismSpec
+from jaxtitan.specs.parallelism import ParallelismSpec, resolve_expert_fsdp_axis, resolve_expert_parallel_axis
 
-SUPPORTED_AXES = {"data", "fsdp", "tp", "ep"}
+SUPPORTED_AXES = {"data", "fsdp", "tp", "ep", "expert_fsdp"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +47,17 @@ class MeshContext:
         return self.spec.axis_sizes[self.spec.axis_names.index("ep")]
 
     @property
+    def expert_fsdp_axis_size(self) -> int:
+        if "expert_fsdp" not in self.spec.axis_names:
+            return 1
+        return self.spec.axis_sizes[self.spec.axis_names.index("expert_fsdp")]
+
+    def axis_size(self, axis_name: str) -> int:
+        if axis_name not in self.spec.axis_names:
+            raise ContractError(f"mesh does not define axis {axis_name!r}")
+        return self.spec.axis_sizes[self.spec.axis_names.index(axis_name)]
+
+    @property
     def selected_device_count(self) -> int:
         return len(self.devices)
 
@@ -73,6 +84,13 @@ class ShardingPlan:
     metrics: NamedSharding
     parallelism: ParallelismSpec
     param_shardings: dict[tuple[str, ...], NamedSharding]
+    expert_parallel_axis: str | None = None
+    expert_parallel_axis_size: int = 1
+    expert_parallel_axis_sharing: str | None = None
+    expert_fsdp_axis: str | None = None
+    expert_fsdp_axis_size: int = 1
+    expert_fsdp_axis_sharing: str | None = None
+    expert_param_paths: tuple[tuple[str, ...], ...] = ()
     kv_cache: Any | None = None
 
 
@@ -110,16 +128,25 @@ def build_sharding_plan(
     """Build shardings for data-sharded batches and policy-placed state."""
 
     parallelism = ParallelismSpec() if parallelism is None else parallelism
+    axis_sizes = dict(zip(context.spec.axis_names, context.spec.axis_sizes, strict=True))
+    expert_axis_policy = resolve_expert_parallel_axis(parallelism, axis_sizes)
+    expert_fsdp_policy = resolve_expert_fsdp_axis(parallelism, axis_sizes)
     if parallelism.mode in {"zero2", "fsdp"} and "fsdp" not in context.spec.axis_names:
         raise ContractError(f"parallelism.mode='{parallelism.mode}' requires a mesh fsdp axis")
-    if parallelism.expert_parallel and "ep" not in context.spec.axis_names:
-        raise ContractError("parallelism.expert_parallel=true requires a mesh ep axis")
     if parallelism.expert_parallel and not expert_layouts:
         raise ContractError("parallelism.expert_parallel=true requires routed expert layout metadata")
     batch_matrix = NamedSharding(context.mesh, P("data", None))
     accumulated_batch = NamedSharding(context.mesh, P(None, "data", None))
     replicated = NamedSharding(context.mesh, P())
-    param_shardings = _param_shardings(context, parallelism, param_layouts, expert_layouts, replicated)
+    param_shardings = _param_shardings(
+        context,
+        parallelism,
+        param_layouts,
+        expert_layouts,
+        replicated,
+        expert_axis_name=expert_axis_policy.axis,
+        expert_fsdp_axis_name=expert_fsdp_policy.axis,
+    )
     return ShardingPlan(
         mesh=context,
         batch=BatchSharding(
@@ -134,6 +161,13 @@ def build_sharding_plan(
         metrics=replicated,
         parallelism=parallelism,
         param_shardings=param_shardings,
+        expert_parallel_axis=expert_axis_policy.axis,
+        expert_parallel_axis_size=expert_axis_policy.axis_size,
+        expert_parallel_axis_sharing=expert_axis_policy.axis_sharing,
+        expert_fsdp_axis=expert_fsdp_policy.axis,
+        expert_fsdp_axis_size=expert_fsdp_policy.axis_size,
+        expert_fsdp_axis_sharing=expert_fsdp_policy.axis_sharing,
+        expert_param_paths=tuple(layout.path for layout in expert_layouts) if expert_axis_policy.enabled else (),
     )
 
 
@@ -274,6 +308,9 @@ def validate_runtime_mesh_spec(spec: MeshSpec) -> None:
 def _validate_supported_spec(spec: MeshSpec) -> None:
     if "data" not in spec.axis_names:
         raise ContractError("mesh must include a data axis")
+    has_real_expert_fsdp = "expert_fsdp" in spec.axis_names and spec.axis_sizes[spec.axis_names.index("expert_fsdp")] > 1
+    if has_real_expert_fsdp and "ep" not in spec.axis_names:
+        raise ContractError("mesh expert_fsdp axis with size > 1 requires a mesh ep axis")
     for axis_name, axis_size in zip(spec.axis_names, spec.axis_sizes, strict=True):
         if axis_name not in SUPPORTED_AXES:
             raise ContractError(f"unsupported mesh axis {axis_name!r}; supported axes are {sorted(SUPPORTED_AXES)}")
@@ -315,6 +352,9 @@ def _param_shardings(
     param_layouts: tuple[ParamLayout, ...],
     expert_layouts: tuple[ExpertLayout, ...],
     replicated: NamedSharding,
+    *,
+    expert_axis_name: str | None,
+    expert_fsdp_axis_name: str | None,
 ) -> dict[tuple[str, ...], NamedSharding]:
     shardings = {}
     fsdp_axis_size = context.fsdp_axis_size
@@ -322,7 +362,14 @@ def _param_shardings(
     for layout in param_layouts:
         expert_layout = expert_by_path.get(layout.path)
         if parallelism.expert_parallel and expert_layout is not None:
-            shardings[layout.path] = _expert_sharding(context, expert_layout)
+            if expert_axis_name is None:
+                raise ContractError("parallelism.expert_parallel=true requires a resolved expert parallel axis")
+            shardings[layout.path] = _expert_sharding(
+                context,
+                expert_layout,
+                axis_name=expert_axis_name,
+                expert_fsdp_axis_name=expert_fsdp_axis_name,
+            )
             continue
         if parallelism.mode == "ddp":
             shardings[layout.path] = replicated
@@ -344,20 +391,41 @@ def _param_shardings(
     return shardings
 
 
-def _expert_sharding(context: MeshContext, layout: ExpertLayout) -> NamedSharding:
+def _expert_sharding(
+    context: MeshContext,
+    layout: ExpertLayout,
+    *,
+    axis_name: str,
+    expert_fsdp_axis_name: str | None,
+) -> NamedSharding:
     if len(layout.shape) <= layout.expert_axis:
         raise ContractError(f"expert parameter {'.'.join(layout.path)!r} has invalid expert axis {layout.expert_axis}")
     if len(layout.shape) != 3:
         raise ContractError(f"expert parameter {'.'.join(layout.path)!r} must be rank 3, got {layout.shape}")
-    ep_axis_size = context.ep_axis_size
+    axis_size = context.axis_size(axis_name)
     dim_size = layout.shape[layout.expert_axis]
-    if dim_size % ep_axis_size != 0:
+    if dim_size % axis_size != 0:
         raise ContractError(
             f"expert parameter {'.'.join(layout.path)!r} dimension {layout.expert_axis} "
-            f"with size {dim_size} must be divisible by ep axis size {ep_axis_size}"
+            f"with size {dim_size} must be divisible by {axis_name} axis size {axis_size}"
         )
     spec = [None] * len(layout.shape)
-    spec[layout.expert_axis] = "ep"
+    spec[layout.expert_axis] = axis_name
+    if expert_fsdp_axis_name is not None:
+        if layout.fsdp_axis is None:
+            raise ContractError(f"expert parameter {'.'.join(layout.path)!r} has no expert FSDP axis")
+        if layout.fsdp_axis == layout.expert_axis:
+            raise ContractError(f"expert parameter {'.'.join(layout.path)!r} cannot shard one axis by ep and expert_fsdp")
+        if len(layout.shape) <= layout.fsdp_axis:
+            raise ContractError(f"expert parameter {'.'.join(layout.path)!r} has invalid expert fsdp axis {layout.fsdp_axis}")
+        fsdp_axis_size = context.axis_size(expert_fsdp_axis_name)
+        matrix_dim_size = layout.shape[layout.fsdp_axis]
+        if matrix_dim_size % fsdp_axis_size != 0:
+            raise ContractError(
+                f"expert parameter {'.'.join(layout.path)!r} dimension {layout.fsdp_axis} "
+                f"with size {matrix_dim_size} must be divisible by {expert_fsdp_axis_name} axis size {fsdp_axis_size}"
+            )
+        spec[layout.fsdp_axis] = expert_fsdp_axis_name
     return NamedSharding(context.mesh, P(*spec))
 
 

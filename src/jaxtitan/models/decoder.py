@@ -374,13 +374,14 @@ def _expert_layout_for_metadata(item: ParamMetadata) -> ExpertLayout:
         matrix_axes = (1, 2)
     else:
         raise ContractError(f"unrecognized routed expert tag {item.tag!r}")
+    fsdp_axis = 2 if item.tag in {"moe_gate", "moe_up"} else 1
     return ExpertLayout(
         path=item.path,
         tag=item.tag,
         shape=item.shape,
         expert_axis=0,
         matrix_axes=matrix_axes,
-        fsdp_axis=None,
+        fsdp_axis=fsdp_axis,
     )
 
 

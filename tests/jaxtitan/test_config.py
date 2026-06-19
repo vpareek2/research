@@ -576,7 +576,183 @@ expert_parallel = true
 
     assert spec.parallelism.mode == "ddp"
     assert spec.parallelism.expert_parallel is True
+    assert spec.parallelism.expert_parallel_axis == "auto"
     assert spec.mesh.axis_names == ("data", "ep")
+
+
+def test_load_config_accepts_folded_fsdp_expert_parallelism(tmp_path: Path) -> None:
+    config_path = tmp_path / "folded-fsdp-ep.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "fsdp"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 2]")
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 8
+top_k = 2
+
+[parallelism]
+mode = "fsdp"
+expert_parallel = true
+"""
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.parallelism.mode == "fsdp"
+    assert spec.parallelism.expert_parallel is True
+    assert spec.parallelism.expert_parallel_axis == "auto"
+    assert spec.mesh.axis_names == ("data", "fsdp")
+
+
+def test_load_config_accepts_explicit_folded_expert_parallel_axis(tmp_path: Path) -> None:
+    config_path = tmp_path / "explicit-folded.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "fsdp"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 2]")
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 8
+top_k = 2
+
+[parallelism]
+mode = "fsdp"
+expert_parallel = true
+expert_parallel_axis = "fsdp"
+"""
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.parallelism.expert_parallel_axis == "fsdp"
+
+
+def test_load_config_accepts_expert_region_fsdp(tmp_path: Path) -> None:
+    config_path = tmp_path / "expert-region-fsdp.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        .replace("intermediate_size = 512", "intermediate_size = 512")
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "fsdp", "ep", "expert_fsdp"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 1, 2, 2]")
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 8
+top_k = 2
+expert_intermediate_size = 512
+
+[parallelism]
+mode = "fsdp"
+expert_parallel = true
+expert_parallel_axis = "ep"
+"""
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.parallelism.mode == "fsdp"
+    assert spec.parallelism.expert_parallel is True
+    assert spec.parallelism.expert_parallel_axis == "ep"
+    assert spec.mesh.axis_names == ("data", "fsdp", "ep", "expert_fsdp")
+
+
+def test_load_config_rejects_expert_region_fsdp_with_muon(tmp_path: Path) -> None:
+    config_path = tmp_path / "expert-region-fsdp-muon.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        .replace('name = "adamw"', 'name = "muon"', 1)
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "fsdp", "ep", "expert_fsdp"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 1, 2, 2]")
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 8
+top_k = 2
+expert_intermediate_size = 512
+
+[parallelism]
+mode = "fsdp"
+expert_parallel = true
+expert_parallel_axis = "ep"
+"""
+    )
+
+    with pytest.raises(ConfigError, match="optimizer.name='muon'"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_expert_region_fsdp_without_dedicated_ep_axis(tmp_path: Path) -> None:
+    config_path = tmp_path / "expert-region-fsdp-folded.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "fsdp", "expert_fsdp"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 2, 2]")
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 8
+top_k = 2
+expert_intermediate_size = 512
+
+[parallelism]
+mode = "fsdp"
+expert_parallel = true
+"""
+    )
+
+    with pytest.raises(ConfigError, match="expert_fsdp axis"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_expert_region_fsdp_non_divisible_width(tmp_path: Path) -> None:
+    config_path = tmp_path / "expert-region-fsdp-bad-width.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "fsdp", "ep", "expert_fsdp"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 1, 2, 2]")
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 8
+top_k = 2
+expert_intermediate_size = 513
+
+[parallelism]
+mode = "fsdp"
+expert_parallel = true
+expert_parallel_axis = "ep"
+"""
+    )
+
+    with pytest.raises(ConfigError, match="expert_intermediate_size"):
+        load_config(config_path)
 
 
 def test_load_config_rejects_unused_ep_axis(tmp_path: Path) -> None:
@@ -612,6 +788,67 @@ expert_parallel = true
     )
 
     with pytest.raises(ConfigError, match="ep axis"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_invalid_expert_parallel_axis(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad-expert-axis.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "ep"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 2]")
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 8
+top_k = 2
+
+[parallelism]
+expert_parallel = true
+expert_parallel_axis = "data"
+"""
+    )
+
+    with pytest.raises(ConfigError, match="expert_parallel_axis"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_expert_parallel_axis_without_expert_parallel(tmp_path: Path) -> None:
+    config_path = tmp_path / "unused-expert-axis.toml"
+    config_path.write_text(MINIMAL_CONFIG + '\n[parallelism]\nexpert_parallel_axis = "fsdp"\n')
+
+    with pytest.raises(ConfigError, match="expert_parallel_axis"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_folded_expert_parallel_for_ddp(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad-folded-ddp.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "fsdp"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 1]")
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 8
+top_k = 2
+
+[parallelism]
+mode = "ddp"
+expert_parallel = true
+expert_parallel_axis = "fsdp"
+"""
+    )
+
+    with pytest.raises(ConfigError, match="expert_parallel_axis='fsdp'"):
         load_config(config_path)
 
 

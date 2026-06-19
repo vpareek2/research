@@ -1306,6 +1306,115 @@ def test_run_training_accepts_expert_parallel_moe_muon(
     assert metadata["compatibility"]["parallelism"]["expert_parallel_policy"]["dispatcher_backend"] == "all_to_all"
 
 
+def test_run_training_accepts_folded_fsdp_expert_parallel_moe_muon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "folded-moe-ep-muon",
+        shard_token_groups=(tuple(range(0, 80)),),
+        train_tokens=50,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            model_name="trinity",
+            num_layers=2,
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=4,
+            n_kv_heads=4,
+            global_batch_size=4,
+            optimizer_name="muon",
+            axis_names=("data", "fsdp"),
+            axis_sizes=(1, 4),
+            parallelism_mode="fsdp",
+            expert_parallel=True,
+            trinity_moe_balance_name="none",
+            trinity_moe_num_experts=4,
+            checkpoint_every_steps=1,
+        )
+    )
+
+    summary = run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+    row = _jsonl(run_dir / "metrics" / "train.jsonl")[-1]
+    metadata = json.loads((run_dir / "checkpoints" / "000001" / "metadata" / "metadata").read_text())
+
+    assert summary.execution_mode == "fsdp+ep"
+    assert diagnostics["parallelism"]["expert_parallel_policy"]["axis"] == "fsdp"
+    assert diagnostics["parallelism"]["expert_parallel_policy"]["axis_sharing"] == "shared_with_fsdp"
+    assert diagnostics["sharding"]["model_state"]["expert_parallel_axis"] == "fsdp"
+    assert diagnostics["sharding"]["model_state"]["ep_sharded_leaves"] == 3
+    assert diagnostics["optimizer"]["route_counts"]["dion2"] > 0
+    assert diagnostics["optimizer"]["route_counts"]["muon"] > 0
+    assert row["optimizer_route_backend_counts"]["dion2"] > 0
+    assert row["optimizer_route_backend_counts"]["muon"] > 0
+    assert metadata["compatibility"]["parallelism"]["expert_parallel_policy"]["axis"] == "fsdp"
+    assert metadata["compatibility"]["parallelism"]["expert_parallel_policy"]["axis_sharing"] == "shared_with_fsdp"
+
+
+def test_run_training_accepts_expert_region_fsdp_moe_adamw(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "expert-fsdp-runtime",
+        shard_token_groups=(tuple(range(0, 80)),),
+        train_tokens=50,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            model_name="trinity",
+            num_layers=2,
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=4,
+            n_kv_heads=4,
+            global_batch_size=4,
+            optimizer_name="adamw",
+            axis_names=("data", "fsdp", "ep", "expert_fsdp"),
+            axis_sizes=(1, 1, 2, 2),
+            parallelism_mode="fsdp",
+            expert_parallel=True,
+            trinity_moe_balance_name="none",
+            trinity_moe_num_experts=4,
+            checkpoint_every_steps=1,
+        )
+    )
+
+    summary = run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+    metadata = json.loads((run_dir / "checkpoints" / "000001" / "metadata" / "metadata").read_text())
+
+    assert summary.execution_mode == "fsdp+ep"
+    assert diagnostics["parallelism"]["expert_parallel_policy"]["expert_fsdp_axis"] == "expert_fsdp"
+    assert diagnostics["parallelism"]["expert_parallel_policy"]["expert_fsdp_axis_size"] == 2
+    assert diagnostics["parallelism"]["mesh"]["expert_parallel_axis"] == "ep"
+    assert diagnostics["parallelism"]["mesh"]["expert_fsdp_axis"] == "expert_fsdp"
+    assert diagnostics["sharding"]["model_state"]["expert_fsdp_sharded_leaves"] == 3
+    assert diagnostics["optimizer"]["route_counts"]["adamw"] > 0
+    assert metadata["compatibility"]["parallelism"]["expert_fsdp_policy"]["axis"] == "expert_fsdp"
+    assert metadata["compatibility"]["parallelism"]["expert_fsdp_policy"]["axis_size"] == 2
+
+
 def test_run_training_records_failure_when_dataset_exhausts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

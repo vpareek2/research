@@ -736,6 +736,99 @@ def test_fsdp_ep_train_step_uses_dion2_for_dense_and_muon_for_routed_experts() -
     assert metrics.loss_sum.shape == ()
 
 
+def test_expert_region_fsdp_train_step_runs_with_adamw() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_trinity_spec(
+            num_layers=2,
+            initial_dense_layers=1,
+            moe={"num_experts": 4, "top_k": 2, "expert_intermediate_size": 16, "num_shared_experts": 1},
+            compute_dtype="float32",
+        ),
+        seed=0,
+    )
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp", "ep", "expert_fsdp"), axis_sizes=(1, 1, 2, 2)))
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(mode="fsdp", expert_parallel=True),
+        param_layouts=built.param_layouts,
+        expert_layouts=built.expert_layouts,
+    )
+    model_state = place_model_state(built.state, plan)
+    optimizer = _optimizer(model_state, built.metadata, optimizer_name="adamw")
+    state = initialize_train_state(model_state, optimizer.transform, seed=1)
+    step = make_train_step(
+        built.graph,
+        optimizer,
+        sharding=plan,
+        state_template=state,
+        donate_state=True,
+        expected_batch_shape=(1, 4, 4),
+    )
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
+
+    next_state, metrics = step(state, place_batch(batch, plan))
+
+    assert plan.expert_parallel_axis == "ep"
+    assert plan.expert_fsdp_axis == "expert_fsdp"
+    assert next_state.step == 1
+    assert next_state.tokens_seen == 16
+    assert metrics.token_count == 16
+    assert metrics.loss_sum.shape == ()
+    assert any(
+        getattr(leaf, "sharding", None).spec == jax.sharding.PartitionSpec("ep", None, "expert_fsdp")
+        for leaf in jax.tree.leaves(next_state.model)
+        if hasattr(getattr(leaf, "sharding", None), "spec")
+    )
+
+
+def test_folded_fsdp_ep_train_step_uses_dion2_for_dense_and_muon_for_routed_experts() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_trinity_spec(
+            num_layers=2,
+            initial_dense_layers=1,
+            moe={"num_experts": 4, "top_k": 2, "num_shared_experts": 1},
+            compute_dtype="float32",
+        ),
+        seed=0,
+    )
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp"), axis_sizes=(1, 4)))
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(mode="fsdp", expert_parallel=True),
+        param_layouts=built.param_layouts,
+        expert_layouts=built.expert_layouts,
+    )
+    model_state = place_model_state(built.state, plan)
+    optimizer = _optimizer(model_state, built.metadata, optimizer_name="muon")
+    state = initialize_train_state(model_state, optimizer.transform, seed=1)
+    step = make_train_step(
+        built.graph,
+        optimizer,
+        sharding=plan,
+        state_template=state,
+        donate_state=True,
+        expected_batch_shape=(1, 4, 4),
+    )
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
+
+    next_state, metrics = step(state, place_batch(batch, plan))
+
+    routes = {assignment.tag: assignment for assignment in optimizer.route_assignments}
+    assert plan.expert_parallel_axis == "fsdp"
+    assert plan.expert_parallel_axis_sharing == "shared_with_fsdp"
+    assert routes["attention_q"].backend == "dion2"
+    assert routes["moe_shared_gate"].backend == "dion2"
+    for tag in ("moe_gate", "moe_up", "moe_down"):
+        assert routes[tag].backend == "muon"
+        assert routes[tag].resolution_reason == "expert_axis_sharded_full_matrices"
+    assert next_state.step == 1
+    assert next_state.tokens_seen == 16
+    assert metrics.token_count == 16
+    assert metrics.loss_sum.shape == ()
+
+
 def test_train_step_with_data_axis_sharding_reports_global_metrics() -> None:
     require_fake_devices()
     built = build_model(_tiny_spec(), seed=0)
