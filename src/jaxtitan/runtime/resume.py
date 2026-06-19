@@ -79,8 +79,8 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
                 "attention": "logical_spmd_exact" if spec.parallelism.context_parallel else None,
                 "activation_spec": "batch,cp_sequence,hidden" if spec.parallelism.context_parallel else None,
                 "batch_sharding": "batch,cp_sequence" if spec.parallelism.context_parallel else None,
-                "kv_cache": "unsupported" if spec.parallelism.context_parallel else None,
-                "inference": "checkpoint_eval_only" if spec.parallelism.context_parallel else None,
+                "kv_cache": "cp_sequence_sharded" if spec.parallelism.context_parallel else None,
+                "inference": "checkpoint_eval_and_sampling" if spec.parallelism.context_parallel else None,
             },
             "expert_parallel_policy": expert_parallel_policy_payload(
                 enabled=spec.parallelism.expert_parallel,

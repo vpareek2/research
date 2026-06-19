@@ -331,10 +331,10 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
                 "enabled": spec.parallelism.tensor_parallel,
                 "axis": "tp" if spec.parallelism.tensor_parallel else None,
                 "axis_size": axis_sizes.get("tp", 1) if spec.parallelism.tensor_parallel else 1,
-                "residual_stream": "sequence_parallel" if spec.parallelism.tensor_parallel else "replicated",
+                "residual_stream": _tp_residual_stream(spec),
                 "sequence_parallel": {
-                    "enabled": spec.parallelism.tensor_parallel,
-                    "activation_spec": "batch,sequence,tp_hidden" if spec.parallelism.tensor_parallel else None,
+                    "enabled": spec.parallelism.tensor_parallel and not spec.parallelism.context_parallel,
+                    "activation_spec": _tp_sequence_activation_spec(spec),
                 },
                 "embedding": "replicated",
                 "lm_head": "vocab_parallel" if spec.parallelism.tensor_parallel else "replicated",
@@ -356,8 +356,8 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
                 "attention": "logical_spmd_exact" if spec.parallelism.context_parallel else None,
                 "activation_spec": "batch,cp_sequence,hidden" if spec.parallelism.context_parallel else None,
                 "batch_sharding": "batch,cp_sequence" if spec.parallelism.context_parallel else None,
-                "kv_cache": "unsupported" if spec.parallelism.context_parallel else None,
-                "inference": "checkpoint_eval_only" if spec.parallelism.context_parallel else None,
+                "kv_cache": "cp_sequence_sharded" if spec.parallelism.context_parallel else None,
+                "inference": "checkpoint_eval_and_sampling" if spec.parallelism.context_parallel else None,
             },
             "expert_parallel_policy": expert_parallel_policy_payload(
                 enabled=spec.parallelism.expert_parallel,
@@ -478,10 +478,12 @@ def sharding_policy_summary(plan: Any, *, has_moe: bool = False) -> dict[str, An
                     "enabled": True,
                     "axis": plan.tensor_parallel_axis,
                     "axis_size": plan.tensor_parallel_axis_size,
-                    "residual_stream": "sequence_parallel",
+                    "residual_stream": "cp_sequence_parallel" if plan.parallelism.context_parallel else "sequence_parallel",
                     "sequence_parallel": {
-                        "enabled": True,
-                        "activation_spec": "batch,sequence,tp_hidden",
+                        "enabled": not plan.parallelism.context_parallel,
+                        "activation_spec": None
+                        if plan.parallelism.context_parallel
+                        else "batch,sequence,tp_hidden",
                     },
                     "embedding": "replicated",
                     "lm_head": "vocab_parallel",
@@ -505,13 +507,34 @@ def sharding_policy_summary(plan: Any, *, has_moe: bool = False) -> dict[str, An
                     "attention": "logical_spmd_exact",
                     "activation_spec": "batch,cp_sequence,hidden",
                     "batch_sharding": "batch,cp_sequence",
-                    "kv_cache": "unsupported",
-                    "inference": "checkpoint_eval_only",
+                    "kv_cache": "cp_sequence_sharded",
+                    "inference": "checkpoint_eval_and_sampling",
                 },
-                "kv_cache": None,
+                "kv_cache": None
+                if not plan.parallelism.context_parallel
+                else {
+                    "enabled": True,
+                    "layout": "layer,batch,cp_cache_sequence,kv_heads,head_dim",
+                    "partition_spec": "PartitionSpec(None, 'data', 'cp', None, None)",
+                    "lengths_partition_spec": "PartitionSpec('data')",
+                },
             },
         }
     )
+
+
+def _tp_residual_stream(spec: RunSpec) -> str:
+    if not spec.parallelism.tensor_parallel:
+        return "replicated"
+    if spec.parallelism.context_parallel:
+        return "cp_sequence_parallel"
+    return "sequence_parallel"
+
+
+def _tp_sequence_activation_spec(spec: RunSpec) -> str | None:
+    if not spec.parallelism.tensor_parallel or spec.parallelism.context_parallel:
+        return None
+    return "batch,sequence,tp_hidden"
 
 
 def _state_policy_summary(plan: Any, *, placement: str) -> dict[str, Any]:

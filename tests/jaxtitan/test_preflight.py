@@ -511,8 +511,8 @@ def test_run_preflight_reports_context_parallel_policy(
         "attention": "logical_spmd_exact",
         "activation_spec": "batch,cp_sequence,hidden",
         "batch_sharding": "batch,cp_sequence",
-        "kv_cache": "unsupported",
-        "inference": "checkpoint_eval_only",
+        "kv_cache": "cp_sequence_sharded",
+        "inference": "checkpoint_eval_and_sampling",
     }
     assert payload["parallelism"]["mesh"]["cp_axis_size"] == 2
     assert payload["compile"]["train"]["input_shardings"]["input_ids"]["partition_spec"] == "PartitionSpec(None, 'data', 'cp')"

@@ -113,7 +113,15 @@ class TrinityModel(nnx.Module):
             router_stats=tuple(router_stats),
         )
 
-    def prefill(self, input_ids: Any, positions: Any, attention_mask: Any, cache: Any) -> tuple[jax.Array, jax.Array, Any]:
+    def prefill(
+        self,
+        input_ids: Any,
+        positions: Any,
+        attention_mask: Any,
+        cache: Any,
+        *,
+        execution: ModelExecutionContext | None = None,
+    ) -> tuple[jax.Array, jax.Array, Any]:
         input_ids = jnp.asarray(input_ids)
         positions = jnp.asarray(positions)
         attention_mask = jnp.asarray(attention_mask, dtype=jnp.bool_)
@@ -129,13 +137,21 @@ class TrinityModel(nnx.Module):
         if seq_len > self.spec.max_seq_len:
             raise ContractError(f"input sequence length {seq_len} exceeds model.max_seq_len={self.spec.max_seq_len}")
 
-        x = self._embed(input_ids)
+        x = sequence_parallel_activation(self._embed(input_ids), execution)
         for layer_index, layer in enumerate(self.layers):
-            x, cache = layer.prefill(x, positions, attention_mask, cache, layer_index)
-        logits = self.lm_head(self.norm(x))
+            x, cache = layer.prefill(x, positions, attention_mask, cache, layer_index, execution=execution)
+        logits = vocab_parallel_lm_head(self.lm_head, self.norm(sequence_parallel_activation(x, execution)), execution)
         return logits, logits[:, -1, :], cache
 
-    def decode_one(self, token_ids: Any, positions: Any, attention_mask: Any, cache: Any) -> tuple[jax.Array, Any]:
+    def decode_one(
+        self,
+        token_ids: Any,
+        positions: Any,
+        attention_mask: Any,
+        cache: Any,
+        *,
+        execution: ModelExecutionContext | None = None,
+    ) -> tuple[jax.Array, Any]:
         token_ids = jnp.asarray(token_ids)
         positions = jnp.asarray(positions)
         attention_mask = jnp.asarray(attention_mask, dtype=jnp.bool_)
@@ -148,8 +164,8 @@ class TrinityModel(nnx.Module):
 
         x = self._embed(token_ids[:, None])
         for layer_index, layer in enumerate(self.layers):
-            x, cache = layer.decode_one(x, positions, attention_mask, cache, layer_index)
-        logits = self.lm_head(self.norm(x))[:, 0, :]
+            x, cache = layer.decode_one(x, positions, attention_mask, cache, layer_index, execution=execution)
+        logits = vocab_parallel_lm_head(self.lm_head, self.norm(x), execution)[:, 0, :]
         return logits, cache
 
     def _embed(self, input_ids: Any) -> jax.Array:

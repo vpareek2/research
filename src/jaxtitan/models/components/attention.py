@@ -162,11 +162,12 @@ class GroupedQueryAttention(nnx.Module):
         self,
         x: jax.Array,
         context: PrefillAttentionContext,
+        execution: ModelExecutionContext | None = None,
     ) -> tuple[jax.Array, Any]:
         batch_size, seq_len, _ = x.shape
-        q = self.q(x).reshape(batch_size, seq_len, self.num_heads, self.head_dim)
-        k = self.k(x).reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
-        v = self.v(x).reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
+        q = column_parallel_linear(self.q, x, execution).reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+        k = column_parallel_linear(self.k, x, execution).reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
+        v = column_parallel_linear(self.v, x, execution).reshape(batch_size, seq_len, self.n_kv_heads, self.head_dim)
         q, k = self._prepare_qk_at_positions(q, k, context.positions, context.cache.rope_theta)
 
         keys, values, lengths = _cache_write(
@@ -184,19 +185,20 @@ class GroupedQueryAttention(nnx.Module):
         cached_k = next_cache.keys[context.layer_index]
         cached_v = next_cache.values[context.layer_index]
         out = scaled_dot_product_attention(q, cached_k, cached_v, mask)
-        out = self._apply_gate(x, out)
-        return self.o(out.reshape(batch_size, seq_len, self.hidden_size)), next_cache
+        out = self._apply_gate(x, out, execution)
+        return row_parallel_linear(self.o, out.reshape(batch_size, seq_len, self.hidden_size), execution), next_cache
 
     def decode_one(
         self,
         x: jax.Array,
         context: DecodeAttentionContext,
+        execution: ModelExecutionContext | None = None,
     ) -> tuple[jax.Array, Any]:
         batch_size, _, _ = x.shape
         positions = context.positions[:, None]
-        q = self.q(x).reshape(batch_size, 1, self.num_heads, self.head_dim)
-        k = self.k(x).reshape(batch_size, 1, self.n_kv_heads, self.head_dim)
-        v = self.v(x).reshape(batch_size, 1, self.n_kv_heads, self.head_dim)
+        q = column_parallel_linear(self.q, x, execution).reshape(batch_size, 1, self.num_heads, self.head_dim)
+        k = column_parallel_linear(self.k, x, execution).reshape(batch_size, 1, self.n_kv_heads, self.head_dim)
+        v = column_parallel_linear(self.v, x, execution).reshape(batch_size, 1, self.n_kv_heads, self.head_dim)
         q, k = self._prepare_qk_at_positions(q, k, positions, context.cache.rope_theta)
 
         keys, values, lengths = _cache_write(
@@ -214,8 +216,8 @@ class GroupedQueryAttention(nnx.Module):
         cached_k = next_cache.keys[context.layer_index]
         cached_v = next_cache.values[context.layer_index]
         out = scaled_dot_product_attention(q, cached_k, cached_v, mask)
-        out = self._apply_gate(x, out)
-        return self.o(out.reshape(batch_size, 1, self.hidden_size)), next_cache
+        out = self._apply_gate(x, out, execution)
+        return row_parallel_linear(self.o, out.reshape(batch_size, 1, self.hidden_size), execution), next_cache
 
     def _prepare_qk(
         self,

@@ -60,7 +60,8 @@ uv run jaxtitan run inspect "runs/$run"
 uv run jaxtitan eval checkpoint "runs/$run" --checkpoint latest --json
 ```
 
-For non-CP runs, checkpoint sampling must succeed:
+Checkpoint sampling must succeed for all runs, including CP runs with
+CP-sharded KV cache:
 
 ```bash
 uv run jaxtitan sample checkpoint "runs/$run" \
@@ -71,8 +72,9 @@ uv run jaxtitan sample checkpoint "runs/$run" \
   --json
 ```
 
-For CP runs, checkpoint sampling must fail cleanly with the explicit CP
-KV-cache guardrail. Checkpoint eval must still succeed.
+For CP runs, checkpoint eval must still succeed. Sampling restores the
+checkpoint with a CP-sharded KV cache and pads prompt/cache lengths internally
+to the CP axis multiple.
 
 Post-run checks:
 
@@ -260,8 +262,8 @@ and distributed optimizer sanity.
 A validation run passes only if:
 
 - `config check`, `preflight`, `train`, `inspect`, and checkpoint eval all succeed.
-- Non-CP checkpoint sampling succeeds; CP checkpoint sampling fails with the
-  explicit CP KV-cache guardrail.
+- Checkpoint sampling succeeds, including CP runs with the CP-sharded KV-cache
+  restore path.
 - `diagnostics/runtime.json` reports the expected mesh axes, parallelism flags,
   and sharding policies.
 - `diagnostics/profiling.json` has `status="completed"` and at least one

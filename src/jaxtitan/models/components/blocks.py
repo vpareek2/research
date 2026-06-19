@@ -47,17 +47,21 @@ class DecoderBlock(nnx.Module):
         attention_mask: jax.Array,
         cache: Any,
         layer_index: int,
+        *,
+        execution: ModelExecutionContext | None = None,
     ) -> tuple[jax.Array, Any]:
+        x = sequence_parallel_activation(x, execution)
         context = PrefillAttentionContext(
             positions=positions,
             attention_mask=attention_mask,
             cache=cache,
             layer_index=layer_index,
         )
-        attn_out, cache = self.attn.prefill(self.pre_norm(x), context)
+        attn_out, cache = self.attn.prefill(self.pre_norm(x), context, execution=execution)
         x = x + attn_out
-        x = x + self.mlp(self.post_norm(x))
-        return x, cache
+        x = sequence_parallel_activation(x, execution)
+        x = x + self.mlp(self.post_norm(x), execution=execution)
+        return sequence_parallel_activation(x, execution), cache
 
     def decode_one(
         self,
@@ -66,6 +70,8 @@ class DecoderBlock(nnx.Module):
         attention_mask: jax.Array,
         cache: Any,
         layer_index: int,
+        *,
+        execution: ModelExecutionContext | None = None,
     ) -> tuple[jax.Array, Any]:
         context = DecodeAttentionContext(
             positions=positions,
@@ -73,9 +79,9 @@ class DecoderBlock(nnx.Module):
             cache=cache,
             layer_index=layer_index,
         )
-        attn_out, cache = self.attn.decode_one(self.pre_norm(x), context)
+        attn_out, cache = self.attn.decode_one(self.pre_norm(x), context, execution=execution)
         x = x + attn_out
-        x = x + self.mlp(self.post_norm(x))
+        x = x + self.mlp(self.post_norm(x), execution=execution)
         return x, cache
 
 
@@ -130,17 +136,21 @@ class TrinityDenseBlock(nnx.Module):
         attention_mask: jax.Array,
         cache: Any,
         layer_index: int,
+        *,
+        execution: ModelExecutionContext | None = None,
     ) -> tuple[jax.Array, Any]:
+        x = sequence_parallel_activation(x, execution)
         context = PrefillAttentionContext(
             positions=positions,
             attention_mask=attention_mask,
             cache=cache,
             layer_index=layer_index,
         )
-        attn_out, cache = self.attn.prefill(self.attn_pre_norm(x), context)
+        attn_out, cache = self.attn.prefill(self.attn_pre_norm(x), context, execution=execution)
         x = x + self.attn_post_norm(attn_out)
-        x = x + self.ffn_post_norm(self.mlp(self.ffn_pre_norm(x)))
-        return x, cache
+        x = sequence_parallel_activation(x, execution)
+        x = x + self.ffn_post_norm(self.mlp(self.ffn_pre_norm(x), execution=execution))
+        return sequence_parallel_activation(x, execution), cache
 
     def decode_one(
         self,
@@ -149,6 +159,8 @@ class TrinityDenseBlock(nnx.Module):
         attention_mask: jax.Array,
         cache: Any,
         layer_index: int,
+        *,
+        execution: ModelExecutionContext | None = None,
     ) -> tuple[jax.Array, Any]:
         context = DecodeAttentionContext(
             positions=positions,
@@ -156,9 +168,9 @@ class TrinityDenseBlock(nnx.Module):
             cache=cache,
             layer_index=layer_index,
         )
-        attn_out, cache = self.attn.decode_one(self.attn_pre_norm(x), context)
+        attn_out, cache = self.attn.decode_one(self.attn_pre_norm(x), context, execution=execution)
         x = x + self.attn_post_norm(attn_out)
-        x = x + self.ffn_post_norm(self.mlp(self.ffn_pre_norm(x)))
+        x = x + self.ffn_post_norm(self.mlp(self.ffn_pre_norm(x), execution=execution))
         return x, cache
 
 
@@ -225,17 +237,21 @@ class TrinityMoEBlock(nnx.Module):
         attention_mask: jax.Array,
         cache: Any,
         layer_index: int,
+        *,
+        execution: ModelExecutionContext | None = None,
     ) -> tuple[jax.Array, Any]:
+        x = sequence_parallel_activation(x, execution)
         context = PrefillAttentionContext(
             positions=positions,
             attention_mask=attention_mask,
             cache=cache,
             layer_index=layer_index,
         )
-        attn_out, cache = self.attn.prefill(self.attn_pre_norm(x), context)
+        attn_out, cache = self.attn.prefill(self.attn_pre_norm(x), context, execution=execution)
         x = x + self.attn_post_norm(attn_out)
-        x = x + self.ffn_post_norm(self.mlp(self.ffn_pre_norm(x)))
-        return x, cache
+        x = sequence_parallel_activation(x, execution)
+        x = x + self.ffn_post_norm(self.mlp(self.ffn_pre_norm(x), execution=execution))
+        return sequence_parallel_activation(x, execution), cache
 
 
     def decode_one(
@@ -245,6 +261,8 @@ class TrinityMoEBlock(nnx.Module):
         attention_mask: jax.Array,
         cache: Any,
         layer_index: int,
+        *,
+        execution: ModelExecutionContext | None = None,
     ) -> tuple[jax.Array, Any]:
         context = DecodeAttentionContext(
             positions=positions,
@@ -252,9 +270,9 @@ class TrinityMoEBlock(nnx.Module):
             cache=cache,
             layer_index=layer_index,
         )
-        attn_out, cache = self.attn.decode_one(self.attn_pre_norm(x), context)
+        attn_out, cache = self.attn.decode_one(self.attn_pre_norm(x), context, execution=execution)
         x = x + self.attn_post_norm(attn_out)
-        x = x + self.ffn_post_norm(self.mlp(self.ffn_pre_norm(x)))
+        x = x + self.ffn_post_norm(self.mlp(self.ffn_pre_norm(x), execution=execution))
         return x, cache
 
 

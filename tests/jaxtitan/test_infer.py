@@ -19,12 +19,15 @@ from jaxtitan.infer import (
     restore_inference_checkpoint,
     sample_next_token,
 )
+from jaxtitan.mesh import build_mesh_context, build_sharding_plan
 from jaxtitan.models import apply_model, build_model
 from jaxtitan.optim import build_optimizer
 from jaxtitan.runtime import run_training
 from jaxtitan.specs.generation import GenerationSpec
+from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec, TrinitySpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
+from jaxtitan.specs.parallelism import ParallelismSpec
 from jaxtitan.state import RngState
 from jaxtitan.steps import initialize_train_state, make_train_step
 
@@ -158,6 +161,28 @@ def test_decode_updates_single_position_and_matches_full_forward_logits() -> Non
     assert jnp.array_equal(decoded.cache.lengths, jnp.asarray([4, 4], dtype=jnp.int32))
     assert jnp.any(decoded.cache.keys[:, :, 3] != 0)
     assert jnp.all(decoded.cache.keys[:, :, 4] == 0)
+
+
+def test_context_parallel_generation_matches_non_cp_with_sharded_padded_cache() -> None:
+    if jax.local_device_count() < 2:
+        pytest.skip("context-parallel inference test requires at least two local devices")
+    spec = _tiny_spec(max_seq_len=8, compute_dtype="float32")
+    built = build_model(spec, seed=0)
+    state = initialize_inference_state(built.state, seed=1)
+    prompt = jnp.asarray([[1, 2, 3], [4, 5, 6]], dtype=jnp.int32)
+    generation = GenerationSpec(max_new_tokens=2, top_k=1)
+    plan = _context_parallel_plan()
+
+    expected = generate_tokens(built.graph, state, spec, prompt, generation)
+    actual = generate_tokens(built.graph, state, spec, prompt, generation, sharding=plan)
+
+    assert jnp.array_equal(actual.generated_ids, expected.generated_ids)
+    assert jnp.array_equal(actual.full_ids, expected.full_ids)
+    assert jnp.allclose(actual.logprobs, expected.logprobs, atol=1e-5)
+    assert actual.cache.max_cache_len == 6
+    assert jnp.array_equal(actual.cache.lengths, jnp.asarray([5, 5], dtype=jnp.int32))
+    assert "cp" in getattr(actual.cache.keys, "sharding", None).spec
+    assert "cp" in getattr(actual.cache.values, "sharding", None).spec
 
 
 def test_dense_trinity_prefill_decode_matches_full_forward_logits() -> None:
@@ -441,6 +466,14 @@ def _batch() -> Batch:
     input_ids = jnp.asarray([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=jnp.int32)
     target_ids = (input_ids + 1) % 16
     return Batch(input_ids=input_ids, target_ids=target_ids, loss_mask=jnp.ones((2, 4), dtype=jnp.bool_))
+
+
+def _context_parallel_plan():
+    context = build_mesh_context(
+        MeshSpec(axis_names=("data", "cp"), axis_sizes=(1, 2)),
+        devices=tuple(jax.local_devices()[:2]),
+    )
+    return build_sharding_plan(context, parallelism=ParallelismSpec(context_parallel=True))
 
 
 def _trees_equal(left, right) -> bool:

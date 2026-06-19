@@ -103,7 +103,7 @@ def test_sample_checkpoint_rejects_invalid_inputs(
         sample_checkpoint(run_dir, "middle", "1", max_new_tokens=1, top_k=1)
 
 
-def test_sample_checkpoint_rejects_context_parallel_runs(
+def test_sample_checkpoint_supports_context_parallel_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     prepared_dataset_factory,
@@ -113,9 +113,18 @@ def test_sample_checkpoint_rejects_context_parallel_runs(
     config_path = tmp_path / "jaxtitan.toml"
     config_path.write_text(_training_config(manifest, target_tokens=8, checkpoint_every_steps=1, context_parallel=True))
     run_training(config_path)
+    run_dir = tmp_path / "runs" / "loop"
 
-    with pytest.raises(ContractError, match="context-parallel"):
-        sample_checkpoint(tmp_path / "runs" / "loop", "latest", "1,2", max_new_tokens=1, top_k=1)
+    payload = sample_checkpoint(run_dir, "latest", "1,2", max_new_tokens=1, top_k=1)
+
+    rows = _jsonl(run_dir / "samples" / "checkpoints" / "000001.jsonl")
+    assert rows == [payload]
+    assert payload["status"] == "completed"
+    assert payload["run_id"] == "loop"
+    assert payload["checkpoint"]["step"] == 1
+    assert payload["prompt_ids"] == [1, 2]
+    assert len(payload["generated_ids"]) == 1
+    assert len(payload["full_ids"]) == 3
 
 
 def test_cli_sample_checkpoint_json_success_and_failure(

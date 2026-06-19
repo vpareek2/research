@@ -31,8 +31,6 @@ def sample_checkpoint(
     prompt = parse_prompt_ids(prompt_ids)
     generation = GenerationSpec(max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)
     restored = restore_inference_checkpoint(run_dir, checkpoint)
-    if restored.run_spec.parallelism.context_parallel:
-        raise ContractError("checkpoint sampling is not supported for context-parallel runs until CP KV-cache support lands")
     model_spec = restored.run_spec.model
     _validate_prompt_ids(prompt, vocab_size=model_spec.vocab_size)
     if generation.top_k is not None and generation.top_k > model_spec.vocab_size:
@@ -44,6 +42,7 @@ def sample_checkpoint(
         model_spec,
         jnp.asarray([prompt], dtype=jnp.int32),
         generation,
+        sharding=restored.sharding,
     )
     payload = _normalize(
         {

@@ -119,11 +119,13 @@ def prefill_model(
     positions: Any,
     attention_mask: Any,
     cache: Any,
+    *,
+    execution: ModelExecutionContext | None = None,
 ) -> tuple[jax.Array, jax.Array, Any]:
     """Apply model prefill and update a KV cache."""
 
     model = nnx.merge(graph, state)
-    return model.prefill(input_ids, positions, attention_mask, cache)
+    return model.prefill(input_ids, positions, attention_mask, cache, execution=execution)
 
 
 def decode_model(
@@ -133,11 +135,13 @@ def decode_model(
     positions: Any,
     attention_mask: Any,
     cache: Any,
+    *,
+    execution: ModelExecutionContext | None = None,
 ) -> tuple[jax.Array, Any]:
     """Apply one-token decode and update a KV cache."""
 
     model = nnx.merge(graph, state)
-    return model.decode_one(token_ids, positions, attention_mask, cache)
+    return model.decode_one(token_ids, positions, attention_mask, cache, execution=execution)
 
 
 def count_parameters(metadata: tuple[ParamMetadata, ...]) -> int:
@@ -234,7 +238,15 @@ class DecoderModel(nnx.Module):
             x = apply_layer(layer_call, x, context, remat=self.spec.remat)
         return vocab_parallel_lm_head(self.lm_head, self.norm(sequence_parallel_activation(x, execution)), execution)
 
-    def prefill(self, input_ids: Any, positions: Any, attention_mask: Any, cache: Any) -> tuple[jax.Array, jax.Array, Any]:
+    def prefill(
+        self,
+        input_ids: Any,
+        positions: Any,
+        attention_mask: Any,
+        cache: Any,
+        *,
+        execution: ModelExecutionContext | None = None,
+    ) -> tuple[jax.Array, jax.Array, Any]:
         input_ids = jnp.asarray(input_ids)
         positions = jnp.asarray(positions)
         attention_mask = jnp.asarray(attention_mask, dtype=jnp.bool_)
@@ -250,13 +262,21 @@ class DecoderModel(nnx.Module):
         if seq_len > self.spec.max_seq_len:
             raise ContractError(f"input sequence length {seq_len} exceeds model.max_seq_len={self.spec.max_seq_len}")
 
-        x = self.embed(input_ids)
+        x = sequence_parallel_activation(self.embed(input_ids), execution)
         for layer_index, layer in enumerate(self.layers):
-            x, cache = layer.prefill(x, positions, attention_mask, cache, layer_index)
-        logits = self.lm_head(self.norm(x))
+            x, cache = layer.prefill(x, positions, attention_mask, cache, layer_index, execution=execution)
+        logits = vocab_parallel_lm_head(self.lm_head, self.norm(sequence_parallel_activation(x, execution)), execution)
         return logits, logits[:, -1, :], cache
 
-    def decode_one(self, token_ids: Any, positions: Any, attention_mask: Any, cache: Any) -> tuple[jax.Array, Any]:
+    def decode_one(
+        self,
+        token_ids: Any,
+        positions: Any,
+        attention_mask: Any,
+        cache: Any,
+        *,
+        execution: ModelExecutionContext | None = None,
+    ) -> tuple[jax.Array, Any]:
         token_ids = jnp.asarray(token_ids)
         positions = jnp.asarray(positions)
         attention_mask = jnp.asarray(attention_mask, dtype=jnp.bool_)
@@ -269,8 +289,8 @@ class DecoderModel(nnx.Module):
 
         x = self.embed(token_ids[:, None])
         for layer_index, layer in enumerate(self.layers):
-            x, cache = layer.decode_one(x, positions, attention_mask, cache, layer_index)
-        logits = self.lm_head(self.norm(x))[:, 0, :]
+            x, cache = layer.decode_one(x, positions, attention_mask, cache, layer_index, execution=execution)
+        logits = vocab_parallel_lm_head(self.lm_head, self.norm(x), execution)[:, 0, :]
         return logits, cache
 
 
