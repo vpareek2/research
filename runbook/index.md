@@ -22,6 +22,7 @@ current conclusions. Keep it factual and command-oriented.
 
 - [Tensor parallel completion](streams/tp_completion.md)
 - [MoE parallelism](streams/moe_parallelism.md)
+- [Cloud validation queue](streams/cloud_validation_queue.md)
 - [Kernels and automatic backend](streams/kernels.md)
 - [Data and experiment UX](streams/data_and_experiment_ux.md)
 

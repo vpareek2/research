@@ -17,6 +17,10 @@ EXPERT_PARALLEL_COMBINE_POLICY = "reverse_all_to_all_then_psum"
 RDEP_STATIC_TOKEN_PARTITION = "route_row_source_data_axis"
 RDEP_STATIC_COMBINE_POLICY = "return_by_route_row_identity"
 RDEP_STATIC_ROUTE_ROW_IDENTITY = "((source_rank * T) + token) * top_k + slot"
+MOE_TP_SHARED_EXPERTS = "dense_tensor_parallel"
+MOE_TP_ROUTED_EXPERTS = "expert_axis_or_replicated_not_tensor_parallel"
+MOE_TP_ROUTED_EXPERT_TENSOR_PARALLEL = "unsupported_until_expert_tp_optimizer"
+MOE_TP_OPTIMIZER_POLICY = "adamw_only_under_tp_until_distributed_muon"
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +33,7 @@ class ModelExecutionContext:
     expert_parallel_dispatcher: str = EXPERT_PARALLEL_DISPATCHER_BACKEND
     tensor_parallel_mesh: Any | None = None
     tensor_parallel_axis_name: str = "tp"
+    sequence_parallel: bool = True
 
     @property
     def expert_parallel_enabled(self) -> bool:
@@ -37,6 +42,10 @@ class ModelExecutionContext:
     @property
     def tensor_parallel_enabled(self) -> bool:
         return self.tensor_parallel_mesh is not None
+
+    @property
+    def sequence_parallel_enabled(self) -> bool:
+        return self.tensor_parallel_enabled and self.sequence_parallel
 
 
 def expert_parallel_dispatcher_backend(axis_sharing: str | None) -> str | None:
@@ -90,6 +99,34 @@ def expert_parallel_policy_payload(
     return payload
 
 
+def moe_tensor_parallel_policy_payload(*, tensor_parallel: bool, has_moe: bool) -> dict[str, Any]:
+    """Build the stable artifact payload for MoE tensor-parallel semantics."""
+
+    if not has_moe:
+        return {
+            "active": False,
+            "shared_experts": None,
+            "routed_experts": None,
+            "routed_expert_tensor_parallel": None,
+            "optimizer": None,
+        }
+    if not tensor_parallel:
+        return {
+            "active": False,
+            "shared_experts": "ordinary_dense_when_present",
+            "routed_experts": "expert_axis_or_replicated",
+            "routed_expert_tensor_parallel": None,
+            "optimizer": None,
+        }
+    return {
+        "active": True,
+        "shared_experts": MOE_TP_SHARED_EXPERTS,
+        "routed_experts": MOE_TP_ROUTED_EXPERTS,
+        "routed_expert_tensor_parallel": MOE_TP_ROUTED_EXPERT_TENSOR_PARALLEL,
+        "optimizer": MOE_TP_OPTIMIZER_POLICY,
+    }
+
+
 def apply_layer(layer: Any, *args: Any, remat: str) -> Any:
     """Apply one model layer under the requested execution policy."""
 
@@ -105,8 +142,10 @@ def column_parallel_linear(linear: Any, x: jax.Array, execution: ModelExecutionC
 
     if execution is None or not execution.tensor_parallel_enabled:
         return linear(x)
+    if execution.sequence_parallel_enabled:
+        x = replicated_activation(x, execution)
     out = _linear(linear, x)
-    return _constrain_activation(out, execution, P("data", None, execution.tensor_parallel_axis_name))
+    return feature_parallel_activation(out, execution)
 
 
 def row_parallel_linear(linear: Any, x: jax.Array, execution: ModelExecutionContext | None) -> jax.Array:
@@ -115,7 +154,9 @@ def row_parallel_linear(linear: Any, x: jax.Array, execution: ModelExecutionCont
     if execution is None or not execution.tensor_parallel_enabled:
         return linear(x)
     out = _linear(linear, x)
-    return _constrain_activation(out, execution, P("data", None, None))
+    if execution.sequence_parallel_enabled:
+        return sequence_parallel_activation(out, execution)
+    return replicated_activation(out, execution)
 
 
 def vocab_parallel_lm_head(linear: Any, x: jax.Array, execution: ModelExecutionContext | None) -> jax.Array:
@@ -123,8 +164,34 @@ def vocab_parallel_lm_head(linear: Any, x: jax.Array, execution: ModelExecutionC
 
     if execution is None or not execution.tensor_parallel_enabled:
         return linear(x)
+    if execution.sequence_parallel_enabled:
+        x = replicated_activation(x, execution)
     out = _linear(linear, x)
-    return _constrain_activation(out, execution, P("data", None, execution.tensor_parallel_axis_name))
+    return feature_parallel_activation(out, execution)
+
+
+def replicated_activation(x: jax.Array, execution: ModelExecutionContext | None) -> jax.Array:
+    """Constrain a batch/sequence/hidden activation to replicated sequence/features."""
+
+    if execution is None or not execution.tensor_parallel_enabled:
+        return x
+    return _constrain_activation(x, execution, P("data", None, None))
+
+
+def sequence_parallel_activation(x: jax.Array, execution: ModelExecutionContext | None) -> jax.Array:
+    """Constrain a batch/sequence/hidden activation to sequence parallel placement."""
+
+    if execution is None or not execution.sequence_parallel_enabled:
+        return x
+    return _constrain_activation(x, execution, P("data", execution.tensor_parallel_axis_name, None))
+
+
+def feature_parallel_activation(x: jax.Array, execution: ModelExecutionContext | None) -> jax.Array:
+    """Constrain a batch/sequence/features activation to feature/vocab parallel placement."""
+
+    if execution is None or not execution.tensor_parallel_enabled:
+        return x
+    return _constrain_activation(x, execution, P("data", None, execution.tensor_parallel_axis_name))
 
 
 def _linear(linear: Any, x: jax.Array) -> jax.Array:

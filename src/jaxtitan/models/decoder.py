@@ -14,7 +14,7 @@ from jaxtitan.models.components.attention import FullAttentionContext
 from jaxtitan.models.components.blocks import DecoderBlock
 from jaxtitan.models.components.dtypes import dtype_from_name
 from jaxtitan.models.components.position import precompute_rope
-from jaxtitan.models.execution import ModelExecutionContext, apply_layer, vocab_parallel_lm_head
+from jaxtitan.models.execution import ModelExecutionContext, apply_layer, sequence_parallel_activation, vocab_parallel_lm_head
 from jaxtitan.models.output import ModelOutput, ensure_model_output
 from jaxtitan.specs.model import ModelSpec
 
@@ -219,7 +219,7 @@ class DecoderModel(nnx.Module):
         if seq_len > self.spec.max_seq_len:
             raise ContractError(f"input sequence length {seq_len} exceeds model.max_seq_len={self.spec.max_seq_len}")
 
-        x = self.embed(input_ids)
+        x = sequence_parallel_activation(self.embed(input_ids), execution)
         cos, sin = precompute_rope(
             seq_len=seq_len,
             head_dim=self.spec.hidden_size // self.spec.num_heads,
@@ -232,7 +232,7 @@ class DecoderModel(nnx.Module):
                 return current_layer(hidden, layer_context, execution=execution)
 
             x = apply_layer(layer_call, x, context, remat=self.spec.remat)
-        return vocab_parallel_lm_head(self.lm_head, self.norm(x), execution)
+        return vocab_parallel_lm_head(self.lm_head, self.norm(sequence_parallel_activation(x, execution)), execution)
 
     def prefill(self, input_ids: Any, positions: Any, attention_mask: Any, cache: Any) -> tuple[jax.Array, jax.Array, Any]:
         input_ids = jnp.asarray(input_ids)

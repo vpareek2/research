@@ -23,11 +23,13 @@ Known constraints:
   not complete.
 - Expert dispatch is correctness-first JAX collectives, not a high-performance
   DeepEP/ragged/grouped-GEMM backend.
-- Cloud validation is still required for folded FSDP+EP, expert-region FSDP,
-  RDEP, and combinations with TP.
+- Cloud validation is still required, but should wait until TP completion and
+  distributed Muon/routed-expert optimizer policy are coherent enough to test
+  together.
 
 Next actions:
 
-- Cloud-validate current semantics before adding more parallelism features.
+- Finish TP semantic work and exact distributed optimizer policy before the
+  next cloud validation pass.
 - After validation, decide whether to prioritize routed-expert optimizer
   semantics or dispatch performance based on profiles.

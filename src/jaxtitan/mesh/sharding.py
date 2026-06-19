@@ -17,6 +17,7 @@ from jaxtitan.specs.parallelism import ParallelismSpec, resolve_expert_fsdp_axis
 from jaxtitan.models.execution import expert_parallel_dispatcher_backend
 
 SUPPORTED_AXES = {"data", "fsdp", "tp", "ep", "expert_fsdp"}
+ROUTED_EXPERT_TAGS = frozenset({"moe_gate", "moe_up", "moe_down"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,6 +378,10 @@ def _param_shardings(
     fsdp_axis_size = context.fsdp_axis_size
     expert_by_path = {layout.path: layout for layout in expert_layouts}
     for layout in param_layouts:
+        if parallelism.tensor_parallel and layout.tag in ROUTED_EXPERT_TAGS and layout.tp_axis is not None:
+            raise ContractError(
+                f"routed expert parameter {'.'.join(layout.path)!r} cannot use tensor-parallel matrix-axis sharding yet"
+            )
         expert_layout = expert_by_path.get(layout.path)
         if parallelism.expert_parallel and expert_layout is not None:
             if expert_axis_name is None:

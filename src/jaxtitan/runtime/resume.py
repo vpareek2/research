@@ -12,7 +12,7 @@ import numpy as np
 
 from jaxtitan.data import data_pipeline_compat_payload, dataset_manifest_sha256, hf_streaming_compat_payload
 from jaxtitan.errors import ContractError
-from jaxtitan.models.execution import expert_parallel_policy_payload
+from jaxtitan.models.execution import expert_parallel_policy_payload, moe_tensor_parallel_policy_payload
 from jaxtitan.optim import optimizer_policy_summary
 from jaxtitan.services import CheckpointRestore
 from jaxtitan.specs.parallelism import resolve_expert_fsdp_axis, resolve_expert_parallel_axis
@@ -54,14 +54,23 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
                 "enabled": spec.parallelism.tensor_parallel,
                 "axis": "tp" if spec.parallelism.tensor_parallel else None,
                 "axis_size": axis_sizes.get("tp", 1) if spec.parallelism.tensor_parallel else 1,
-                "residual_stream": "replicated_block_boundary",
+                "residual_stream": "sequence_parallel" if spec.parallelism.tensor_parallel else "replicated",
+                "sequence_parallel": {
+                    "enabled": spec.parallelism.tensor_parallel,
+                    "activation_spec": "batch,sequence,tp_hidden" if spec.parallelism.tensor_parallel else None,
+                },
                 "embedding": "replicated",
                 "lm_head": "vocab_parallel" if spec.parallelism.tensor_parallel else "replicated",
                 "loss_parallel": {
                     "enabled": spec.parallelism.tensor_parallel,
-                    "mode": "exact_vocab_sharded_logits" if spec.parallelism.tensor_parallel else None,
+                    "mode": "exact_vocab_parallel" if spec.parallelism.tensor_parallel else None,
                 },
                 "routed_experts": "not_tensor_parallel_sharded",
+                "optimizer": "adamw_only_until_exact_matrix_optimizer" if spec.parallelism.tensor_parallel else None,
+                "moe": moe_tensor_parallel_policy_payload(
+                    tensor_parallel=spec.parallelism.tensor_parallel,
+                    has_moe=spec.model.trinity is not None and spec.model.trinity.moe is not None,
+                ),
             },
             "expert_parallel_policy": expert_parallel_policy_payload(
                 enabled=spec.parallelism.expert_parallel,

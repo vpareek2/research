@@ -21,6 +21,7 @@ from jaxtitan.models.execution import (
     EXPERT_PARALLEL_CAPACITY_POLICY,
     expert_parallel_dispatcher_backend,
     expert_parallel_policy_payload,
+    moe_tensor_parallel_policy_payload,
 )
 from jaxtitan.specs.parallelism import resolve_expert_fsdp_axis, resolve_expert_parallel_axis
 from jaxtitan.optim import optimizer_policy_summary
@@ -259,7 +260,7 @@ def build_runtime_diagnostics(
         "parallelism": parallelism_summary(spec, context),
         "profiling": profiling_runtime_summary(spec),
         "kernels": kernel_plan(spec, device_kind=device_kind),
-        "sharding": None if sharding is None else sharding_policy_summary(sharding),
+        "sharding": None if sharding is None else sharding_policy_summary(sharding, has_moe=_model_has_moe(spec)),
         "data_pipeline": data_pipeline,
         "wandb": None if wandb is None else dict(wandb),
         "device_telemetry": sample_device_telemetry(context.devices),
@@ -317,6 +318,7 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
     axis_sizes = dict(zip(spec.mesh.axis_names, spec.mesh.axis_sizes, strict=True))
     expert_axis = resolve_expert_parallel_axis(spec.parallelism, axis_sizes)
     expert_fsdp_axis = resolve_expert_fsdp_axis(spec.parallelism, axis_sizes)
+    has_moe = spec.model.trinity is not None and spec.model.trinity.moe is not None
     return _normalize(
         {
             "schema_version": 1,
@@ -327,14 +329,23 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
                 "enabled": spec.parallelism.tensor_parallel,
                 "axis": "tp" if spec.parallelism.tensor_parallel else None,
                 "axis_size": axis_sizes.get("tp", 1) if spec.parallelism.tensor_parallel else 1,
-                "residual_stream": "replicated_block_boundary",
+                "residual_stream": "sequence_parallel" if spec.parallelism.tensor_parallel else "replicated",
+                "sequence_parallel": {
+                    "enabled": spec.parallelism.tensor_parallel,
+                    "activation_spec": "batch,sequence,tp_hidden" if spec.parallelism.tensor_parallel else None,
+                },
                 "embedding": "replicated",
                 "lm_head": "vocab_parallel" if spec.parallelism.tensor_parallel else "replicated",
                 "loss_parallel": {
                     "enabled": spec.parallelism.tensor_parallel,
-                    "mode": "exact_vocab_sharded_logits" if spec.parallelism.tensor_parallel else None,
+                    "mode": "exact_vocab_parallel" if spec.parallelism.tensor_parallel else None,
                 },
                 "routed_experts": "not_tensor_parallel_sharded",
+                "optimizer": "adamw_only_until_exact_matrix_optimizer" if spec.parallelism.tensor_parallel else None,
+                "moe": moe_tensor_parallel_policy_payload(
+                    tensor_parallel=spec.parallelism.tensor_parallel,
+                    has_moe=has_moe,
+                ),
             },
             "expert_parallel_policy": expert_parallel_policy_payload(
                 enabled=spec.parallelism.expert_parallel,
@@ -395,7 +406,7 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
     )
 
 
-def sharding_policy_summary(plan: Any) -> dict[str, Any]:
+def sharding_policy_summary(plan: Any, *, has_moe: bool = False) -> dict[str, Any]:
     """Summarize intended shardings without dumping large trees."""
 
     replicated = _sharding_summary(plan.replicated)
@@ -452,14 +463,23 @@ def sharding_policy_summary(plan: Any) -> dict[str, Any]:
                     "enabled": True,
                     "axis": plan.tensor_parallel_axis,
                     "axis_size": plan.tensor_parallel_axis_size,
-                    "residual_stream": "replicated_block_boundary",
+                    "residual_stream": "sequence_parallel",
+                    "sequence_parallel": {
+                        "enabled": True,
+                        "activation_spec": "batch,sequence,tp_hidden",
+                    },
                     "embedding": "replicated",
                     "lm_head": "vocab_parallel",
                     "loss_parallel": {
                         "enabled": True,
-                        "mode": "exact_vocab_sharded_logits",
+                        "mode": "exact_vocab_parallel",
                     },
                     "routed_experts": "not_tensor_parallel_sharded",
+                    "optimizer": "adamw_only_until_exact_matrix_optimizer",
+                    "moe": moe_tensor_parallel_policy_payload(
+                        tensor_parallel=True,
+                        has_moe=has_moe,
+                    ),
                 },
                 "kv_cache": None,
             },
@@ -679,6 +699,11 @@ def _moe_num_experts(spec: RunSpec) -> int | None:
     if trinity is None or trinity.moe is None:
         return None
     return trinity.moe.num_experts
+
+
+def _model_has_moe(spec: RunSpec) -> bool:
+    trinity = spec.model.trinity
+    return trinity is not None and trinity.moe is not None
 
 
 def _telemetry_fields(telemetry: Mapping[str, Any]) -> dict[str, Any]:

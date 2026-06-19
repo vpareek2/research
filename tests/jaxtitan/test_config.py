@@ -615,6 +615,19 @@ def test_load_config_rejects_tensor_parallel_non_divisible_vocab(tmp_path: Path)
         load_config(config_path)
 
 
+def test_load_config_rejects_tensor_parallel_non_divisible_sequence_length(tmp_path: Path) -> None:
+    config_path = tmp_path / "tp-bad-seq.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace("seq_len = 64", "seq_len = 62")
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "tp"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 4]")
+        + "\n[parallelism]\ntensor_parallel = true\n"
+    )
+
+    with pytest.raises(ConfigError, match="training.seq_len"):
+        load_config(config_path)
+
+
 def test_load_config_rejects_muon_with_tensor_parallel(tmp_path: Path) -> None:
     config_path = tmp_path / "tp-muon.toml"
     config_path.write_text(
@@ -626,6 +639,66 @@ def test_load_config_rejects_muon_with_tensor_parallel(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="muon"):
         load_config(config_path)
+
+
+def test_load_config_accepts_trinity_moe_with_tensor_parallel_adamw(tmp_path: Path) -> None:
+    config_path = tmp_path / "tp-moe.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "tp"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 2]")
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 8
+top_k = 2
+num_shared_experts = 1
+
+[parallelism]
+tensor_parallel = true
+"""
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.model.name == "trinity"
+    assert spec.model.trinity is not None and spec.model.trinity.moe is not None
+    assert spec.parallelism.tensor_parallel is True
+    assert spec.optimizer.name == "adamw"
+
+
+def test_load_config_accepts_trinity_moe_with_tensor_and_expert_parallel(tmp_path: Path) -> None:
+    config_path = tmp_path / "tp-ep-moe.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace('name = "decoder"', 'name = "trinity"')
+        .replace('axis_names = ["data"]', 'axis_names = ["data", "tp", "ep"]')
+        .replace("axis_sizes = [1]", "axis_sizes = [1, 2, 2]")
+        + """
+[model.trinity]
+initial_dense_layers = 1
+local_window = 32
+local_layers_per_global = 3
+
+[model.trinity.moe]
+num_experts = 8
+top_k = 2
+num_shared_experts = 1
+
+[parallelism]
+tensor_parallel = true
+expert_parallel = true
+"""
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.parallelism.tensor_parallel is True
+    assert spec.parallelism.expert_parallel is True
+    assert spec.mesh.axis_names == ("data", "tp", "ep")
 
 
 def test_load_config_accepts_expert_parallelism_with_ep_axis(tmp_path: Path) -> None:

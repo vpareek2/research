@@ -19,7 +19,7 @@ from jaxtitan.mesh import (
     replicated_shardings_like,
     require_single_process_runtime,
 )
-from jaxtitan.models import build_model
+from jaxtitan.models import ParamLayout, build_model
 from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec
 from jaxtitan.specs.parallelism import ParallelismSpec
@@ -332,6 +332,110 @@ def test_expert_fsdp_sharding_plan_maps_routed_experts_to_ep_and_expert_fsdp_axe
     assert by_tag["moe_shared_gate"].spec == P(None, "fsdp")
     assert by_tag["moe_router"].spec == P()
     assert by_tag["moe_expert_bias"].spec == P()
+
+
+def test_tensor_parallel_moe_sharding_plan_shards_shared_not_routed_experts() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_spec(
+            name="trinity",
+            num_layers=2,
+            trinity={
+                "initial_dense_layers": 1,
+                "local_window": 8,
+                "local_layers_per_global": 3,
+                "moe": {"num_experts": 4, "top_k": 2, "num_shared_experts": 1},
+            },
+        ),
+        seed=0,
+    )
+    context = build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(2, 2)))
+
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(mode="ddp", tensor_parallel=True),
+        param_layouts=built.param_layouts,
+        expert_layouts=built.expert_layouts,
+    )
+
+    by_tag = {layout.tag: plan.param_shardings[layout.path] for layout in built.param_layouts}
+    assert by_tag["moe_gate"].spec == P()
+    assert by_tag["moe_up"].spec == P()
+    assert by_tag["moe_down"].spec == P()
+    assert by_tag["moe_shared_gate"].spec == P(None, "tp")
+    assert by_tag["moe_shared_up"].spec == P(None, "tp")
+    assert by_tag["moe_shared_down"].spec == P("tp", None)
+    assert by_tag["attention_q"].spec == P(None, "tp")
+
+
+def test_tensor_parallel_ep_moe_sharding_plan_keeps_routed_experts_on_expert_axis() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_spec(
+            name="trinity",
+            num_layers=2,
+            trinity={
+                "initial_dense_layers": 1,
+                "local_window": 8,
+                "local_layers_per_global": 3,
+                "moe": {"num_experts": 4, "top_k": 2, "num_shared_experts": 1},
+            },
+        ),
+        seed=0,
+    )
+    context = build_mesh_context(MeshSpec(axis_names=("data", "tp", "ep"), axis_sizes=(1, 2, 2)))
+
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(mode="ddp", tensor_parallel=True, expert_parallel=True),
+        param_layouts=built.param_layouts,
+        expert_layouts=built.expert_layouts,
+    )
+
+    by_tag = {layout.tag: plan.param_shardings[layout.path] for layout in built.param_layouts}
+    assert by_tag["moe_gate"].spec == P("ep", None, None)
+    assert by_tag["moe_up"].spec == P("ep", None, None)
+    assert by_tag["moe_down"].spec == P("ep", None, None)
+    assert by_tag["moe_shared_gate"].spec == P(None, "tp")
+    assert by_tag["moe_shared_down"].spec == P("tp", None)
+    assert by_tag["attention_q"].spec == P(None, "tp")
+
+
+def test_sharding_plan_rejects_routed_expert_tensor_parallel_layout() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_spec(
+            name="trinity",
+            num_layers=2,
+            trinity={
+                "initial_dense_layers": 1,
+                "local_window": 8,
+                "local_layers_per_global": 3,
+                "moe": {"num_experts": 4, "top_k": 2},
+            },
+        ),
+        seed=0,
+    )
+    bad_layouts = tuple(
+        ParamLayout(
+            path=layout.path,
+            tag=layout.tag,
+            shape=layout.shape,
+            logical_axes=layout.logical_axes,
+            fsdp_axis=layout.fsdp_axis,
+            tp_axis=2 if layout.tag == "moe_gate" else layout.tp_axis,
+        )
+        for layout in built.param_layouts
+    )
+    context = build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(2, 2)))
+
+    with pytest.raises(ContractError, match="routed expert parameter"):
+        build_sharding_plan(
+            context,
+            parallelism=ParallelismSpec(tensor_parallel=True),
+            param_layouts=bad_layouts,
+            expert_layouts=built.expert_layouts,
+        )
 
 
 def test_ep_sharding_plan_rejects_non_divisible_expert_axis() -> None:

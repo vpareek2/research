@@ -49,7 +49,6 @@ Observed result:
 
 Remaining before TP is complete:
 
-- cloud validation on real GPU collectives;
 - sequence parallelism to reduce activation replication;
 - expert tensor parallelism for routed rank-3 expert matrices;
 - TP-aware Muon/Dion policy or explicit long-term AdamW-only policy;
@@ -58,5 +57,7 @@ Remaining before TP is complete:
 
 Next action:
 
-- Run cloud TP smoke configs once cloud GPUs are available. Record run dirs,
-  inspect output, profiling metadata, and checkpoint eval/sample results here.
+- Finish the local TP semantic pieces before cloud validation. Cloud validation
+  is tracked in `runbook/streams/cloud_validation_queue.md` and is blocked until
+  TP plus distributed Muon/routed-expert optimizer policy are ready enough to
+  validate as a coherent stack.

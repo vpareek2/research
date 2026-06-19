@@ -15,7 +15,7 @@ from jaxtitan.models.components.attention import (
 from jaxtitan.models.components.ffn import DecoderSwiGLU
 from jaxtitan.models.components.moe import SparseMoE
 from jaxtitan.models.components.norm import build_rms_norm
-from jaxtitan.models.execution import ModelExecutionContext
+from jaxtitan.models.execution import ModelExecutionContext, sequence_parallel_activation
 from jaxtitan.specs.model import ModelSpec, TrinityMoeSpec
 
 
@@ -34,9 +34,11 @@ class DecoderBlock(nnx.Module):
         context: FullAttentionContext,
         execution: ModelExecutionContext | None = None,
     ) -> jax.Array:
+        x = sequence_parallel_activation(x, execution)
         x = x + self.attn(self.pre_norm(x), context, execution=execution)
+        x = sequence_parallel_activation(x, execution)
         x = x + self.mlp(self.post_norm(x), execution=execution)
-        return x
+        return sequence_parallel_activation(x, execution)
 
     def prefill(
         self,
@@ -115,9 +117,11 @@ class TrinityDenseBlock(nnx.Module):
         context: FullAttentionContext,
         execution: ModelExecutionContext | None = None,
     ) -> jax.Array:
+        x = sequence_parallel_activation(x, execution)
         x = x + self.attn_post_norm(self.attn(self.attn_pre_norm(x), context, execution=execution))
+        x = sequence_parallel_activation(x, execution)
         x = x + self.ffn_post_norm(self.mlp(self.ffn_pre_norm(x), execution=execution))
-        return x
+        return sequence_parallel_activation(x, execution)
 
     def prefill(
         self,
@@ -202,7 +206,9 @@ class TrinityMoEBlock(nnx.Module):
         *,
         execution: ModelExecutionContext | None = None,
     ) -> tuple[jax.Array, tuple[Any, ...], tuple[Any, ...]]:
+        x = sequence_parallel_activation(x, execution)
         x = x + self.attn_post_norm(self.attn(self.attn_pre_norm(x), context, execution=execution))
+        x = sequence_parallel_activation(x, execution)
         mlp_out, aux_losses, router_stats = self.mlp.forward_with_output(
             self.ffn_pre_norm(x),
             name=f"layers.{layer_index}.mlp",
@@ -210,7 +216,7 @@ class TrinityMoEBlock(nnx.Module):
             execution=execution,
         )
         x = x + self.ffn_post_norm(mlp_out)
-        return x, aux_losses, router_stats
+        return sequence_parallel_activation(x, execution), aux_losses, router_stats
 
     def prefill(
         self,

@@ -7,6 +7,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from jaxtitan.errors import ContractError
 from jaxtitan.models import ModelExecutionContext, ModelOutput, apply_model, apply_model_output, build_model, count_parameters, dtype_from_name
+from jaxtitan.models.execution import sequence_parallel_activation
 from jaxtitan.models.components import (
     AllToAllExpertDispatcher,
     DecoderBlock,
@@ -726,6 +727,19 @@ def test_apply_model_output_uses_tensor_parallel_context() -> None:
     assert getattr(actual.logits, "sharding", None).spec == P("data", None, "tp")
 
 
+def test_sequence_parallel_activation_uses_sequence_axis() -> None:
+    mesh = Mesh(np.asarray(jax.devices()[:2], dtype=object).reshape((1, 2)), ("data", "tp"))
+    x = jax.device_put(
+        jnp.arange(2 * 8 * 4, dtype=jnp.float32).reshape(2, 8, 4),
+        NamedSharding(mesh, P("data", None, None)),
+    )
+
+    actual = sequence_parallel_activation(x, ModelExecutionContext(tensor_parallel_mesh=mesh))
+
+    assert getattr(actual, "sharding", None).spec == P("data", "tp", None)
+    assert jnp.allclose(actual, x)
+
+
 def test_trinity_apply_model_output_uses_vocab_parallel_lm_head() -> None:
     mesh = Mesh(np.asarray(jax.devices()[:2], dtype=object).reshape((1, 2)), ("data", "tp"))
     result = build_model(_tiny_trinity_spec(compute_dtype="float32"), seed=0)
@@ -905,9 +919,13 @@ def test_trinity_moe_param_layouts_leave_sparse_experts_replicated() -> None:
 
     for tag in ("moe_router", "moe_expert_bias", "moe_gate", "moe_up", "moe_down"):
         assert layouts[tag].fsdp_axis is None
+        assert layouts[tag].tp_axis is None
     assert layouts["moe_shared_gate"].fsdp_axis == 1
     assert layouts["moe_shared_up"].fsdp_axis == 1
     assert layouts["moe_shared_down"].fsdp_axis == 0
+    assert layouts["moe_shared_gate"].tp_axis == 1
+    assert layouts["moe_shared_up"].tp_axis == 1
+    assert layouts["moe_shared_down"].tp_axis == 0
     expert_layouts = {item.tag: item for item in result.expert_layouts}
     assert set(expert_layouts) == {"moe_gate", "moe_up", "moe_down"}
     for tag in ("moe_gate", "moe_up", "moe_down"):

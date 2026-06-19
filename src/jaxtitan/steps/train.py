@@ -11,12 +11,12 @@ from jaxtitan.errors import ContractError
 from jaxtitan.metrics import StepMetrics
 from jaxtitan.mesh import ShardingPlan, gradient_shardings_like, replicated_shardings_like
 from jaxtitan.models import apply_model_output
-from jaxtitan.models.execution import ModelExecutionContext
+from jaxtitan.models.execution import ModelExecutionContext, feature_parallel_activation
 from jaxtitan.optim import OptimizerBuildResult, OptimizerTransform
 from jaxtitan.specs.model import MoeBalanceSpec
 from jaxtitan.specs.run import TrainingLossSpec
 from jaxtitan.state import RngState, TrainState
-from jaxtitan.steps.eval import causal_lm_loss
+from jaxtitan.steps.eval import tensor_parallel_causal_lm_loss
 from jaxtitan.steps.moe_balance import (
     apply_moe_balance_update,
     initialize_moe_balance_state,
@@ -114,10 +114,10 @@ def make_train_step(
                     if execution is None
                     else apply_model_output(graph, loss_params, micro_input_ids, execution=execution)
                 )
-                loss = causal_lm_loss(output.logits, micro_target_ids, micro_loss_mask)
+                loss = tensor_parallel_causal_lm_loss(output.logits, micro_target_ids, micro_loss_mask, execution)
                 aux_loss = _aux_loss_value(output.aux_losses)
                 moe_aux_loss = _aux_loss_value(output.aux_losses, name_prefix="moe_")
-                z_loss_sum = _z_loss_sum(output.logits, micro_loss_mask) * jnp.asarray(
+                z_loss_sum = _z_loss_sum(output.logits, micro_loss_mask, execution) * jnp.asarray(
                     z_loss_weight,
                     dtype=jnp.float32,
                 )
@@ -556,7 +556,9 @@ def _aux_loss_value(aux_losses: Any, *, name_prefix: str | None = None):
     return total
 
 
-def _z_loss_sum(logits: Any, loss_mask: Any):
+def _z_loss_sum(logits: Any, loss_mask: Any, execution: ModelExecutionContext | None = None):
+    if execution is not None and execution.tensor_parallel_enabled:
+        logits = feature_parallel_activation(logits, execution)
     log_z = jax.nn.logsumexp(jnp.asarray(logits, dtype=jnp.float32), axis=-1)
     mask = jnp.asarray(loss_mask, dtype=jnp.bool_)
     return jnp.sum(jnp.where(mask, jnp.square(log_z), 0.0))

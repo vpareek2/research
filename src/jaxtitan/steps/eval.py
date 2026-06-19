@@ -12,7 +12,7 @@ from jaxtitan.errors import ContractError
 from jaxtitan.metrics import EvalMetrics
 from jaxtitan.mesh import ShardingPlan, replicated_shardings_like
 from jaxtitan.models import apply_model_output
-from jaxtitan.models.execution import ModelExecutionContext
+from jaxtitan.models.execution import ModelExecutionContext, feature_parallel_activation
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +35,20 @@ def causal_lm_loss(logits: Any, target_ids: Any, loss_mask: Any) -> LossOutput:
     loss_sum = jnp.where(valid, per_token_loss, 0.0).sum()
     token_count = valid.sum()
     return LossOutput(loss=loss_sum / token_count, loss_sum=loss_sum, token_count=token_count)
+
+
+def tensor_parallel_causal_lm_loss(
+    logits: Any,
+    target_ids: Any,
+    loss_mask: Any,
+    execution: ModelExecutionContext | None,
+) -> LossOutput:
+    """Compute exact causal LM loss from vocab-sharded logical logits."""
+
+    if execution is None or not execution.tensor_parallel_enabled:
+        return causal_lm_loss(logits, target_ids, loss_mask)
+    logits = feature_parallel_activation(logits, execution)
+    return causal_lm_loss(logits, target_ids, loss_mask)
 
 
 def eval_step(graph: Any, state: Any, batch: Batch) -> EvalMetrics:
@@ -73,7 +87,7 @@ def make_eval_step(
             if execution is None
             else apply_model_output(graph, state, input_ids, execution=execution)
         )
-        loss = causal_lm_loss(output.logits, target_ids, loss_mask)
+        loss = tensor_parallel_causal_lm_loss(output.logits, target_ids, loss_mask, execution)
         return loss.loss_sum, loss.token_count
 
     _compiled = jax.jit(_compiled_impl, in_shardings=in_shardings, out_shardings=out_shardings)

@@ -48,6 +48,7 @@ def validate_run_spec(spec: RunSpec) -> None:
             ("model.vocab_size", spec.model.vocab_size),
             ("model.num_heads", spec.model.num_heads),
             ("model.n_kv_heads", spec.model.n_kv_heads),
+            ("training.seq_len", spec.training.seq_len),
         ):
             if value % tp_axis_size != 0:
                 raise ConfigError(f"{field_name} ({value}) must be divisible by tp axis size ({tp_axis_size})")

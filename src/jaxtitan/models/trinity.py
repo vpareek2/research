@@ -14,7 +14,7 @@ from jaxtitan.models.components.dtypes import dtype_from_name
 from jaxtitan.models.components.init import truncated_normal_init
 from jaxtitan.models.components.norm import build_rms_norm
 from jaxtitan.models.components.position import precompute_rope
-from jaxtitan.models.execution import ModelExecutionContext, apply_layer, vocab_parallel_lm_head
+from jaxtitan.models.execution import ModelExecutionContext, apply_layer, sequence_parallel_activation, vocab_parallel_lm_head
 from jaxtitan.models.output import ModelOutput
 from jaxtitan.specs.model import ModelSpec, TrinitySpec
 
@@ -74,7 +74,7 @@ class TrinityModel(nnx.Module):
         if seq_len > self.spec.max_seq_len:
             raise ContractError(f"input sequence length {seq_len} exceeds model.max_seq_len={self.spec.max_seq_len}")
 
-        x = self._embed(input_ids)
+        x = sequence_parallel_activation(self._embed(input_ids), execution)
         cos, sin = precompute_rope(
             seq_len=seq_len,
             head_dim=self.spec.hidden_size // self.spec.num_heads,
@@ -108,7 +108,7 @@ class TrinityModel(nnx.Module):
 
                 x = apply_layer(layer_call, x, context, remat=self.spec.remat)
         return ModelOutput(
-            logits=vocab_parallel_lm_head(self.lm_head, self.norm(x), execution),
+            logits=vocab_parallel_lm_head(self.lm_head, self.norm(sequence_parallel_activation(x, execution)), execution),
             aux_losses=tuple(aux_losses),
             router_stats=tuple(router_stats),
         )

@@ -453,16 +453,71 @@ def test_run_preflight_reports_tensor_parallel_policy(
     assert payload["parallelism"]["tensor_parallel"] is True
     assert payload["parallelism"]["execution_mode"] == "replicated_data_parallel+tp"
     assert payload["parallelism"]["tensor_parallel_policy"]["axis_size"] == 2
+    assert payload["parallelism"]["tensor_parallel_policy"]["residual_stream"] == "sequence_parallel"
+    assert payload["parallelism"]["tensor_parallel_policy"]["sequence_parallel"] == {
+        "enabled": True,
+        "activation_spec": "batch,sequence,tp_hidden",
+    }
     assert payload["parallelism"]["tensor_parallel_policy"]["lm_head"] == "vocab_parallel"
     assert payload["parallelism"]["tensor_parallel_policy"]["loss_parallel"] == {
         "enabled": True,
-        "mode": "exact_vocab_sharded_logits",
+        "mode": "exact_vocab_parallel",
+    }
+    assert payload["parallelism"]["tensor_parallel_policy"]["optimizer"] == "adamw_only_until_exact_matrix_optimizer"
+    assert payload["parallelism"]["tensor_parallel_policy"]["moe"] == {
+        "active": False,
+        "shared_experts": None,
+        "routed_experts": None,
+        "routed_expert_tensor_parallel": None,
+        "optimizer": None,
     }
     assert payload["parallelism"]["mesh"]["tp_axis_size"] == 2
     assert payload["sharding"]["model_state"]["tp_sharded_leaves"] > 0
     assert payload["training"]["compile"] == "passed"
     assert "mode=replicated_data_parallel+tp" in text
     assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_reports_moe_tensor_parallel_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("tp-moe-preflight", shard_token_groups=(tuple(range(0, 96)),), train_tokens=72)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            axis_names=("data", "tp"),
+            axis_sizes=(2, 2),
+            tensor_parallel=True,
+            model_name="trinity",
+            trinity=True,
+            trinity_moe=True,
+            hidden_size=8,
+            intermediate_size=16,
+            num_layers=2,
+            num_heads=2,
+            n_kv_heads=2,
+            global_batch_size=4,
+            target_tokens=16,
+        )
+    )
+
+    report = run_preflight(config_path)
+    payload = report.payload
+
+    assert payload["parallelism"]["tensor_parallel_policy"]["moe"] == {
+        "active": True,
+        "shared_experts": "dense_tensor_parallel",
+        "routed_experts": "expert_axis_or_replicated_not_tensor_parallel",
+        "routed_expert_tensor_parallel": "unsupported_until_expert_tp_optimizer",
+        "optimizer": "adamw_only_under_tp_until_distributed_muon",
+    }
+    assert payload["sharding"]["reserved"]["tp"]["moe"]["active"] is True
+    assert payload["training"]["compile"] == "passed"
 
 
 def test_run_preflight_reports_expert_parallel_policy(
