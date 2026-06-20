@@ -1007,6 +1007,85 @@ def test_tensor_parallel_train_step_matches_replicated_global_batch() -> None:
     assert _trees_close(next_tp.model, next_one.model)
 
 
+def test_tensor_parallel_muon_train_step_matches_replicated_global_batch() -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
+
+    one_context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(1,)))
+    one_plan = build_sharding_plan(one_context)
+    one_model = place_replicated(built.state, one_plan)
+    one_optimizer = _optimizer(one_model, built.metadata, optimizer_name="muon")
+    one_state = initialize_train_state(one_model, one_optimizer.transform, seed=1)
+    one_step = make_train_step(built.graph, one_optimizer, sharding=one_plan, state_template=one_state)
+    next_one, metrics_one = one_step(one_state, place_batch(batch, one_plan))
+
+    tp_context = build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(2, 2)))
+    tp_plan = build_sharding_plan(
+        tp_context,
+        parallelism=ParallelismSpec(tensor_parallel=True),
+        param_layouts=built.param_layouts,
+    )
+    tp_model = place_model_state(built.state, tp_plan)
+    tp_optimizer = _optimizer(tp_model, built.metadata, optimizer_name="muon")
+    tp_state = initialize_train_state(tp_model, tp_optimizer.transform, seed=1)
+    tp_step = make_train_step(built.graph, tp_optimizer, sharding=tp_plan, state_template=tp_state)
+    next_tp, metrics_tp = tp_step(tp_state, place_batch(batch, tp_plan))
+
+    assert {assignment.backend for assignment in tp_optimizer.route_assignments} == {"adamw", "dist_muon_exact"}
+    assert _scalar_int(metrics_tp.token_count) == _scalar_int(metrics_one.token_count) == 16
+    assert np.allclose(
+        np.asarray(jax.device_get(metrics_tp.loss_sum)),
+        np.asarray(jax.device_get(metrics_one.loss_sum)),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert _trees_close(next_tp.model, next_one.model)
+
+
+@pytest.mark.parametrize("mode", ["fsdp", "zero2"])
+def test_fsdp_tensor_parallel_muon_train_step_matches_replicated_global_batch(mode: str) -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
+
+    one_context = build_mesh_context(MeshSpec(axis_names=("data",), axis_sizes=(1,)))
+    one_plan = build_sharding_plan(one_context)
+    one_model = place_replicated(built.state, one_plan)
+    one_optimizer = _optimizer(one_model, built.metadata, optimizer_name="muon")
+    one_state = initialize_train_state(one_model, one_optimizer.transform, seed=1)
+    one_step = make_train_step(built.graph, one_optimizer, sharding=one_plan, state_template=one_state)
+    next_one, metrics_one = one_step(one_state, place_batch(batch, one_plan))
+
+    mixed_context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp", "tp"), axis_sizes=(1, 2, 2)))
+    mixed_plan = build_sharding_plan(
+        mixed_context,
+        parallelism=ParallelismSpec(mode=mode, tensor_parallel=True),
+        param_layouts=built.param_layouts,
+    )
+    mixed_model = place_model_state(built.state, mixed_plan)
+    optimizer_init_model = place_optimizer_init_state(built.state, mixed_plan) if mode == "zero2" else mixed_model
+    mixed_optimizer = _optimizer(optimizer_init_model, built.metadata, optimizer_name="muon")
+    mixed_state = initialize_train_state(
+        mixed_model,
+        mixed_optimizer.transform,
+        seed=1,
+        optimizer_init_model_state=optimizer_init_model,
+    )
+    mixed_step = make_train_step(built.graph, mixed_optimizer, sharding=mixed_plan, state_template=mixed_state)
+    next_mixed, metrics_mixed = mixed_step(mixed_state, place_batch(batch, mixed_plan))
+
+    assert {assignment.backend for assignment in mixed_optimizer.route_assignments} == {"adamw", "dist_muon_exact"}
+    assert _scalar_int(metrics_mixed.token_count) == _scalar_int(metrics_one.token_count) == 16
+    assert np.allclose(
+        np.asarray(jax.device_get(metrics_mixed.loss_sum)),
+        np.asarray(jax.device_get(metrics_one.loss_sum)),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert _trees_close(next_mixed.model, next_one.model, rtol=2e-5, atol=2e-5)
+
+
 def test_context_parallel_train_step_matches_replicated_global_batch() -> None:
     require_fake_devices()
     built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)

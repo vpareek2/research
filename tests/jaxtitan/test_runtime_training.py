@@ -811,6 +811,60 @@ def test_run_training_auto_resolves_sharded_muon_to_dion2(
     assert metadata["compatibility"]["parallelism"]["mode"] == mode
 
 
+def test_run_training_auto_resolves_tensor_parallel_muon_to_exact_distributed_muon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "tp-muon-loop",
+        shard_token_groups=(tuple(range(0, 80)),),
+        train_tokens=65,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _training_config(
+            manifest,
+            target_tokens=16,
+            log_every_steps=1,
+            checkpoint_every_steps=1,
+            optimizer_name="muon",
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=4,
+            n_kv_heads=4,
+            global_batch_size=4,
+            axis_names=("data", "tp"),
+            axis_sizes=(2, 2),
+            tensor_parallel=True,
+        )
+    )
+
+    run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    diagnostics = json.loads((run_dir / "diagnostics" / "runtime.json").read_text())
+    row = _jsonl(run_dir / "metrics" / "train.jsonl")[-1]
+    final = json.loads((run_dir / "summaries" / "final.json").read_text())
+    metadata = json.loads((run_dir / "checkpoints" / "000001" / "metadata" / "metadata").read_text())
+
+    assert diagnostics["optimizer"]["name"] == "muon"
+    assert diagnostics["optimizer"]["route_counts"] == {"adamw": 7, "dist_muon_exact": 7}
+    assert diagnostics["optimizer"]["auto_routing"]["active"] is True
+    assert diagnostics["optimizer"]["dist_muon_exact"]["exact"] is True
+    assert row["optimizer_route_backend_counts"] == {"adamw": 7, "dist_muon_exact": 7}
+    assert final["final_optimizer_route_backend_counts"] == row["optimizer_route_backend_counts"]
+    assert metadata["compatibility"]["optimizer"]["policy"]["auto_routing"] == {
+        "active": True,
+        "muon_sharded_matrix_backend": "dion2",
+        "muon_tp_sharded_matrix_backend": "dist_muon_exact",
+    }
+    assert metadata["compatibility"]["parallelism"]["tensor_parallel"] is True
+    assert metadata["compatibility"]["parallelism"]["tensor_parallel_policy"]["optimizer"] == "muon_routes_to_dist_muon_exact"
+
+
 def test_run_training_with_gradient_accumulation_records_effective_batch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2270,6 +2324,7 @@ def _training_config(
     trinity_moe_balance_name: str | None = None,
     trinity_moe_num_experts: int = 3,
     expert_parallel: bool = False,
+    tensor_parallel: bool = False,
     artifacts_block: str = "",
     profiling_block: str = "",
 ) -> str:
@@ -2365,6 +2420,7 @@ axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 [parallelism]
 mode = "{parallelism_mode}"
 expert_parallel = {str(expert_parallel).lower()}
+tensor_parallel = {str(tensor_parallel).lower()}
 {artifacts_block}
 {profiling_block}
 {eval_block}

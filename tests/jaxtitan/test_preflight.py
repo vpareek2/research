@@ -310,9 +310,99 @@ def test_run_preflight_auto_resolves_sharded_muon_to_dion2(
     assert payload["optimizer"]["policy"]["auto_routing"] == {
         "active": True,
         "muon_sharded_matrix_backend": "dion2",
+        "muon_tp_sharded_matrix_backend": "dist_muon_exact",
     }
     assert payload["optimizer"]["policy"]["dion2"]["fraction"] == 0.25
     assert {route["backend"] for route in payload["optimizer"]["policy"]["routes"]} == {"adamw", "dion2"}
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
+def test_run_preflight_auto_resolves_tensor_parallel_muon_to_exact_distributed_muon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory("tp-muon", shard_token_groups=(tuple(range(0, 80)),), train_tokens=50)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            optimizer_name="muon",
+            axis_names=("data", "tp"),
+            axis_sizes=(2, 2),
+            tensor_parallel=True,
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=4,
+            n_kv_heads=4,
+            global_batch_size=4,
+            target_tokens=16,
+        )
+    )
+
+    report = run_preflight(config_path)
+    payload = report.payload
+
+    assert payload["optimizer"]["name"] == "muon"
+    assert payload["optimizer"]["policy"]["route_counts"] == {"adamw": 7, "dist_muon_exact": 7}
+    assert payload["optimizer"]["policy"]["auto_routing"] == {
+        "active": True,
+        "muon_sharded_matrix_backend": "dion2",
+        "muon_tp_sharded_matrix_backend": "dist_muon_exact",
+    }
+    assert payload["optimizer"]["policy"]["dist_muon_exact"]["exact"] is True
+    assert {route["backend"] for route in payload["optimizer"]["policy"]["routes"]} == {
+        "adamw",
+        "dist_muon_exact",
+    }
+    assert not (tmp_path / "runs" / "loop").exists()
+
+
+@pytest.mark.parametrize("mode", ["fsdp", "zero2"])
+def test_run_preflight_auto_resolves_fsdp_tensor_parallel_muon_to_exact_distributed_muon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+    mode: str,
+) -> None:
+    require_fake_devices()
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(f"{mode}-tp-muon", shard_token_groups=(tuple(range(0, 80)),), train_tokens=50)
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        _preflight_config(
+            manifest,
+            optimizer_name="muon",
+            axis_names=("data", "fsdp", "tp"),
+            axis_sizes=(1, 2, 2),
+            parallelism_mode=mode,
+            tensor_parallel=True,
+            hidden_size=16,
+            intermediate_size=32,
+            num_heads=4,
+            n_kv_heads=4,
+            global_batch_size=4,
+            target_tokens=16,
+        )
+    )
+
+    report = run_preflight(config_path)
+    payload = report.payload
+
+    assert payload["parallelism"]["mode"] == mode
+    assert payload["parallelism"]["tensor_parallel"] is True
+    assert payload["optimizer"]["policy"]["route_counts"] == {"adamw": 7, "dist_muon_exact": 7}
+    assert payload["optimizer"]["policy"]["auto_routing"] == {
+        "active": True,
+        "muon_sharded_matrix_backend": "dion2",
+        "muon_tp_sharded_matrix_backend": "dist_muon_exact",
+    }
+    assert {route["backend"] for route in payload["optimizer"]["policy"]["routes"]} == {
+        "adamw",
+        "dist_muon_exact",
+    }
     assert not (tmp_path / "runs" / "loop").exists()
 
 
@@ -463,7 +553,7 @@ def test_run_preflight_reports_tensor_parallel_policy(
         "enabled": True,
         "mode": "exact_vocab_parallel",
     }
-    assert payload["parallelism"]["tensor_parallel_policy"]["optimizer"] == "adamw_only_until_exact_matrix_optimizer"
+    assert payload["parallelism"]["tensor_parallel_policy"]["optimizer"] == "muon_routes_to_dist_muon_exact"
     assert payload["parallelism"]["tensor_parallel_policy"]["moe"] == {
         "active": False,
         "shared_experts": None,
@@ -558,7 +648,7 @@ def test_run_preflight_reports_moe_tensor_parallel_policy(
         "shared_experts": "dense_tensor_parallel",
         "routed_experts": "expert_axis_or_replicated_not_tensor_parallel",
         "routed_expert_tensor_parallel": "unsupported_until_expert_tp_optimizer",
-        "optimizer": "adamw_only_under_tp_until_distributed_muon",
+        "optimizer": "muon_routes_to_dist_muon_exact",
     }
     assert payload["sharding"]["reserved"]["tp"]["moe"]["active"] is True
     assert payload["training"]["compile"] == "passed"

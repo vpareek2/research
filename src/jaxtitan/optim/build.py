@@ -25,7 +25,7 @@ ADAMW_B1 = 0.9
 ADAMW_B2 = 0.999
 ADAMW_EPS = 1e-8
 _SUPPORTED_RUNTIME_BACKENDS = {"adamw", "muon"}
-_INTERNAL_RUNTIME_BACKENDS = {"dion2"}
+_INTERNAL_RUNTIME_BACKENDS = {"dion2", "dist_muon_exact"}
 # Next optimizer backends to evaluate after Muon has run artifacts: Aurora, Scion, and SOAP.
 _MUON_MATRIX_TAGS = frozenset(
     {
@@ -206,6 +206,7 @@ def optimizer_policy_summary(
     *,
     parallelism_mode: str | None = None,
     fsdp_axis_size: int | None = None,
+    tp_axis_size: int | None = None,
 ) -> dict[str, Any]:
     """Return a stable optimizer policy payload for artifacts and compatibility checks."""
 
@@ -215,6 +216,7 @@ def optimizer_policy_summary(
         assignments=assignments,
         parallelism_mode=parallelism_mode,
         fsdp_axis_size=fsdp_axis_size,
+        tp_axis_size=tp_axis_size,
     )
     payload = {
         "name": spec.name,
@@ -235,7 +237,7 @@ def optimizer_policy_summary(
         "muon": {
             **muon_policy_constants(),
             "distributed_policy": "replicated_or_auto_dion2_when_sharded",
-            "distributed_matrix_update": "auto_dion2",
+            "distributed_matrix_update": "auto_dion2_or_dist_muon_exact",
             "rank3_expert_policy": "per_expert_full_matrix_when_complete_local",
             "rank3_split_matrix_policy": "unsupported_until_explicit_distributed_expert_matrix_optimizer",
             "hidden_matrix_tags": sorted(_MUON_MATRIX_TAGS),
@@ -247,8 +249,16 @@ def optimizer_policy_summary(
             "distributed_policy": "fsdp_sharded_matrix",
             "auto_selected_for": "sharded_muon_matrix_routes",
         },
+        "dist_muon_exact": {
+            "distributed_policy": "global_matrix_exact",
+            "exact": True,
+            "approximation": "none",
+            "performance": "reference_global_array",
+            "auto_selected_for": "tp_sharded_muon_matrix_routes",
+        },
         "auto_routing": {
             "muon_sharded_matrix_backend": "dion2",
+            "muon_tp_sharded_matrix_backend": "dist_muon_exact",
             "active": auto_routing_active,
         },
         "route_counts": None,
@@ -289,15 +299,18 @@ def _auto_routing_active(
     assignments: tuple[RouteAssignment, ...] | None,
     parallelism_mode: str | None,
     fsdp_axis_size: int | None,
+    tp_axis_size: int | None,
 ) -> bool:
     if assignments is not None:
         return any(assignment.auto_resolved for assignment in assignments)
-    return bool(
+    fsdp_active = bool(
         spec.name == "muon"
         and parallelism_mode in {"zero2", "fsdp"}
         and fsdp_axis_size is not None
         and fsdp_axis_size > 1
     )
+    tp_active = bool(spec.name == "muon" and tp_axis_size is not None and tp_axis_size > 1)
+    return fsdp_active or tp_active
 
 
 def _route_assignments(
@@ -359,8 +372,8 @@ def _distributed_policy_payload(name: str) -> dict[str, str]:
         }
     if name == "muon":
         return {
-            "optimizer_state": "replicated_or_expert_axis_muon_and_sharded_dion2",
-            "gradient_update": "muon_when_complete_matrix_dion2_when_rank2_sharded",
+            "optimizer_state": "replicated_or_expert_axis_muon_sharded_dion2_or_dist_muon_exact",
+            "gradient_update": "muon_when_complete_matrix_dion2_for_fsdp_dist_muon_exact_for_tp",
             "zero2_fsdp": "auto_dion2",
         }
     return {
@@ -377,6 +390,8 @@ def _route_distributed_policy(backend: str) -> str:
         return "complete_matrix_or_per_expert_complete_matrix"
     if backend == "dion2":
         return "fsdp_sharded_matrix"
+    if backend == "dist_muon_exact":
+        return "global_matrix_exact"
     return "unknown"
 
 
@@ -434,6 +449,16 @@ def _muon_primary_transforms(
         assignments,
         lambda assignment: assignment.backend == "dion2" and assignment.matrix_axis == 1 and not assignment.weight_decay,
     )
+    dist_muon_decay_mask = _mask_from_assignments(
+        params,
+        assignments,
+        lambda assignment: assignment.backend == "dist_muon_exact" and assignment.weight_decay,
+    )
+    dist_muon_no_decay_mask = _mask_from_assignments(
+        params,
+        assignments,
+        lambda assignment: assignment.backend == "dist_muon_exact" and not assignment.weight_decay,
+    )
     adamw_mask = _mask_from_assignments(params, assignments, lambda assignment: assignment.backend == "adamw")
     adamw_decay_mask = _mask_from_assignments(
         params,
@@ -488,6 +513,22 @@ def _muon_primary_transforms(
                 mask_compatible_extra_args=True,
             )
         )
+    if _mask_any(dist_muon_decay_mask):
+        transforms.append(
+            optax.masked(
+                muon_transform(schedule, weight_decay=spec.weight_decay),
+                dist_muon_decay_mask,
+                mask_compatible_extra_args=True,
+            )
+        )
+    if _mask_any(dist_muon_no_decay_mask):
+        transforms.append(
+            optax.masked(
+                muon_transform(schedule, weight_decay=0.0),
+                dist_muon_no_decay_mask,
+                mask_compatible_extra_args=True,
+            )
+        )
     if _mask_any(adamw_mask):
         transforms.append(
             optax.masked(
@@ -521,11 +562,9 @@ def _resolve_backend(requested_backend: str, item: ParamMetadata, leaf: Any) -> 
         return _resolve_expert_muon_backend(item, leaf)
     if item.tag not in _MUON_MATRIX_TAGS:
         return requested_backend, None, None
-    if _axis_sharded(leaf, "tp"):
-        raise ContractError(
-            f"Muon matrix route for parameter {'.'.join(item.path)!r} is not supported with tensor-parallel "
-            "sharding yet; use optimizer.name='adamw'"
-        )
+    tp_matrix_axis = _single_matrix_axis(leaf, "tp", item.path)
+    if tp_matrix_axis is not None:
+        return "dist_muon_exact", tp_matrix_axis, "tp_sharded_matrix_exact_muon"
     matrix_axis = _fsdp_matrix_axis(leaf)
     if matrix_axis is None:
         return "muon", None, None
@@ -556,8 +595,8 @@ def _validate_route(item: ParamMetadata, backend: str) -> None:
                 f"expert matrix stack, got shape {item.shape}"
             )
         return
-    if backend in {"muon", "dion2"} and len(item.shape) != 2:
-        display_backend = {"muon": "Muon", "dion2": "Dion2"}.get(backend, backend)
+    if backend in {"muon", "dion2", "dist_muon_exact"} and len(item.shape) != 2:
+        display_backend = {"muon": "Muon", "dion2": "Dion2", "dist_muon_exact": "Distributed Muon"}.get(backend, backend)
         raise ContractError(
             f"{display_backend} route for parameter {'.'.join(item.path)!r} requires a rank-2 matrix, "
             f"got shape {item.shape}"
@@ -611,15 +650,20 @@ def _params_by_metadata_path(params: PyTree) -> dict[tuple[str, ...], Any]:
 
 
 def _fsdp_matrix_axis(leaf: Any) -> int | None:
+    return _single_matrix_axis(leaf, "fsdp")
+
+
+def _single_matrix_axis(leaf: Any, axis_name: str, path: tuple[str, ...] | None = None) -> int | None:
     axes = _partition_axes(leaf)
     if axes is None:
         return None
-    fsdp_axes = [idx for idx, axis in enumerate(axes) if _axis_contains(axis, "fsdp")]
-    if not fsdp_axes:
+    sharded_axes = [idx for idx, axis in enumerate(axes) if _axis_contains(axis, axis_name)]
+    if not sharded_axes:
         return None
-    if len(fsdp_axes) != 1:
-        raise ContractError(f"Muon matrix route expects at most one fsdp-sharded parameter axis, got {axes}")
-    return fsdp_axes[0]
+    if len(sharded_axes) != 1:
+        name = "parameter" if path is None else f"parameter {'.'.join(path)!r}"
+        raise ContractError(f"Muon matrix route for {name} expects at most one {axis_name}-sharded parameter axis, got {axes}")
+    return sharded_axes[0]
 
 
 def _axis_sharded(leaf: Any, axis_name: str) -> bool:

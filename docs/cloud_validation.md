@@ -32,20 +32,26 @@ before distributed optimizer work.
 | `configs/jaxtitan/cloud_4gpu_dense_fsdp_adamw_validation.toml` | dense FSDP AdamW |
 | `configs/jaxtitan/cloud_4gpu_dense_zero2_adamw_validation.toml` | dense ZeRO-2 AdamW |
 | `configs/jaxtitan/cloud_4gpu_dense_tp_adamw_validation.toml` | dense tensor parallelism |
+| `configs/jaxtitan/cloud_4gpu_dense_tp_muon_validation.toml` | dense tensor parallelism with exact-reference Muon |
 | `configs/jaxtitan/cloud_4gpu_dense_cp_adamw_validation.toml` | dense context parallelism |
 | `configs/jaxtitan/cloud_4gpu_dense_tp_cp_adamw_validation.toml` | dense TP+CP composition |
 | `configs/jaxtitan/cloud_4gpu_dense_fsdp_tp_adamw_validation.toml` | dense FSDP+TP composition |
+| `configs/jaxtitan/cloud_4gpu_dense_fsdp_tp_muon_validation.toml` | dense FSDP+TP with exact-reference Muon |
 | `configs/jaxtitan/cloud_4gpu_dense_zero2_tp_adamw_validation.toml` | dense ZeRO-2+TP composition |
+| `configs/jaxtitan/cloud_4gpu_dense_zero2_tp_muon_validation.toml` | dense ZeRO-2+TP with exact-reference Muon |
 | `configs/jaxtitan/cloud_4gpu_trinity_moe_ep_adamw_validation.toml` | Trinity MoE expert parallelism |
 | `configs/jaxtitan/cloud_4gpu_trinity_moe_tp_ep_adamw_validation.toml` | shared-expert TP plus routed-expert EP |
+| `configs/jaxtitan/cloud_4gpu_trinity_moe_tp_ep_muon_validation.toml` | shared-expert TP plus routed-expert EP with Muon intent |
 | `configs/jaxtitan/cloud_4gpu_trinity_moe_cp_ep_adamw_validation.toml` | context parallelism plus routed-expert EP |
 | `configs/jaxtitan/cloud_4gpu_trinity_moe_rdep_adamw_validation.toml` | data-axis RDEP |
 | `configs/jaxtitan/cloud_4gpu_trinity_moe_folded_fsdp_ep_muon_validation.toml` | folded FSDP+EP with Muon intent |
 | `configs/jaxtitan/cloud_4gpu_trinity_moe_product_fsdp_ep_muon_validation.toml` | product-axis FSDP+EP with Muon intent |
 | `configs/jaxtitan/cloud_4gpu_trinity_moe_expert_fsdp_adamw_validation.toml` | EP plus expert-internal FSDP |
 
-TP configs intentionally use AdamW. Current Jaxtitan rejects Muon with tensor
-parallelism until exact distributed matrix-optimizer semantics are implemented.
+TP AdamW configs remain the baseline. Muon under tensor parallelism routes
+rank-2 hidden matrices through the exact reference `dist_muon_exact` backend;
+the TP+Muon configs validate correctness and artifact shape, not representative
+throughput.
 
 Run each config with:
 
@@ -110,12 +116,16 @@ for run in \
   cloud_4gpu_dense_fsdp_adamw_validation \
   cloud_4gpu_dense_zero2_adamw_validation \
   cloud_4gpu_dense_tp_adamw_validation \
+  cloud_4gpu_dense_tp_muon_validation \
   cloud_4gpu_dense_cp_adamw_validation \
   cloud_4gpu_dense_tp_cp_adamw_validation \
   cloud_4gpu_dense_fsdp_tp_adamw_validation \
+  cloud_4gpu_dense_fsdp_tp_muon_validation \
   cloud_4gpu_dense_zero2_tp_adamw_validation \
+  cloud_4gpu_dense_zero2_tp_muon_validation \
   cloud_4gpu_trinity_moe_ep_adamw_validation \
   cloud_4gpu_trinity_moe_tp_ep_adamw_validation \
+  cloud_4gpu_trinity_moe_tp_ep_muon_validation \
   cloud_4gpu_trinity_moe_cp_ep_adamw_validation \
   cloud_4gpu_trinity_moe_rdep_adamw_validation \
   cloud_4gpu_trinity_moe_folded_fsdp_ep_muon_validation \
@@ -252,6 +262,10 @@ For EP configs, additionally check:
 12. `cloud_4gpu_ep_trinity_moe_ddp_muon` when four GPUs are available
 13. `cloud_4gpu_ep_trinity_moe_fsdp_muon` when four GPUs are available
 14. `cloud_4gpu_ep_trinity_moe_efsdp_adamw` when four GPUs are available
+15. `cloud_4gpu_dense_tp_muon_validation`
+16. `cloud_4gpu_dense_fsdp_tp_muon_validation`
+17. `cloud_4gpu_dense_zero2_tp_muon_validation`
+18. `cloud_4gpu_trinity_moe_tp_ep_muon_validation`
 
 Only treat performance numbers as real after a dedicated benchmark run. These
 smokes are for correctness, artifact readability, resume/eval/sample restore,
@@ -271,7 +285,8 @@ A validation run passes only if:
 - Final train/eval losses are finite and no NaNs appear in metrics.
 - Optimizer zero-grad/zero-update groups are zero except expected non-gradient
   state such as `moe_expert_bias`.
-- Route counts match intent: TP configs use AdamW only; FSDP/ZeRO Muon configs
+- Route counts match intent: TP AdamW configs use AdamW only; TP Muon configs
+  route TP-sharded matrix leaves to `dist_muon_exact`; FSDP/ZeRO Muon configs
   auto-route matrix leaves to Dion2; EP Muon configs show routed/shared Muon
   routes where expected.
 - MoE runs emit `moe_router_layers`; dead experts and load CV are recorded but

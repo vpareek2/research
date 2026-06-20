@@ -679,7 +679,7 @@ def test_load_config_rejects_tensor_parallel_non_divisible_sequence_length(tmp_p
         load_config(config_path)
 
 
-def test_load_config_rejects_muon_with_tensor_parallel(tmp_path: Path) -> None:
+def test_load_config_accepts_muon_with_tensor_parallel(tmp_path: Path) -> None:
     config_path = tmp_path / "tp-muon.toml"
     config_path.write_text(
         MINIMAL_CONFIG.replace('name = "adamw"', 'name = "muon"', 1)
@@ -688,8 +688,10 @@ def test_load_config_rejects_muon_with_tensor_parallel(tmp_path: Path) -> None:
         + "\n[parallelism]\ntensor_parallel = true\n"
     )
 
-    with pytest.raises(ConfigError, match="muon"):
-        load_config(config_path)
+    spec = load_config(config_path)
+
+    assert spec.optimizer.name == "muon"
+    assert spec.parallelism.tensor_parallel is True
 
 
 def test_load_config_accepts_trinity_moe_with_tensor_parallel_adamw(tmp_path: Path) -> None:

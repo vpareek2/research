@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import pytest
 
 from jaxtitan.errors import ContractError
-from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_optimizer_init_state
+from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_model_state, place_optimizer_init_state
 from jaxtitan.models import ParamMetadata, build_model
 from jaxtitan.optim import (
     build_lr_schedule,
@@ -255,13 +255,13 @@ def test_optimizer_policy_summary_records_distributed_safety() -> None:
     }
     assert adamw_policy["adamw"]["distributed_policy"] == "elementwise_shard_safe"
     assert muon_policy["distributed_policy"] == {
-        "optimizer_state": "replicated_or_expert_axis_muon_and_sharded_dion2",
-        "gradient_update": "muon_when_complete_matrix_dion2_when_rank2_sharded",
+        "optimizer_state": "replicated_or_expert_axis_muon_sharded_dion2_or_dist_muon_exact",
+        "gradient_update": "muon_when_complete_matrix_dion2_for_fsdp_dist_muon_exact_for_tp",
         "zero2_fsdp": "auto_dion2",
     }
     assert muon_policy["muon"]["newton_schulz_precision"] == "bfloat16"
     assert muon_policy["muon"]["distributed_policy"] == "replicated_or_auto_dion2_when_sharded"
-    assert muon_policy["muon"]["distributed_matrix_update"] == "auto_dion2"
+    assert muon_policy["muon"]["distributed_matrix_update"] == "auto_dion2_or_dist_muon_exact"
     assert muon_policy["muon"]["rank3_expert_policy"] == "per_expert_full_matrix_when_complete_local"
     assert muon_policy["dion2"]["fraction"] == 0.25
     assert muon_policy["auto_routing"]["active"] is False
@@ -336,11 +336,106 @@ def test_sharded_muon_routes_auto_resolve_to_dion2() -> None:
     assert {assignment.backend for assignment in built.route_assignments} == {"adamw", "dion2"}
     assert policy["route_counts"] == {"adamw": 7, "dion2": 7}
     assert policy["auto_routing"]["active"] is True
+    assert policy["auto_routing"]["muon_sharded_matrix_backend"] == "dion2"
+    assert policy["auto_routing"]["muon_tp_sharded_matrix_backend"] == "dist_muon_exact"
     dion2_routes = [assignment for assignment in built.route_assignments if assignment.backend == "dion2"]
     assert {assignment.requested_backend for assignment in dion2_routes} == {"muon"}
     assert {assignment.resolution_reason for assignment in dion2_routes} == {"fsdp_sharded_optimizer_state"}
     assert all(assignment.auto_resolved for assignment in dion2_routes)
     assert {assignment.matrix_axis for assignment in dion2_routes} == {0, 1}
+
+
+def test_tensor_parallel_muon_routes_to_exact_distributed_muon() -> None:
+    require_fake_devices()
+    result = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(1, 4)))
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(tensor_parallel=True),
+        param_layouts=result.param_layouts,
+    )
+    model_state = place_model_state(result.state, plan)
+
+    built = build_optimizer(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.1),
+        model_state,
+        result.metadata,
+    )
+    policy = optimizer_policy_summary(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3)),
+        built.route_assignments,
+    )
+
+    assert {assignment.backend for assignment in built.route_assignments} == {"adamw", "dist_muon_exact"}
+    exact_routes = [assignment for assignment in built.route_assignments if assignment.backend == "dist_muon_exact"]
+    assert {assignment.requested_backend for assignment in exact_routes} == {"muon"}
+    assert {assignment.resolution_reason for assignment in exact_routes} == {"tp_sharded_matrix_exact_muon"}
+    assert all(assignment.auto_resolved for assignment in exact_routes)
+    assert {assignment.matrix_axis for assignment in exact_routes} == {0, 1}
+    assert policy["route_counts"] == {"adamw": 7, "dist_muon_exact": 7}
+    assert policy["dist_muon_exact"] == {
+        "distributed_policy": "global_matrix_exact",
+        "exact": True,
+        "approximation": "none",
+        "performance": "reference_global_array",
+        "auto_selected_for": "tp_sharded_muon_matrix_routes",
+    }
+
+
+@pytest.mark.parametrize("mode", ["fsdp", "zero2"])
+def test_tensor_parallel_muon_takes_precedence_over_fsdp_dion2_route(mode: str) -> None:
+    require_fake_devices()
+    result = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp", "tp"), axis_sizes=(1, 2, 2)))
+    plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(mode=mode, tensor_parallel=True),
+        param_layouts=result.param_layouts,
+    )
+    optimizer_state = place_optimizer_init_state(result.state, plan)
+
+    built = build_optimizer(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.1),
+        optimizer_state,
+        result.metadata,
+    )
+    policy = optimizer_policy_summary(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3)),
+        built.route_assignments,
+        parallelism_mode=mode,
+        fsdp_axis_size=2,
+        tp_axis_size=2,
+    )
+
+    assert {assignment.backend for assignment in built.route_assignments} == {"adamw", "dist_muon_exact"}
+    assert policy["route_counts"] == {"adamw": 7, "dist_muon_exact": 7}
+    assert policy["auto_routing"]["active"] is True
+    exact_routes = [assignment for assignment in built.route_assignments if assignment.backend == "dist_muon_exact"]
+    assert {assignment.resolution_reason for assignment in exact_routes} == {"tp_sharded_matrix_exact_muon"}
+    assert {assignment.matrix_axis for assignment in exact_routes} == {0, 1}
+
+
+def test_exact_distributed_muon_update_matches_replicated_muon_for_tp_shards() -> None:
+    require_fake_devices()
+    full_params = {"w": jnp.arange(24, dtype=jnp.float32).reshape(6, 4) / 10.0}
+    full_grads = {"w": jnp.arange(24, dtype=jnp.float32).reshape(6, 4) / 20.0}
+    metadata = (ParamMetadata(path=("w",), shape=(6, 4), dtype="float32", count=24, tag="attention_q"),)
+    spec = OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.0)
+
+    replicated = build_optimizer(spec, full_params, metadata)
+    replicated_state = replicated.transform.init(full_params)
+    replicated_updates, _ = replicated.transform.update(full_grads, replicated_state, params=full_params)
+
+    context = build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(1, 2)))
+    sharding = jax.sharding.NamedSharding(context.mesh, jax.sharding.PartitionSpec(None, "tp"))
+    sharded_params = {"w": jax.device_put(full_params["w"], sharding)}
+    sharded_grads = {"w": jax.device_put(full_grads["w"], sharding)}
+    distributed = build_optimizer(spec, sharded_params, metadata)
+    distributed_state = distributed.transform.init(sharded_params)
+    distributed_updates, _ = distributed.transform.update(sharded_grads, distributed_state, params=sharded_params)
+
+    assert distributed.route_assignments[0].backend == "dist_muon_exact"
+    assert jnp.allclose(distributed_updates["w"], replicated_updates["w"], rtol=1e-5, atol=1e-5)
 
 
 def test_muon_build_init_and_update_accept_nnx_model_state() -> None:

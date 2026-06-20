@@ -275,6 +275,34 @@ def test_auto_dion2_optimizer_state_round_trips_and_can_continue(tmp_path) -> No
     assert metrics.token_count == 16
 
 
+def test_tensor_parallel_muon_optimizer_state_round_trips_and_can_continue(tmp_path) -> None:
+    require_fake_devices()
+    built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(2, 2)))
+    plan = build_sharding_plan(context, parallelism=ParallelismSpec(tensor_parallel=True), param_layouts=built.param_layouts)
+    model_state = place_model_state(built.state, plan)
+    optimizer = _optimizer(model_state, built.metadata, optimizer_name="muon")
+    state = initialize_train_state(model_state, optimizer.transform, seed=1)
+    step = make_train_step(built.graph, optimizer, sharding=plan, state_template=state, expected_batch_shape=(1, 4, 4))
+    train_state, _metrics = step(state, place_batch(_batch(batch_size=4), plan))
+    dataset_state = _dataset_state(token_offset=16, next_record_index=4)
+    host_state = HostState(dataset=dataset_state, last_checkpoint_step=1, wallclock_start_ns=123, run_id="smoke")
+    service = LocalOrbaxCheckpointService(tmp_path / "run", max_to_keep=2)
+    service.save(1, train_state, dataset_state, host_state, {"step": 1, "optimizer": "muon"})
+
+    template = initialize_train_state(model_state, optimizer.transform, seed=2)
+    restored = service.restore_latest(template)
+    next_state, metrics = step(restored.train_state, place_batch(_batch(offset=16, batch_size=4), plan))
+    service.close()
+
+    assert {assignment.backend for assignment in optimizer.route_assignments} == {"adamw", "dist_muon_exact"}
+    assert restored.metadata["optimizer"] == "muon"
+    assert _trees_equal(restored.train_state.opt_state, train_state.opt_state)
+    assert next_state.step == 2
+    assert next_state.tokens_seen == 32
+    assert metrics.token_count == 16
+
+
 def _advanced_state(built, optimizer):
     state = initialize_train_state(built.state, optimizer.transform, seed=1)
     next_state, _ = make_train_step(built.graph, optimizer)(state, _batch())

@@ -44,7 +44,8 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
             "policy": optimizer_policy_summary(
                 spec.optimizer,
                 parallelism_mode=spec.parallelism.mode,
-                fsdp_axis_size=dict(zip(spec.mesh.axis_names, spec.mesh.axis_sizes, strict=True)).get("fsdp", 1),
+                fsdp_axis_size=axis_sizes.get("fsdp", 1),
+                tp_axis_size=axis_sizes.get("tp", 1),
             ),
         },
         "mesh": _normalize(spec.mesh),
@@ -66,7 +67,7 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
                     "mode": "exact_vocab_parallel" if spec.parallelism.tensor_parallel else None,
                 },
                 "routed_experts": "not_tensor_parallel_sharded",
-                "optimizer": "adamw_only_until_exact_matrix_optimizer" if spec.parallelism.tensor_parallel else None,
+                "optimizer": "muon_routes_to_dist_muon_exact" if spec.parallelism.tensor_parallel else None,
                 "moe": moe_tensor_parallel_policy_payload(
                     tensor_parallel=spec.parallelism.tensor_parallel,
                     has_moe=spec.model.trinity is not None and spec.model.trinity.moe is not None,

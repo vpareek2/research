@@ -351,8 +351,35 @@ def test_resume_compat_marks_sharded_muon_auto_dion2(tmp_path: Path, prepared_da
     assert compat.payload["optimizer"]["policy"]["auto_routing"] == {
         "active": True,
         "muon_sharded_matrix_backend": "dion2",
+        "muon_tp_sharded_matrix_backend": "dist_muon_exact",
     }
     assert compat.payload["optimizer"]["policy"]["dion2"]["orthogonalizer"] == "polar_express"
+
+
+def test_resume_compat_marks_tensor_parallel_muon_exact_route(tmp_path: Path, prepared_dataset_factory) -> None:
+    manifest = _manifest(prepared_dataset_factory, "tp-muon")
+    spec = _runtime_spec(
+        tmp_path,
+        manifest,
+        optimizer_name="muon",
+        axis_names=("data", "tp"),
+        axis_sizes=(2, 2),
+        parallelism_tensor_parallel=True,
+        hidden_size=16,
+        intermediate_size=32,
+        num_heads=4,
+        n_kv_heads=4,
+        global_batch_size=4,
+    )
+    compat = build_resume_compat(spec)
+
+    assert compat.payload["optimizer"]["policy"]["dist_muon_exact"]["exact"] is True
+    assert compat.payload["optimizer"]["policy"]["auto_routing"] == {
+        "active": True,
+        "muon_sharded_matrix_backend": "dion2",
+        "muon_tp_sharded_matrix_backend": "dist_muon_exact",
+    }
+    assert compat.payload["parallelism"]["tensor_parallel_policy"]["optimizer"] == "muon_routes_to_dist_muon_exact"
 
 
 def test_resume_metadata_rejects_malformed_version(tmp_path: Path, prepared_dataset_factory) -> None:
@@ -481,6 +508,7 @@ def _config_text(
     sequence_aux_loss_weight: float = 1e-4,
     expert_parallel: bool = False,
     expert_parallel_axis: str = "auto",
+    parallelism_tensor_parallel: bool = False,
 ) -> str:
     total_steps_line = "" if total_steps is None else f"total_steps = {total_steps}\n"
     shuffle_seed_line = "" if shuffle_seed is None else f"shuffle_seed = {shuffle_seed}\n"
@@ -561,6 +589,7 @@ axis_sizes = [{", ".join(str(size) for size in axis_sizes)}]
 
 [parallelism]
 mode = "{parallelism_mode}"
+tensor_parallel = {str(parallelism_tensor_parallel).lower()}
 expert_parallel = {str(expert_parallel).lower()}
 expert_parallel_axis = "{expert_parallel_axis}"
 """
