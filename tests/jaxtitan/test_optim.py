@@ -374,12 +374,19 @@ def test_tensor_parallel_muon_routes_to_exact_distributed_muon() -> None:
     assert {assignment.matrix_axis for assignment in exact_routes} == {0, 1}
     assert policy["route_counts"] == {"adamw": 7, "dist_muon_exact": 7}
     assert policy["dist_muon_exact"] == {
-        "distributed_policy": "global_matrix_exact",
-        "exact": True,
+        "distributed_policy": "reference_logical_matrix_candidate",
+        "exact": False,
+        "correctness_status": "local_gates_passed_h100_pending",
         "approximation": "none",
-        "performance": "reference_global_array",
+        "performance": "replicate_logical_matrix_reference",
+        "newton_schulz_precision": "bfloat16",
+        "replicated_model_axis_reduction": "pmean",
         "auto_selected_for": "tp_sharded_muon_matrix_routes",
     }
+    assert {assignment.logical_shape for assignment in exact_routes}
+    assert {assignment.sharded_model_axes for assignment in exact_routes} == {("tp",)}
+    assert {assignment.replicated_model_axes for assignment in exact_routes} == {()}
+    assert all(assignment.partition_spec is not None for assignment in exact_routes)
 
 
 @pytest.mark.parametrize("mode", ["fsdp", "zero2"])
@@ -413,9 +420,18 @@ def test_tensor_parallel_muon_takes_precedence_over_fsdp_dion2_route(mode: str) 
     exact_routes = [assignment for assignment in built.route_assignments if assignment.backend == "dist_muon_exact"]
     assert {assignment.resolution_reason for assignment in exact_routes} == {"tp_sharded_matrix_exact_muon"}
     assert {assignment.matrix_axis for assignment in exact_routes} == {0, 1}
+    assert {assignment.sharded_model_axes for assignment in exact_routes}
+    assert any(assignment.replicated_model_axes == ("fsdp",) for assignment in exact_routes)
 
 
-def test_exact_distributed_muon_update_matches_replicated_muon_for_tp_shards() -> None:
+@pytest.mark.parametrize(
+    "partition_spec",
+    [
+        pytest.param(jax.sharding.PartitionSpec("tp", None), id="row_sharded"),
+        pytest.param(jax.sharding.PartitionSpec(None, "tp"), id="column_sharded"),
+    ],
+)
+def test_exact_distributed_muon_update_matches_replicated_muon_for_tp_shards(partition_spec) -> None:
     require_fake_devices()
     full_params = {"w": jnp.arange(24, dtype=jnp.float32).reshape(6, 4) / 10.0}
     full_grads = {"w": jnp.arange(24, dtype=jnp.float32).reshape(6, 4) / 20.0}
@@ -423,19 +439,33 @@ def test_exact_distributed_muon_update_matches_replicated_muon_for_tp_shards() -
     spec = OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.0)
 
     replicated = build_optimizer(spec, full_params, metadata)
-    replicated_state = replicated.transform.init(full_params)
-    replicated_updates, _ = replicated.transform.update(full_grads, replicated_state, params=full_params)
+    replicated_params = full_params
+    replicated_state = replicated.transform.init(replicated_params)
 
     context = build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(1, 2)))
-    sharding = jax.sharding.NamedSharding(context.mesh, jax.sharding.PartitionSpec(None, "tp"))
+    sharding = jax.sharding.NamedSharding(context.mesh, partition_spec)
     sharded_params = {"w": jax.device_put(full_params["w"], sharding)}
     sharded_grads = {"w": jax.device_put(full_grads["w"], sharding)}
     distributed = build_optimizer(spec, sharded_params, metadata)
-    distributed_state = distributed.transform.init(sharded_params)
-    distributed_updates, _ = distributed.transform.update(sharded_grads, distributed_state, params=sharded_params)
+    distributed_params = sharded_params
+    distributed_state = distributed.transform.init(distributed_params)
 
     assert distributed.route_assignments[0].backend == "dist_muon_exact"
-    assert jnp.allclose(distributed_updates["w"], replicated_updates["w"], rtol=1e-5, atol=1e-5)
+    for _ in range(5):
+        replicated_updates, replicated_state = replicated.transform.update(
+            full_grads,
+            replicated_state,
+            params=replicated_params,
+        )
+        distributed_updates, distributed_state = distributed.transform.update(
+            sharded_grads,
+            distributed_state,
+            params=distributed_params,
+        )
+        assert jnp.allclose(distributed_updates["w"], replicated_updates["w"], rtol=1e-5, atol=1e-5)
+        replicated_params = jax.tree.map(lambda param, update: param + update, replicated_params, replicated_updates)
+        distributed_params = jax.tree.map(lambda param, update: param + update, distributed_params, distributed_updates)
+        assert jnp.allclose(distributed_params["w"], replicated_params["w"], rtol=1e-5, atol=1e-5)
 
 
 def test_muon_build_init_and_update_accept_nnx_model_state() -> None:

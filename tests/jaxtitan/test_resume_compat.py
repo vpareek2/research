@@ -373,7 +373,10 @@ def test_resume_compat_marks_tensor_parallel_muon_exact_route(tmp_path: Path, pr
     )
     compat = build_resume_compat(spec)
 
-    assert compat.payload["optimizer"]["policy"]["dist_muon_exact"]["exact"] is True
+    assert compat.payload["optimizer"]["policy"]["dist_muon_exact"]["exact"] is False
+    assert compat.payload["optimizer"]["policy"]["dist_muon_exact"]["correctness_status"] == (
+        "local_gates_passed_h100_pending"
+    )
     assert compat.payload["optimizer"]["policy"]["auto_routing"] == {
         "active": True,
         "muon_sharded_matrix_backend": "dion2",

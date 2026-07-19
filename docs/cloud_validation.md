@@ -32,13 +32,13 @@ before distributed optimizer work.
 | `configs/jaxtitan/cloud_4gpu_dense_fsdp_adamw_validation.toml` | dense FSDP AdamW |
 | `configs/jaxtitan/cloud_4gpu_dense_zero2_adamw_validation.toml` | dense ZeRO-2 AdamW |
 | `configs/jaxtitan/cloud_4gpu_dense_tp_adamw_validation.toml` | dense tensor parallelism |
-| `configs/jaxtitan/cloud_4gpu_dense_tp_muon_validation.toml` | dense tensor parallelism with exact-reference Muon |
+| `configs/jaxtitan/cloud_4gpu_dense_tp_muon_validation.toml` | dense tensor parallelism with logical-matrix Muon candidate |
 | `configs/jaxtitan/cloud_4gpu_dense_cp_adamw_validation.toml` | dense context parallelism |
 | `configs/jaxtitan/cloud_4gpu_dense_tp_cp_adamw_validation.toml` | dense TP+CP composition |
 | `configs/jaxtitan/cloud_4gpu_dense_fsdp_tp_adamw_validation.toml` | dense FSDP+TP composition |
-| `configs/jaxtitan/cloud_4gpu_dense_fsdp_tp_muon_validation.toml` | dense FSDP+TP with exact-reference Muon |
+| `configs/jaxtitan/cloud_4gpu_dense_fsdp_tp_muon_validation.toml` | dense FSDP+TP with logical-matrix Muon candidate |
 | `configs/jaxtitan/cloud_4gpu_dense_zero2_tp_adamw_validation.toml` | dense ZeRO-2+TP composition |
-| `configs/jaxtitan/cloud_4gpu_dense_zero2_tp_muon_validation.toml` | dense ZeRO-2+TP with exact-reference Muon |
+| `configs/jaxtitan/cloud_4gpu_dense_zero2_tp_muon_validation.toml` | dense ZeRO-2+TP with logical-matrix Muon candidate |
 | `configs/jaxtitan/cloud_4gpu_trinity_moe_ep_adamw_validation.toml` | Trinity MoE expert parallelism |
 | `configs/jaxtitan/cloud_4gpu_trinity_moe_tp_ep_adamw_validation.toml` | shared-expert TP plus routed-expert EP |
 | `configs/jaxtitan/cloud_4gpu_trinity_moe_tp_ep_muon_validation.toml` | shared-expert TP plus routed-expert EP with Muon intent |
@@ -49,9 +49,10 @@ before distributed optimizer work.
 | `configs/jaxtitan/cloud_4gpu_trinity_moe_expert_fsdp_adamw_validation.toml` | EP plus expert-internal FSDP |
 
 TP AdamW configs remain the baseline. Muon under tensor parallelism routes
-rank-2 hidden matrices through the exact reference `dist_muon_exact` backend;
-the TP+Muon configs validate correctness and artifact shape, not representative
-throughput.
+rank-2 hidden matrices through the logical-matrix `dist_muon_exact` candidate;
+runtime metadata must keep `exact=false` until the four-H100 acceptance matrix
+passes. The TP+Muon configs validate correctness and artifact shape, not
+representative throughput.
 
 Run each config with:
 

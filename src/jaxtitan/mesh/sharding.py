@@ -269,13 +269,9 @@ def place_replicated(tree: Any, plan: ShardingPlan) -> Any:
 def place_model_state(tree: Any, plan: ShardingPlan) -> Any:
     """Place model state leaves according to the sharding plan's parameter policy."""
 
-    if (
-        plan.parallelism.mode in {"ddp", "zero2"}
-        and not plan.parallelism.expert_parallel
-        and not plan.parallelism.tensor_parallel
-    ):
+    if plan.parallelism.mode == "ddp" and not plan.parallelism.expert_parallel and not plan.parallelism.tensor_parallel:
         return place_replicated(tree, plan)
-    return _place_params_by_policy(tree, plan)
+    return _place_params_by_policy(tree, plan, omit_fsdp=plan.parallelism.mode == "zero2")
 
 
 def place_optimizer_init_state(tree: Any, plan: ShardingPlan) -> Any:
@@ -316,15 +312,32 @@ def optimizer_shardings_like(tree: Any, plan: ShardingPlan) -> Any:
     return replicated_shardings_like(tree, plan)
 
 
-def _place_params_by_policy(tree: Any, plan: ShardingPlan) -> Any:
+def _place_params_by_policy(tree: Any, plan: ShardingPlan, *, omit_fsdp: bool = False) -> Any:
     def place_leaf(path, leaf):
         metadata_path = _metadata_path_from_jax_path(path)
         sharding = plan.param_shardings.get(metadata_path)
         if sharding is None:
             raise ContractError(f"missing sharding policy for model parameter {'.'.join(metadata_path)!r}")
+        if omit_fsdp:
+            sharding = _without_mesh_axis(sharding, "fsdp")
         return jax.device_put(leaf, sharding)
 
     return jax.tree_util.tree_map_with_path(place_leaf, tree)
+
+
+def _without_mesh_axis(sharding: NamedSharding, axis_name: str) -> NamedSharding:
+    def remove(axis: Any) -> Any:
+        if axis == axis_name:
+            return None
+        if isinstance(axis, tuple):
+            remaining = tuple(name for name in axis if name != axis_name)
+            if not remaining:
+                return None
+            return remaining[0] if len(remaining) == 1 else remaining
+        return axis
+
+    spec = tuple(remove(axis) for axis in tuple(sharding.spec))
+    return NamedSharding(sharding.mesh, P()) if all(axis is None for axis in spec) else NamedSharding(sharding.mesh, P(*spec))
 
 
 def replicated_shardings_like(tree: Any, plan: ShardingPlan) -> Any:

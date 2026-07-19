@@ -6,6 +6,7 @@ from pathlib import Path
 import jax
 import pytest
 
+import jaxtitan.runtime.training as training_module
 from jaxtitan.errors import ContractError
 from jaxtitan.runtime import run_training
 from jaxtitan.services import initialize_run
@@ -111,6 +112,11 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert metrics[-1]["optimizer_update_param_ratio_mean"] >= 0.0
     assert metrics[-1]["optimizer_groups_with_zero_grad"] >= 0
     assert metrics[-1]["optimizer_groups_with_zero_update"] >= 0
+    assert metrics[-1]["optimizer_nonfinite_group_count"] == 0
+    assert metrics[-1]["optimizer_nonfinite_groups"] == []
+    assert all(group["grad_norm_finite"] for group in metrics[-1]["optimizer_groups"])
+    assert all(group["update_norm_finite"] for group in metrics[-1]["optimizer_groups"])
+    assert all(group["param_norm_finite"] for group in metrics[-1]["optimizer_groups"])
     assert metrics[-1]["optimizer_route_backend_counts"] == {"adamw": diagnostics["model"]["parameter_leaves"]}
     assert metrics[-1]["data_sec"] >= 0.0
     assert metrics[-1]["placement_sec"] >= 0.0
@@ -145,6 +151,8 @@ def test_run_training_writes_artifacts_metrics_and_summary(
     assert final["final_optimizer_update_param_ratio_mean"] == metrics[-1]["optimizer_update_param_ratio_mean"]
     assert final["final_optimizer_groups_with_zero_grad"] == metrics[-1]["optimizer_groups_with_zero_grad"]
     assert final["final_optimizer_groups_with_zero_update"] == metrics[-1]["optimizer_groups_with_zero_update"]
+    assert final["final_optimizer_nonfinite_group_count"] == 0
+    assert final["final_optimizer_nonfinite_groups"] == []
     assert final["final_optimizer_route_backend_counts"] == metrics[-1]["optimizer_route_backend_counts"]
     assert final["device_kind"] == diagnostics["performance"]["device_kind"]
     assert final["device_count"] == diagnostics["performance"]["device_count"]
@@ -853,7 +861,8 @@ def test_run_training_auto_resolves_tensor_parallel_muon_to_exact_distributed_mu
     assert diagnostics["optimizer"]["name"] == "muon"
     assert diagnostics["optimizer"]["route_counts"] == {"adamw": 7, "dist_muon_exact": 7}
     assert diagnostics["optimizer"]["auto_routing"]["active"] is True
-    assert diagnostics["optimizer"]["dist_muon_exact"]["exact"] is True
+    assert diagnostics["optimizer"]["dist_muon_exact"]["exact"] is False
+    assert diagnostics["optimizer"]["dist_muon_exact"]["correctness_status"] == "local_gates_passed_h100_pending"
     assert row["optimizer_route_backend_counts"] == {"adamw": 7, "dist_muon_exact": 7}
     assert final["final_optimizer_route_backend_counts"] == row["optimizer_route_backend_counts"]
     assert metadata["compatibility"]["optimizer"]["policy"]["auto_routing"] == {
@@ -1492,6 +1501,59 @@ def test_run_training_records_failure_when_dataset_exhausts(
     assert events[-1]["type"] == "training_failed"
     assert events[-1]["error_type"] == "ContractError"
     assert [row["step"] for row in metrics] == [1, 2]
+    assert not (run_dir / "summaries" / "final.json").exists()
+
+
+def test_run_training_stops_before_checkpoint_when_optimizer_group_is_nonfinite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prepared_dataset_factory,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest = prepared_dataset_factory(
+        "nonfinite",
+        shard_token_groups=(tuple(range(0, 30)),),
+        train_tokens=25,
+    )
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(_training_config(manifest, target_tokens=16, log_every_steps=1, checkpoint_every_steps=1))
+
+    def nonfinite_groups(*_args, **_kwargs):
+        return [
+            {
+                "group": "attention.qkv_weight",
+                "tag": "attention.qkv_weight",
+                "backend": "muon",
+                "parameter_count": 64,
+                "leaf_count": 1,
+                "grad_norm": 1.0,
+                "update_norm": float("nan"),
+                "param_norm": 2.0,
+                "grad_param_ratio": 0.5,
+                "update_param_ratio": float("nan"),
+                "grad_norm_finite": True,
+                "update_norm_finite": False,
+                "param_norm_finite": True,
+                "grad_param_ratio_finite": True,
+                "update_param_ratio_finite": False,
+                "weight_decay_enabled_count": 1,
+                "auto_resolved_count": 0,
+            }
+        ]
+
+    monkeypatch.setattr(training_module, "_optimizer_groups_payload", nonfinite_groups)
+
+    with pytest.raises(ContractError, match=r"non-finite at step 1: attention\.qkv_weight"):
+        run_training(config_path)
+
+    run_dir = tmp_path / "runs" / "loop"
+    events = _jsonl(run_dir / "events.jsonl")
+    metrics = _jsonl(run_dir / "metrics" / "train.jsonl")
+    assert [row["step"] for row in metrics] == [1]
+    assert metrics[0]["optimizer_nonfinite_group_count"] == 1
+    assert metrics[0]["optimizer_nonfinite_groups"] == ["attention.qkv_weight"]
+    assert [event["type"] for event in events[-2:]] == ["optimizer_nonfinite", "training_failed"]
+    assert not (run_dir / "checkpoints" / "index.json").exists()
     assert not (run_dir / "summaries" / "final.json").exists()
 
 

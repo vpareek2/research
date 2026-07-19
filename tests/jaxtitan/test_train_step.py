@@ -1086,6 +1086,108 @@ def test_fsdp_tensor_parallel_muon_train_step_matches_replicated_global_batch(mo
     assert _trees_close(next_mixed.model, next_one.model, rtol=2e-5, atol=2e-5)
 
 
+@pytest.mark.parametrize("mode", ["fsdp", "zero2"])
+def test_fsdp_tensor_parallel_muon_stays_finite_and_replica_consistent_for_five_steps(mode: str) -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_spec(
+            vocab_size=64,
+            hidden_size=32,
+            intermediate_size=64,
+            num_heads=4,
+            n_kv_heads=1,
+            max_seq_len=8,
+        ),
+        seed=0,
+    )
+    mixed_context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp", "tp"), axis_sizes=(1, 2, 2)))
+    mixed_plan = build_sharding_plan(
+        mixed_context,
+        parallelism=ParallelismSpec(mode=mode, tensor_parallel=True),
+        param_layouts=built.param_layouts,
+    )
+    mixed_model = place_model_state(built.state, mixed_plan)
+    optimizer_init_model = place_optimizer_init_state(built.state, mixed_plan) if mode == "zero2" else mixed_model
+    mixed_optimizer = _optimizer(
+        optimizer_init_model,
+        built.metadata,
+        schedule=ScheduleSpec(peak_lr=0.02),
+        optimizer_name="muon",
+    )
+    mixed_state = initialize_train_state(
+        mixed_model,
+        mixed_optimizer.transform,
+        seed=1,
+        optimizer_init_model_state=optimizer_init_model,
+    )
+    mixed_step = make_train_step(built.graph, mixed_optimizer, sharding=mixed_plan, state_template=mixed_state)
+
+    for offset in range(5):
+        batch = _batch(batch_size=4, seq_len=8, vocab_size=64, offset=offset)
+        mixed_state, mixed_metrics = mixed_step(mixed_state, place_batch(batch, mixed_plan))
+        assert np.isfinite(np.asarray(jax.device_get(mixed_metrics.loss_sum))).all()
+        _assert_optimizer_groups_finite(mixed_metrics, max_update_param_ratio=2.0, max_update_norm=1e4)
+        _assert_physical_replicas_equal(mixed_state.model)
+        _assert_physical_replicas_equal(mixed_state.opt_state)
+
+    if mode == "zero2":
+        assert all(
+            "fsdp" not in str(getattr(getattr(leaf, "sharding", None), "spec", ""))
+            for leaf in jax.tree.leaves(mixed_state.model)
+        )
+        assert any(
+            "fsdp" in str(getattr(getattr(leaf, "sharding", None), "spec", ""))
+            for leaf in jax.tree.leaves(mixed_state.opt_state)
+        )
+
+
+def test_moe_tp_ep_muon_stays_finite_and_replica_consistent_for_five_steps() -> None:
+    require_fake_devices()
+    built = build_model(
+        _tiny_trinity_spec(
+            vocab_size=64,
+            hidden_size=16,
+            intermediate_size=32,
+            num_layers=2,
+            num_heads=4,
+            n_kv_heads=2,
+            max_seq_len=8,
+            initial_dense_layers=1,
+            moe={"num_experts": 4, "top_k": 2, "num_shared_experts": 1},
+        ),
+        seed=0,
+    )
+    mixed_context = build_mesh_context(MeshSpec(axis_names=("data", "tp", "ep"), axis_sizes=(1, 2, 2)))
+    mixed_plan = build_sharding_plan(
+        mixed_context,
+        parallelism=ParallelismSpec(tensor_parallel=True, expert_parallel=True),
+        param_layouts=built.param_layouts,
+        expert_layouts=built.expert_layouts,
+    )
+    mixed_model = place_model_state(built.state, mixed_plan)
+    mixed_optimizer = _optimizer(
+        mixed_model,
+        built.metadata,
+        schedule=ScheduleSpec(peak_lr=0.02),
+        optimizer_name="muon",
+    )
+    mixed_state = initialize_train_state(mixed_model, mixed_optimizer.transform, seed=1)
+    mixed_step = make_train_step(built.graph, mixed_optimizer, sharding=mixed_plan, state_template=mixed_state)
+
+    assert {assignment.backend for assignment in mixed_optimizer.route_assignments} == {
+        "adamw",
+        "dist_muon_exact",
+        "muon",
+    }
+    for offset in range(5):
+        batch = _batch(batch_size=4, seq_len=8, vocab_size=64, offset=offset)
+        mixed_state, mixed_metrics = mixed_step(mixed_state, place_batch(batch, mixed_plan))
+        assert np.isfinite(np.asarray(jax.device_get(mixed_metrics.loss_sum))).all()
+        _assert_optimizer_groups_finite(mixed_metrics, max_update_param_ratio=2.0, max_update_norm=1e4)
+        _assert_physical_replicas_equal(mixed_state.model)
+        _assert_physical_replicas_equal(mixed_state.opt_state)
+
+
 def test_context_parallel_train_step_matches_replicated_global_batch() -> None:
     require_fake_devices()
     built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
@@ -1521,6 +1623,33 @@ def _assert_optimizer_groups_cover(metrics, metadata) -> None:
     assert np.sqrt(np.sum(np.square(group_grad_norms))) == pytest.approx(float(jax.device_get(metrics.grad_norm)))
     assert np.sqrt(np.sum(np.square(group_update_norms))) == pytest.approx(float(jax.device_get(metrics.update_norm)))
     assert np.sqrt(np.sum(np.square(group_param_norms))) == pytest.approx(float(jax.device_get(metrics.param_norm)))
+
+
+def _assert_optimizer_groups_finite(metrics, *, max_update_param_ratio: float, max_update_norm: float) -> None:
+    group_grad_norms = np.asarray(jax.device_get(metrics.optimizer_group_grad_norms), dtype=np.float64)
+    group_update_norms = np.asarray(jax.device_get(metrics.optimizer_group_update_norms), dtype=np.float64)
+    group_param_norms = np.asarray(jax.device_get(metrics.optimizer_group_param_norms), dtype=np.float64)
+    assert np.all(np.isfinite(group_grad_norms))
+    assert np.all(np.isfinite(group_update_norms))
+    assert np.all(np.isfinite(group_param_norms))
+    assert float(np.max(group_update_norms, initial=0.0)) < max_update_norm
+    ratios = np.divide(
+        group_update_norms,
+        np.maximum(group_param_norms, np.finfo(np.float64).tiny),
+    )
+    assert np.all(np.isfinite(ratios))
+    assert float(np.max(ratios, initial=0.0)) < max_update_param_ratio
+
+
+def _assert_physical_replicas_equal(tree) -> None:
+    for leaf in jax.tree.leaves(tree):
+        shards = getattr(leaf, "addressable_shards", ())
+        copies_by_index: dict[str, list[np.ndarray]] = {}
+        for shard in shards:
+            copies_by_index.setdefault(str(shard.index), []).append(np.asarray(jax.device_get(shard.data)))
+        for copies in copies_by_index.values():
+            for copy in copies[1:]:
+                np.testing.assert_array_equal(copy, copies[0])
 
 
 def _scalar_int(value) -> int:
