@@ -374,9 +374,9 @@ def test_tensor_parallel_muon_routes_to_exact_distributed_muon() -> None:
     assert {assignment.matrix_axis for assignment in exact_routes} == {0, 1}
     assert policy["route_counts"] == {"adamw": 7, "dist_muon_exact": 7}
     assert policy["dist_muon_exact"] == {
-        "distributed_policy": "reference_logical_matrix_candidate",
-        "exact": False,
-        "correctness_status": "local_gates_passed_h100_pending",
+        "distributed_policy": "reference_logical_matrix_exact",
+        "exact": True,
+        "correctness_status": "four_h100_acceptance_passed",
         "approximation": "none",
         "performance": "replicate_logical_matrix_reference",
         "newton_schulz_precision": "bfloat16",

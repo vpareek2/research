@@ -3,6 +3,90 @@
 Purpose: preserve the evidence, correction status, and remaining GPU gates for
 the composed-layout Muon route.
 
+## 2026-07-19 [codex] Four-H100 acceptance and stress matrices passed
+
+Context:
+
+- Validated fix commit `34ff32f` on four NVIDIA H100 PCIe GPUs with driver
+  `580.126.09`.
+- Ran the unchanged 17-step TP control, FSDP+TP, ZeRO-2+TP, and TP+EP configs.
+- After the short matrix passed, derived cloud-local 64-step stress configs for
+  FSDP+TP, ZeRO-2+TP, and TP+EP. Seed, model, data, batch topology, Muon peak LR
+  `0.02`, AdamW fallback LR `0.0006`, and weight decay `0.1` were unchanged;
+  only run id, schedule horizon, and target tokens changed.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+configs="configs/jaxtitan/cloud_4gpu_dense_tp_muon_validation.toml \
+configs/jaxtitan/cloud_4gpu_dense_fsdp_tp_muon_validation.toml \
+configs/jaxtitan/cloud_4gpu_dense_zero2_tp_muon_validation.toml \
+configs/jaxtitan/cloud_4gpu_trinity_moe_tp_ep_muon_validation.toml"
+
+for cfg in $configs; do
+  run="${cfg##*/}"
+  run="${run%.toml}"
+  uv run jaxtitan config check "$cfg"
+  uv run jaxtitan run preflight "$cfg"
+  uv run jaxtitan run train --overwrite "$cfg"
+  uv run jaxtitan run inspect "runs/$run"
+  uv run jaxtitan eval checkpoint "runs/$run" --checkpoint latest --json
+  uv run jaxtitan sample checkpoint "runs/$run" --checkpoint latest \
+    --prompt-ids "15496,11" --max-new-tokens 8 --top-k 1 --json
+done
+```
+
+The same loop ran the cloud-local stress configs with `total_steps=64` and
+targets `258049` dense tokens or `129025` MoE tokens:
+
+- `cloud_4gpu_dense_fsdp_tp_muon_stress64.toml`
+- `cloud_4gpu_dense_zero2_tp_muon_stress64.toml`
+- `cloud_4gpu_trinity_moe_tp_ep_muon_stress64.toml`
+
+Artifacts:
+
+- Lightweight local bundle:
+  `cloud_results/distributed_muon_h100_acceptance_2026-07-19.tgz`.
+- Bundle SHA256:
+  `016bec6a15d01cc1de1db8ba67e78c7326ffd0030955c6c36cf0ea43666ceef9`.
+- Bundle contains the seven resolved configs, full train metrics/events,
+  summaries, runtime/profiling diagnostics, checkpoint indexes, launcher logs,
+  hardware summary, commit, and data-manifest checksum. Checkpoint tensors are
+  intentionally excluded.
+- Prepared manifest SHA256:
+  `aea1fcce69551326b6f9e3dc5fcc1c20987a3c7853630ad5ce6c0a2255f50be1`.
+
+Result:
+
+- All four short runs completed 17 steps with zero non-finite optimizer groups,
+  successful final checkpoints, eval, sampling, and profiling.
+- Short final train/eval losses:
+  - TP: `5.0144` / `5.0300`.
+  - FSDP+TP: `5.0041` / `5.0162`.
+  - ZeRO-2+TP: `5.0078` / `5.0220`.
+  - TP+EP: `7.8679` / `7.9592`.
+- At steps 3-4, dense FSDP+TP and ZeRO-2+TP attention K/V/O norms aligned with
+  the healthy TP control. The prior failures occurred at those same steps.
+- All three stress runs completed exactly 64 steps. Across all 192 stress
+  metric rows, every optimizer-group finite flag was true and no
+  `optimizer_nonfinite` or `training_failed` event occurred.
+- Stress final train/eval losses:
+  - FSDP+TP: `4.1192` / `4.1754`.
+  - ZeRO-2+TP: `4.1180` / `4.1732`.
+  - TP+EP: `4.9771` / `4.9361`.
+- Dense stress runs had no zero-gradient/update groups. TP+EP had only the
+  expected `moe_expert_bias:adamw` zero-gradient/update group.
+- Runtime policy may now truthfully report the reference route as exact for the
+  accepted rank-2 TP-sharded contract. Performance remains non-gating.
+
+Next:
+
+- Push the acceptance metadata/runbook promotion and open the
+  `no-run-required` PR into `master`.
+- Keep routed rank-3 expert matrices outside the distributed exact contract.
+
 ## 2026-07-18 [codex] Production correction implemented from master
 
 Context:

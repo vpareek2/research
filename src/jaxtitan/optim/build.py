@@ -254,9 +254,9 @@ def optimizer_policy_summary(
             "auto_selected_for": "sharded_muon_matrix_routes",
         },
         "dist_muon_exact": {
-            "distributed_policy": "reference_logical_matrix_candidate",
-            "exact": False,
-            "correctness_status": "local_gates_passed_h100_pending",
+            "distributed_policy": "reference_logical_matrix_exact",
+            "exact": True,
+            "correctness_status": "four_h100_acceptance_passed",
             "approximation": "none",
             "performance": "replicate_logical_matrix_reference",
             "newton_schulz_precision": muon_policy_constants()["newton_schulz_precision"],
