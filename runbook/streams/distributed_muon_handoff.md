@@ -83,8 +83,8 @@ Result:
 
 Next:
 
-- Push the acceptance metadata/runbook promotion and open the
-  `no-run-required` PR into `master`.
+- Draft PR `#12` is open into `master` with the `no-run-required` label.
+- Review and merge PR `#12`; no correctness validation remains for this fix.
 - Keep routed rank-3 expert matrices outside the distributed exact contract.
 
 ## 2026-07-18 [codex] Production correction implemented from master
