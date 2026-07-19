@@ -17,7 +17,7 @@ import optax
 from jaxtitan.errors import ContractError
 from jaxtitan.models import ParamMetadata
 from jaxtitan.optim.dion2 import dion2_policy_constants, dion2_transform
-from jaxtitan.optim.muon import muon_policy_constants, muon_transform
+from jaxtitan.optim.muon import distributed_muon_transform, muon_policy_constants, muon_transform
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
 
 PyTree = Any
@@ -82,6 +82,10 @@ class RouteAssignment:
     auto_resolved: bool = False
     resolution_reason: str | None = None
     matrix_axis: int | None = None
+    logical_shape: tuple[int, ...] = ()
+    sharded_model_axes: tuple[str, ...] = ()
+    replicated_model_axes: tuple[str, ...] = ()
+    partition_spec: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,10 +254,13 @@ def optimizer_policy_summary(
             "auto_selected_for": "sharded_muon_matrix_routes",
         },
         "dist_muon_exact": {
-            "distributed_policy": "global_matrix_exact",
+            "distributed_policy": "reference_logical_matrix_exact",
             "exact": True,
+            "correctness_status": "four_h100_acceptance_passed",
             "approximation": "none",
-            "performance": "reference_global_array",
+            "performance": "replicate_logical_matrix_reference",
+            "newton_schulz_precision": muon_policy_constants()["newton_schulz_precision"],
+            "replicated_model_axis_reduction": "pmean",
             "auto_selected_for": "tp_sharded_muon_matrix_routes",
         },
         "auto_routing": {
@@ -285,6 +292,10 @@ def optimizer_policy_summary(
                     "auto_resolved": assignment.auto_resolved,
                     "resolution_reason": assignment.resolution_reason,
                     "matrix_axis": assignment.matrix_axis,
+                    "logical_shape": list(assignment.logical_shape),
+                    "sharded_model_axes": list(assignment.sharded_model_axes),
+                    "replicated_model_axes": list(assignment.replicated_model_axes),
+                    "partition_spec": assignment.partition_spec,
                 }
             )
         payload["route_counts"] = dict(sorted(route_counts.items()))
@@ -358,6 +369,14 @@ def _route_assignments(
                 auto_resolved=backend != requested_backend,
                 resolution_reason=resolution_reason,
                 matrix_axis=matrix_axis,
+                logical_shape=tuple(item.shape) if backend == "dist_muon_exact" else (),
+                sharded_model_axes=_route_model_parallel_topology(leaf)[0]
+                if backend == "dist_muon_exact"
+                else (),
+                replicated_model_axes=_route_model_parallel_topology(leaf)[1]
+                if backend == "dist_muon_exact"
+                else (),
+                partition_spec=_partition_spec_text(leaf) if backend == "dist_muon_exact" else None,
             )
         )
     return tuple(assignments)
@@ -391,7 +410,7 @@ def _route_distributed_policy(backend: str) -> str:
     if backend == "dion2":
         return "fsdp_sharded_matrix"
     if backend == "dist_muon_exact":
-        return "global_matrix_exact"
+        return "reference_logical_matrix_exact"
     return "unknown"
 
 
@@ -468,7 +487,12 @@ def _muon_primary_transforms(
     if _mask_any(muon_decay_mask):
         transforms.append(
             optax.masked(
-                muon_transform(schedule, weight_decay=spec.weight_decay),
+                _replica_aware_muon_transform(
+                    schedule,
+                    weight_decay=spec.weight_decay,
+                    params=params,
+                    mask=muon_decay_mask,
+                ),
                 muon_decay_mask,
                 mask_compatible_extra_args=True,
             )
@@ -476,7 +500,12 @@ def _muon_primary_transforms(
     if _mask_any(muon_no_decay_mask):
         transforms.append(
             optax.masked(
-                muon_transform(schedule, weight_decay=0.0),
+                _replica_aware_muon_transform(
+                    schedule,
+                    weight_decay=0.0,
+                    params=params,
+                    mask=muon_no_decay_mask,
+                ),
                 muon_no_decay_mask,
                 mask_compatible_extra_args=True,
             )
@@ -516,7 +545,11 @@ def _muon_primary_transforms(
     if _mask_any(dist_muon_decay_mask):
         transforms.append(
             optax.masked(
-                muon_transform(schedule, weight_decay=spec.weight_decay),
+                distributed_muon_transform(
+                    schedule,
+                    weight_decay=spec.weight_decay,
+                    parameter_shardings=_masked_parameter_shardings(params, dist_muon_decay_mask),
+                ),
                 dist_muon_decay_mask,
                 mask_compatible_extra_args=True,
             )
@@ -524,7 +557,11 @@ def _muon_primary_transforms(
     if _mask_any(dist_muon_no_decay_mask):
         transforms.append(
             optax.masked(
-                muon_transform(schedule, weight_decay=0.0),
+                distributed_muon_transform(
+                    schedule,
+                    weight_decay=0.0,
+                    parameter_shardings=_masked_parameter_shardings(params, dist_muon_no_decay_mask),
+                ),
                 dist_muon_no_decay_mask,
                 mask_compatible_extra_args=True,
             )
@@ -694,6 +731,35 @@ def _axis_contains(axis: Any, name: str) -> bool:
     return False
 
 
+def _route_model_parallel_topology(leaf: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    sharding = getattr(leaf, "sharding", None)
+    spec = getattr(sharding, "spec", None)
+    mesh = getattr(sharding, "mesh", None)
+    if spec is None or mesh is None:
+        return (), ()
+    partitioned_axes = set()
+    for axis in tuple(spec):
+        if isinstance(axis, str):
+            partitioned_axes.add(axis)
+        elif isinstance(axis, tuple):
+            partitioned_axes.update(str(name) for name in axis)
+    active_axes = tuple(
+        str(name)
+        for name, size in mesh.shape.items()
+        if name in {"fsdp", "tp", "ep", "expert_fsdp"} and int(size) > 1
+    )
+    return (
+        tuple(name for name in active_axes if name in partitioned_axes),
+        tuple(name for name in active_axes if name not in partitioned_axes),
+    )
+
+
+def _partition_spec_text(leaf: Any) -> str | None:
+    sharding = getattr(leaf, "sharding", None)
+    spec = getattr(sharding, "spec", None)
+    return None if spec is None else repr(spec)
+
+
 def _mask_from_assignments(
     params: PyTree,
     assignments: tuple[RouteAssignment, ...],
@@ -710,6 +776,45 @@ def _mask_from_assignments(
 
 def _mask_any(mask: PyTree) -> bool:
     return any(jax.tree.leaves(mask))
+
+
+def _masked_parameter_shardings(params: PyTree, mask: PyTree) -> PyTree:
+    def leaf_sharding(param: Any, selected: bool) -> Any:
+        if not selected:
+            return optax.MaskedNode()
+        sharding = getattr(param, "sharding", None)
+        if not isinstance(sharding, jax.sharding.NamedSharding):
+            raise ContractError("distributed Muon requires statically known NamedSharding for every selected leaf")
+        return sharding
+
+    return jax.tree.map(leaf_sharding, params, mask)
+
+
+def _replica_aware_muon_transform(
+    schedule: Callable[[Any], jax.Array],
+    *,
+    weight_decay: float,
+    params: PyTree,
+    mask: PyTree,
+) -> optax.GradientTransformationExtraArgs:
+    selected = [
+        param
+        for param, include in zip(jax.tree.leaves(params), jax.tree.leaves(mask), strict=True)
+        if include
+    ]
+    replica_aware = any(
+        isinstance(getattr(param, "sharding", None), jax.sharding.NamedSharding)
+        and bool(_route_model_parallel_topology(param)[1])
+        for param in selected
+    )
+    if not replica_aware:
+        return muon_transform(schedule, weight_decay=weight_decay)
+    return muon_transform(
+        schedule,
+        weight_decay=weight_decay,
+        synchronize_model_replicas=True,
+        parameter_shardings=_masked_parameter_shardings(params, mask),
+    )
 
 
 def _muon_description_suffix(spec: OptimizerSpec) -> str:

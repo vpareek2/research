@@ -141,6 +141,8 @@ class RunSummary:
     final_optimizer_update_param_ratio_mean: float | None = None
     final_optimizer_groups_with_zero_grad: int | None = None
     final_optimizer_groups_with_zero_update: int | None = None
+    final_optimizer_nonfinite_group_count: int | None = None
+    final_optimizer_nonfinite_groups: list[str] | None = None
     final_optimizer_route_backend_counts: dict[str, int] | None = None
 
 
@@ -245,6 +247,8 @@ def run_training(
                 "final_optimizer_update_param_ratio_mean": summary.final_optimizer_update_param_ratio_mean,
                 "final_optimizer_groups_with_zero_grad": summary.final_optimizer_groups_with_zero_grad,
                 "final_optimizer_groups_with_zero_update": summary.final_optimizer_groups_with_zero_update,
+                "final_optimizer_nonfinite_group_count": summary.final_optimizer_nonfinite_group_count,
+                "final_optimizer_nonfinite_groups": summary.final_optimizer_nonfinite_groups,
                 "final_optimizer_route_backend_counts": summary.final_optimizer_route_backend_counts,
             }
         )
@@ -439,6 +443,25 @@ def _run_training_initialized(
                 )
                 last_row = row
                 host_state = replace(host_state, dataset=dataset_state)
+                nonfinite_groups = row.get("optimizer_nonfinite_groups") or []
+                if nonfinite_groups:
+                    writer.append_train_metrics(row)
+                    logged_rows.append(row)
+                    last_logged_step = row["step"]
+                    writer.append_event(
+                        {
+                            **_event("optimizer_nonfinite", runtime_spec),
+                            "step": row["step"],
+                            "tokens_seen": row["tokens_seen"],
+                            "optimizer_nonfinite_group_count": len(nonfinite_groups),
+                            "optimizer_nonfinite_groups": list(nonfinite_groups),
+                        }
+                    )
+                    if progress is not None:
+                        progress("failed", {"row": row, "optimizer_nonfinite_groups": list(nonfinite_groups)})
+                    raise ContractError(
+                        f"optimizer state became non-finite at step {row['step']}: {', '.join(nonfinite_groups)}"
+                    )
                 if _should_log(
                     row["step"],
                     runtime_spec.training.log_every_steps,
@@ -607,6 +630,8 @@ def _run_training_initialized(
             final_optimizer_update_param_ratio_mean=last_row.get("optimizer_update_param_ratio_mean"),
             final_optimizer_groups_with_zero_grad=last_row.get("optimizer_groups_with_zero_grad"),
             final_optimizer_groups_with_zero_update=last_row.get("optimizer_groups_with_zero_update"),
+            final_optimizer_nonfinite_group_count=last_row.get("optimizer_nonfinite_group_count"),
+            final_optimizer_nonfinite_groups=last_row.get("optimizer_nonfinite_groups"),
             final_optimizer_route_backend_counts=last_row.get("optimizer_route_backend_counts"),
         )
         if progress is not None:
@@ -1156,6 +1181,11 @@ def _optimizer_groups_payload(
         param_norm = float(param_array[idx])
         grad_norm = float(grad_array[idx])
         update_norm = float(update_array[idx])
+        grad_norm_finite = math.isfinite(grad_norm)
+        update_norm_finite = math.isfinite(update_norm)
+        param_norm_finite = math.isfinite(param_norm)
+        update_param_ratio = _safe_ratio(update_norm, param_norm)
+        grad_param_ratio = _safe_ratio(grad_norm, param_norm)
         rows.append(
             {
                 "group": spec["group"],
@@ -1166,8 +1196,13 @@ def _optimizer_groups_payload(
                 "grad_norm": grad_norm,
                 "update_norm": update_norm,
                 "param_norm": param_norm,
-                "grad_param_ratio": _safe_ratio(grad_norm, param_norm),
-                "update_param_ratio": _safe_ratio(update_norm, param_norm),
+                "grad_param_ratio": grad_param_ratio,
+                "update_param_ratio": update_param_ratio,
+                "grad_norm_finite": grad_norm_finite,
+                "update_norm_finite": update_norm_finite,
+                "param_norm_finite": param_norm_finite,
+                "grad_param_ratio_finite": math.isfinite(grad_param_ratio),
+                "update_param_ratio_finite": math.isfinite(update_param_ratio),
                 "weight_decay_enabled_count": int(spec["weight_decay_enabled_count"]),
                 "auto_resolved_count": int(spec["auto_resolved_count"]),
             }
@@ -1183,24 +1218,45 @@ def _optimizer_health_fields(groups: list[dict[str, Any]] | None) -> dict[str, A
         "optimizer_update_param_ratio_mean": None,
         "optimizer_groups_with_zero_grad": None,
         "optimizer_groups_with_zero_update": None,
+        "optimizer_nonfinite_group_count": None,
+        "optimizer_nonfinite_groups": None,
         "optimizer_route_backend_counts": None,
     }
     if not groups:
         return empty
-    max_grad = max(groups, key=lambda item: item["grad_norm"])
-    max_update = max(groups, key=lambda item: item["update_norm"])
-    ratios = [float(item["update_param_ratio"]) for item in groups]
+    finite_grad_groups = [item for item in groups if math.isfinite(float(item["grad_norm"]))]
+    finite_update_groups = [item for item in groups if math.isfinite(float(item["update_norm"]))]
+    finite_ratios = [
+        float(item["update_param_ratio"])
+        for item in groups
+        if math.isfinite(float(item["update_param_ratio"]))
+    ]
+    max_grad = max(finite_grad_groups, key=lambda item: item["grad_norm"]) if finite_grad_groups else None
+    max_update = max(finite_update_groups, key=lambda item: item["update_norm"]) if finite_update_groups else None
+    nonfinite_groups = [
+        item["group"]
+        for item in groups
+        if not (
+            math.isfinite(float(item["grad_norm"]))
+            and math.isfinite(float(item["update_norm"]))
+            and math.isfinite(float(item["param_norm"]))
+            and math.isfinite(float(item["grad_param_ratio"]))
+            and math.isfinite(float(item["update_param_ratio"]))
+        )
+    ]
     backend_counts: dict[str, int] = {}
     for item in groups:
         backend = item["backend"]
         backend_counts[backend] = backend_counts.get(backend, 0) + int(item["leaf_count"])
     return {
-        "optimizer_grad_norm_max_group": max_grad["group"],
-        "optimizer_update_norm_max_group": max_update["group"],
-        "optimizer_update_param_ratio_max": max(ratios),
-        "optimizer_update_param_ratio_mean": float(np.mean(ratios)),
+        "optimizer_grad_norm_max_group": None if max_grad is None else max_grad["group"],
+        "optimizer_update_norm_max_group": None if max_update is None else max_update["group"],
+        "optimizer_update_param_ratio_max": None if not finite_ratios else max(finite_ratios),
+        "optimizer_update_param_ratio_mean": None if not finite_ratios else float(np.mean(finite_ratios)),
         "optimizer_groups_with_zero_grad": sum(1 for item in groups if item["grad_norm"] <= 0.0),
         "optimizer_groups_with_zero_update": sum(1 for item in groups if item["update_norm"] <= 0.0),
+        "optimizer_nonfinite_group_count": len(nonfinite_groups),
+        "optimizer_nonfinite_groups": nonfinite_groups,
         "optimizer_route_backend_counts": dict(sorted(backend_counts.items())),
     }
 

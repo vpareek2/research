@@ -78,11 +78,7 @@ def make_train_step(
     if sharding is not None and state_template is None:
         raise ContractError("state_template is required when compiling train step with explicit shardings")
     state_sharding = None if sharding is None else replicated_shardings_like(state_template, sharding)
-    gradient_sharding = (
-        None
-        if sharding is None or sharding.parallelism.mode != "zero2"
-        else gradient_shardings_like(state_template.model, sharding)
-    )
+    gradient_sharding = None if sharding is None else gradient_shardings_like(state_template.model, sharding)
     execution = _model_execution_context(sharding)
     in_shardings = None
     out_shardings = None
@@ -209,6 +205,7 @@ def make_train_step(
         grads = jax.tree.map(lambda grad: grad / grad_denominator, grad_sum)
         if gradient_sharding is not None:
             grads = _constrain_like(grads, gradient_sharding)
+            grads = _average_model_replicas(grads, gradient_sharding)
         updates, next_opt_state = optimizer.transform.update(grads, state.opt_state, params=state.model)
         if gradient_sharding is not None:
             updates = _constrain_like(updates, gradient_sharding)
@@ -435,6 +432,41 @@ def _ensure_accumulation_axis(value: Any) -> Any:
 
 def _constrain_like(tree: Any, shardings: Any) -> Any:
     return jax.tree.map(lambda leaf, sharding: jax.lax.with_sharding_constraint(leaf, sharding), tree, shardings)
+
+
+def _average_model_replicas(tree: Any, shardings: Any) -> Any:
+    def average(leaf: Any, sharding: Any) -> Any:
+        if not isinstance(sharding, jax.sharding.NamedSharding):
+            return leaf
+        partitioned_axes = set()
+        for axis in tuple(sharding.spec):
+            if isinstance(axis, str):
+                partitioned_axes.add(axis)
+            elif isinstance(axis, tuple):
+                partitioned_axes.update(str(name) for name in axis)
+        replica_axes = tuple(
+            str(name)
+            for name, size in sharding.mesh.shape.items()
+            if name in {"fsdp", "tp", "ep", "expert_fsdp"}
+            and int(size) > 1
+            and name not in partitioned_axes
+        )
+        if not replica_axes:
+            return leaf
+        return jax.shard_map(
+            lambda local: jax.lax.pmean(local, replica_axes),
+            mesh=sharding.mesh,
+            in_specs=sharding.spec,
+            out_specs=sharding.spec,
+            check_vma=False,
+        )(leaf)
+
+    return jax.tree.map(
+        average,
+        tree,
+        shardings,
+        is_leaf=lambda value: isinstance(value, jax.sharding.NamedSharding),
+    )
 
 
 def _optimizer_group_templates(

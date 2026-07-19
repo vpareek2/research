@@ -353,6 +353,9 @@ def test_run_preflight_auto_resolves_tensor_parallel_muon_to_exact_distributed_m
         "muon_tp_sharded_matrix_backend": "dist_muon_exact",
     }
     assert payload["optimizer"]["policy"]["dist_muon_exact"]["exact"] is True
+    assert payload["optimizer"]["policy"]["dist_muon_exact"]["correctness_status"] == (
+        "four_h100_acceptance_passed"
+    )
     assert {route["backend"] for route in payload["optimizer"]["policy"]["routes"]} == {
         "adamw",
         "dist_muon_exact",
