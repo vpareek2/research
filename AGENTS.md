@@ -11,7 +11,7 @@ This means: no hidden fallbacks, no vague metrics, no untracked experiment state
 - No internal-only paths, hostnames, IPs, tokens, or cloud runbooks in tracked files.
 - The supported execution path is `uv` + TOML configs + local run artifacts under `runs/`.
 - Keep surfaces small: no second stacks for the same use-case.
-- `runs/registry.jsonl` is the scored comparison ledger. Changes to `master` should either add/update a scored registry row or be explicitly labeled `no-run-required`.
+- `runs/registry.jsonl` is the scored comparison ledger. Changes intended to alter scored model quality or comparison claims must add/update a scored registry row. Maintenance and correctness-infrastructure PRs use `no-run-required`; docs/runbook-only maintenance may land directly on `master` without a registry row.
 
 ## Execution Environment
 
@@ -59,8 +59,14 @@ This section exists because principles alone do not prevent repeated failures. T
 ### Git Safety (High Severity)
 
 - Do not run `git checkout`, `git restore`, `git reset`, or `git clean` without explicit approval; explain what will be lost first.
-- Never `git push` unless explicitly asked; only commit when explicitly asked.
-- `master` is protected. `dev` is the normal integration branch for active research work.
+- Never force-push, rewrite published history, or delete branches/tags without explicit approval.
+- `master` is the single integration base. Do not invent or depend on a long-lived `dev` branch.
+- An explicit request to implement, fix, build, update, or otherwise execute a change authorizes the normal task-scoped publication workflow described below. Do not stop for separate commit/push permission when the worktree is clean and the intended scope is already clear.
+- Docs/runbook-only maintenance may be committed and pushed directly to `master` after link/diff validation when the user requested the change and the worktree is clean. If the work already lives on a task branch or PR, finish it there instead of moving it back to `master`.
+- Code, config, test, dependency, workflow, and experiment changes use a short-lived branch from current `master`. After proportionate checks pass, commit, push, and open a draft PR as part of completing the implementation request.
+- Scored model/optimizer mechanisms require a registry row before promotion. Correctness infrastructure and maintenance PRs use `no-run-required`.
+- Merging a PR remains user-owned unless the user explicitly asks the agent to merge it.
+- Ask before publication only when scope is mixed or ambiguous, the target is not the user's repository, a direct non-docs push to `master` would be required, or the operation is destructive/history-changing.
 
 ### Build And Run Discipline (High Severity)
 
@@ -150,12 +156,12 @@ This repo is designed to be a one-stop shop for architecture and optimizer exper
 
 **Typical research flow:**
 
-1. **Baseline or mechanism branch** - Start from `dev` unless explicitly fixing `master`.
+1. **Baseline or mechanism branch** - Start a short-lived branch from current `master`.
 2. **Config and preflight** - Add/update TOML, prepare data if needed, and run `uv run preflight configs/your_experiment.toml`.
 3. **Training run** - Use `uv run experiment configs/your_experiment.toml` for runs intended to enter the comparison ladder.
 4. **Artifact inspection** - Verify local metrics, summaries, checkpoint evals, CORE/inference artifacts, and W&B only as a mirror.
 5. **Registry update** - Register the completed scored run in `runs/registry.jsonl`.
-6. **Promotion** - Merge to `master` only after the mechanism has a recorded score, unless the PR is maintenance-only and labeled `no-run-required`.
+6. **Promotion** - Merge scored mechanisms to `master` only after they have a recorded score. Correctness infrastructure and maintenance PRs use `no-run-required`; docs/runbook-only maintenance may land directly on `master`.
 
 When you work on optimizers: preserve comparability unless the experiment is explicitly about schedule or optimizer hyperparameters.
 When you work on metrics: remember JAX dispatch is asynchronous; scoring and live stats must use corrected interval-based throughput where appropriate.
