@@ -3,6 +3,98 @@
 Purpose: track what must be validated on cloud GPUs and what local work must
 finish before spending cloud time.
 
+## 2026-07-19 [codex] Four-H100 profiling matrix prepared
+
+Context:
+
+- Prepared a profiler-driven performance matrix after distributed correctness
+  completed. These are performance measurements, not another correctness
+  acceptance campaign.
+- Use one four-GPU node for the entire matrix. Prefer four H100 80GB SXM GPUs
+  with NVLink when the provider identifies that topology; otherwise use four
+  H100 80GB PCIe GPUs matching the July acceptance hardware.
+- The retained July H100 bundle contains scalar timing/profiling metadata but
+  not the trace payloads. The next allocation must be kept until the complete
+  `profiles/` directories have been archived, copied, and checksum-verified.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+for cfg in configs/jaxtitan/cloud_4gpu_profile64*.toml; do
+  uv run jaxtitan config check "$cfg"
+done
+
+JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+    tests/jaxtitan/test_config.py \
+    tests/jaxtitan/test_mesh.py \
+    tests/jaxtitan/test_optim.py \
+    tests/jaxtitan/test_preflight.py \
+    tests/jaxtitan/test_runtime_diagnostics.py
+```
+
+Primary dense matrix:
+
+```text
+configs/jaxtitan/cloud_4gpu_profile64_dense_ddp_adamw.toml
+configs/jaxtitan/cloud_4gpu_profile64_dense_ddp_muon.toml
+configs/jaxtitan/cloud_4gpu_profile64_dense_tp_adamw.toml
+configs/jaxtitan/cloud_4gpu_profile64_dense_tp_muon.toml
+configs/jaxtitan/cloud_4gpu_profile64_dense_fsdp_tp_adamw.toml
+configs/jaxtitan/cloud_4gpu_profile64_dense_fsdp_tp_muon.toml
+configs/jaxtitan/cloud_4gpu_profile64_dense_zero2_tp_adamw.toml
+configs/jaxtitan/cloud_4gpu_profile64_dense_zero2_tp_muon.toml
+```
+
+Representative MoE matrix:
+
+```text
+configs/jaxtitan/cloud_4gpu_profile64_trinity_moe_ep_adamw.toml
+configs/jaxtitan/cloud_4gpu_profile64_trinity_moe_ep_muon.toml
+configs/jaxtitan/cloud_4gpu_profile64_trinity_moe_tp_ep_adamw.toml
+configs/jaxtitan/cloud_4gpu_profile64_trinity_moe_tp_ep_muon.toml
+```
+
+Optional large-dense scale guard:
+
+```text
+configs/jaxtitan/cloud_4gpu_profile64_dense_large_tp_adamw.toml
+configs/jaxtitan/cloud_4gpu_profile64_dense_large_tp_muon.toml
+configs/jaxtitan/cloud_4gpu_profile64_dense_large_fsdp_tp_muon.toml
+```
+
+Artifacts:
+
+- All runs execute 64 optimizer steps and trace steady-state steps 12-15.
+- Dense primary runs use the same 1024-wide, 12-layer decoder, sequence length
+  1024, global batch 4, and 262144 target tokens.
+- Representative MoE runs use the 1024-wide, 12-layer, eight-expert Trinity
+  model rather than the two-layer correctness model.
+- Large-dense guards use the existing 2048-wide, 24-layer profile model.
+- Required capture includes resolved configs, metrics, events, summaries,
+  diagnostics, complete `profiles/` trees, hardware/topology output, launcher
+  logs, and HLO collective summaries for the Muon TP, FSDP+TP, ZeRO-2+TP, and
+  TP+EP routes.
+
+Result:
+
+- All 15 configs pass `jaxtitan config check` locally.
+- Targeted four-device CPU suite: `225 passed`.
+- Periodic eval and checkpoint work is outside the trace window; both are due
+  at step 64.
+- The AdamW/Muon pairs isolate optimizer cost within each parallel layout.
+
+Next:
+
+- On the allocated four-H100 node, record `nvidia-smi topo -m`, driver/runtime,
+  clocks, and `jax.devices()` before running the matrix.
+- Run config check, data checksum validation, and preflight before each train
+  command. Do not terminate the node until every trace payload is present in a
+  copied archive and both sides report the same SHA256.
+- Analyze the traces before choosing distributed-Muon, TP/loss collectives, or
+  MoE dispatch/grouped GEMM as the first optimization target.
+
 ## 2026-07-19 [codex] Distributed correctness queue is clear
 
 Context:
