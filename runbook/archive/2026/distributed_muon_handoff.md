@@ -1,7 +1,49 @@
 # Distributed Muon Handoff
 
-Purpose: preserve the evidence, correction status, and remaining GPU gates for
+Purpose: preserve the completed RCA, correction, and acceptance evidence for
 the composed-layout Muon route.
+
+## 2026-07-19 [codex] Stream closed after merge
+
+Context:
+
+- PR `#12` merged into `master` as `a76b360`.
+- Deleted the fix, reference, and RCA branches locally and remotely where they
+  existed. Only `master` remains.
+- Reviewed current source and tests before archiving this stream.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+gh pr view 12 --json state,mergedAt,mergeCommit
+git branch --format='%(refname:short)'
+git branch -r --format='%(refname:short)'
+rg -n "sequence_parallel|rank3_expert_policy|rank3_split_matrix_policy" \
+  src/jaxtitan tests/jaxtitan
+```
+
+Artifacts:
+
+- Merge commit: `a76b360`.
+- Acceptance bundle:
+  `cloud_results/distributed_muon_h100_acceptance_2026-07-19.tgz`.
+- Bundle SHA256:
+  `016bec6a15d01cc1de1db8ba67e78c7326ffd0030955c6c36cf0ea43666ceef9`.
+
+Result:
+
+- No correctness validation remains for the accepted rank-2 distributed-Muon
+  contract.
+- Runtime metadata reports `exact=true` for that contract.
+- Routed rank-3 matrices are supported only when each expert matrix is complete
+  locally; matrix-axis-sharded routed experts remain explicitly unsupported.
+- Performance optimization is a separate active phase and does not reopen this
+  correctness stream.
+
+Next:
+
+- None. This stream is complete and archived.
 
 ## 2026-07-19 [codex] Four-H100 acceptance and stress matrices passed
 

@@ -3,6 +3,50 @@
 Purpose: track the remaining work before Jaxtitan TP is considered complete
 enough for research runs.
 
+## 2026-07-19 [codex] Rank-2 TP correctness is complete
+
+Context:
+
+- Reviewed merged `master` after distributed-Muon PR `#12` landed as
+  `a76b360`.
+- The 2026-06-19 entry below predates sequence-parallel activations,
+  TP-aware Muon, and the completed cloud matrices.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+rg -n "sequence_parallel|dist_muon_exact|routed_expert_tensor_parallel" \
+  src/jaxtitan tests/jaxtitan docs
+```
+
+Artifacts:
+
+- Merge commit: `a76b360`.
+- Distributed-Muon acceptance evidence:
+  `cloud_results/distributed_muon_h100_acceptance_2026-07-19.tgz`.
+- Earlier full parallelism evidence:
+  `cloud_results/jaxtitan_parallel_validation_2026-06-19.tgz`.
+
+Result:
+
+- Dense decoder and Trinity TP use row/column projection sharding,
+  vocab-parallel exact loss, and sequence-parallel residual activations.
+- Rank-2 Muon is exact for TP, FSDP+TP, ZeRO-2+TP, and TP+EP under the accepted
+  logical-matrix contract.
+- The four-H100 short and stress matrices passed with finite optimizer state,
+  checkpoints, eval, sampling, and profiling.
+- Routed expert tensor parallelism that shards inside each rank-3 expert matrix
+  remains explicitly rejected. Expert-axis ownership with complete local
+  matrices is supported.
+
+Next action:
+
+- Treat rank-2 TP correctness as complete.
+- Use captured profiles to optimize TP/distributed-Muon performance.
+- Keep matrix-axis expert tensor parallelism as a separate future semantic
+  project rather than a blocker for current research runs.
+
 ## 2026-06-19 [codex] Current state after TP semantic slice
 
 Commit: `9a046a4 Add RDEP and tensor parallel semantics`

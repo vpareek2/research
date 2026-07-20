@@ -3,6 +3,46 @@
 Purpose: track what must be validated on cloud GPUs and what local work must
 finish before spending cloud time.
 
+## 2026-07-19 [codex] Distributed correctness queue is clear
+
+Context:
+
+- Reconciled the queue after PR `#12` merged as `a76b360`.
+- The older entries below are historical snapshots; their distributed-Muon and
+  TP prerequisites have since completed.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+git show --stat --oneline a76b360
+sha256sum cloud_results/distributed_muon_h100_acceptance_2026-07-19.tgz
+```
+
+Artifacts:
+
+- Rank-2 distributed-Muon acceptance bundle:
+  `cloud_results/distributed_muon_h100_acceptance_2026-07-19.tgz`.
+- SHA256:
+  `016bec6a15d01cc1de1db8ba67e78c7326ffd0030955c6c36cf0ea43666ceef9`.
+- General parallelism bundle:
+  `cloud_results/jaxtitan_parallel_validation_2026-06-19.tgz`.
+
+Result:
+
+- The 4-GPU AdamW parallelism matrix, four-run Muon acceptance matrix, and
+  three-run 64-step Muon stress matrix are complete.
+- There are no pending correctness runs for currently supported dense TP,
+  FSDP+TP, ZeRO-2+TP, EP, or TP+EP layouts.
+- Future cloud allocations should be tied to a concrete performance hypothesis
+  or a new mechanism such as matrix-axis expert tensor parallelism.
+
+Next:
+
+- Analyze existing profiles before launching more cloud runs.
+- Do not spend cloud time repeating the completed correctness matrices unless
+  a shared hot-path change invalidates them.
+
 ## 2026-06-19 [codex] Cloud validation is deferred
 
 Context:

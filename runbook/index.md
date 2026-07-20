@@ -23,7 +23,6 @@ current conclusions. Keep it factual and command-oriented.
 - [Tensor parallel completion](streams/tp_completion.md)
 - [MoE parallelism](streams/moe_parallelism.md)
 - [Cloud validation queue](streams/cloud_validation_queue.md)
-- [Distributed Muon handoff](streams/distributed_muon_handoff.md)
 - [Kernels and automatic backend](streams/kernels.md)
 - [Data and experiment UX](streams/data_and_experiment_ux.md)
 
@@ -36,6 +35,9 @@ current conclusions. Keep it factual and command-oriented.
 
 ## Recently Completed
 
+- `a76b360` merged the exact rank-2 distributed-Muon replica contract after
+  four-H100 acceptance and stress validation. The completed stream is in the
+  [2026 archive](archive/2026/distributed_muon_handoff.md).
 - `9a046a4` added semantic data-axis RDEP and dense tensor-parallel semantics,
   including vocab-parallel LM head and exact sharded loss.
 
