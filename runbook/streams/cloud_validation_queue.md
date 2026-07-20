@@ -3,6 +3,43 @@
 Purpose: track what must be validated on cloud GPUs and what local work must
 finish before spending cloud time.
 
+## 2026-07-20 [codex] Four-H100 profiling capture complete
+
+Context:
+
+- Ran the prepared 15-config profile matrix on four H100 80GB HBM3 GPUs with
+  full `NV18` connectivity.
+- Copied and checksum-verified the complete lightweight evidence bundle before
+  terminating the allocation.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+sha256sum -c cloud_results/profile64_h100_sxm_2026-07-20.tgz.sha256
+```
+
+Artifacts:
+
+- `cloud_results/profile64_h100_sxm_2026-07-20.tgz`
+- SHA256:
+  `87be3f018afad28f94ce6101e3bf11ef185bea0495694c927b44d69f27dffde5`
+- 15 Perfetto, 15 XPlane, and 15 compressed JAX traces plus metrics,
+  summaries, diagnostics, configs, events, HLO, and provenance.
+
+Result:
+
+- All 15 runs passed; no config, preflight, train, or trace-capture failure.
+- Scalar/trace/HLO triage is recorded in
+  `runbook/streams/performance_optimization.md`.
+- MoE expert execution is the first optimization target, followed by exact
+  distributed Muon and baseline TP/FSDP collective reduction.
+
+Next:
+
+- No additional cloud allocation is needed until a milestone implementation
+  has local correctness coverage and a narrow before/after profile matrix.
+
 ## 2026-07-19 [codex] Four-H100 profiling matrix prepared
 
 Context:
