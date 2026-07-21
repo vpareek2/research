@@ -10,14 +10,19 @@ from jax.sharding import NamedSharding, PartitionSpec as P
 
 from jaxtitan.errors import ContractError
 from jaxtitan.models.components.dtypes import dtype_from_name
-from jaxtitan.models.execution import ModelExecutionContext, column_parallel_linear, row_parallel_linear
+from jaxtitan.models.execution import (
+    ModelExecutionContext,
+    column_parallel_linear,
+    ragged_dot_pallas_triton_available,
+    row_parallel_linear,
+)
 from jaxtitan.models.output import AuxLoss, RouterStats
 from jaxtitan.specs.model import ModelSpec, TrinityMoeSpec
 
 
-# The production expert-major path is intentionally coupled to JAX's GPU
-# grouped-GEMM lowering. There is no silent generic ragged-dot fallback on GPU.
-jax.config.update("jax_ragged_dot_use_gpu_pallas_triton_lowering", True)
+# JAX 0.10.0 exposes this config flag even in wheels that omit the internal
+# Pallas ragged-dot lowering module. Enable it only when the module is present.
+jax.config.update("jax_ragged_dot_use_gpu_pallas_triton_lowering", ragged_dot_pallas_triton_available())
 
 
 def _ragged_all_to_all(

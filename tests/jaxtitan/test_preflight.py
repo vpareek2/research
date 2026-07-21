@@ -5,6 +5,7 @@ import jax
 import pytest
 
 from jaxtitan.errors import ConfigError, ContractError
+from jaxtitan.models.execution import EXPERT_PARALLEL_GROUPED_GEMM_LOWERING
 from jaxtitan.runtime.preflight import format_preflight_report, preflight_report_to_json, run_preflight
 
 FAKE_DEVICE_COUNT = 4
@@ -708,7 +709,7 @@ def test_run_preflight_reports_expert_parallel_policy(
         "combine_policy": "reverse_ragged_all_to_all_restore_source_order_then_all_gather",
         "transport": "jax_lax_ragged_all_to_all",
         "expert_execution": "expert_major_jax_lax_ragged_dot",
-        "grouped_gemm_lowering": "gpu_pallas_triton",
+        "grouped_gemm_lowering": EXPERT_PARALLEL_GROUPED_GEMM_LOWERING,
     }
     assert payload["parallelism"]["execution_mode"] == "replicated_data_parallel+ep"
     assert payload["mesh"]["ep_axis_size"] == 4

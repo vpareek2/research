@@ -8,6 +8,7 @@ import pytest
 
 import jaxtitan.runtime.training as training_module
 from jaxtitan.errors import ContractError
+from jaxtitan.models.execution import EXPERT_PARALLEL_GROUPED_GEMM_LOWERING
 from jaxtitan.runtime import run_training
 from jaxtitan.services import initialize_run
 
@@ -1368,7 +1369,7 @@ def test_run_training_accepts_expert_parallel_moe_muon(
         diagnostics["parallelism"]["expert_parallel_policy"]["expert_execution"]
         == "expert_major_jax_lax_ragged_dot"
     )
-    assert diagnostics["parallelism"]["expert_parallel_policy"]["grouped_gemm_lowering"] == "gpu_pallas_triton"
+    assert diagnostics["parallelism"]["expert_parallel_policy"]["grouped_gemm_lowering"] == EXPERT_PARALLEL_GROUPED_GEMM_LOWERING
     assert diagnostics["parallelism"]["mesh"]["ep_axis_size"] == 4
     assert diagnostics["sharding"]["model_state"]["ep_sharded_leaves"] == 3
     assert diagnostics["sharding"]["optimizer_state"]["ep_sharded_leaves"] == 3

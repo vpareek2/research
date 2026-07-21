@@ -5,6 +5,7 @@ import pytest
 
 from jaxtitan.config import load_config
 from jaxtitan.errors import ContractError
+from jaxtitan.models.execution import EXPERT_PARALLEL_GROUPED_GEMM_LOWERING
 from jaxtitan.runtime.resume import (
     _hash,
     build_resume_compat,
@@ -176,7 +177,7 @@ def test_resume_fingerprint_changes_for_expert_parallel_axis(tmp_path: Path, pre
         "combine_policy": "reverse_ragged_all_to_all_restore_source_order_then_all_gather",
         "transport": "jax_lax_ragged_all_to_all",
         "expert_execution": "expert_major_jax_lax_ragged_dot",
-        "grouped_gemm_lowering": "gpu_pallas_triton",
+        "grouped_gemm_lowering": EXPERT_PARALLEL_GROUPED_GEMM_LOWERING,
     }
 
 
