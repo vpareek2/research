@@ -3,6 +3,180 @@
 Purpose: turn measured Jaxtitan profiles into an ordered optimization program
 without weakening correctness or adding speculative kernel surfaces.
 
+## 2026-07-20 [codex] M0 local performance guardrails
+
+Context:
+
+- Added one read-only profile analyzer for canonical scalar windows, paired
+  deltas, trace attribution, and semantic HLO summaries.
+- Added opt-in four-device MoE and Muon microbenchmarks. Their timings are
+  directional measurements and are explicitly not acceptance gates.
+- Expanded distributed-Muon equivalence through five state updates for row and
+  column shards on TP4, FSDP2-by-TP2, and TP2-by-EP2.
+- Added exact MoE forward edge-case coverage for balanced, empty-expert,
+  all-to-one, and duplicate routing. The known all-to-all backward defect is
+  documented below and deliberately is not encoded as an xfail or accepted
+  behavior; the replacement dispatcher must restore the differential VJP.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+uv run pytest -q \
+  tests/jaxtitan/test_profile_analysis.py \
+  tests/jaxtitan/test_profile_bench.py \
+  tests/jaxtitan/test_cli.py
+
+JAX_PLATFORMS=cpu \
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+uv run pytest -q \
+  tests/jaxtitan/test_model.py::test_all_to_all_expert_dispatcher_preserves_edge_case_outputs \
+  tests/jaxtitan/test_optim.py::test_exact_distributed_muon_update_matches_replicated_muon_for_tp_shards
+
+uv run jaxtitan profile analyze \
+  cloud_results/profile64_h100_sxm_2026-07-20 \
+  --json > /tmp/jaxtitan-profile-analysis.json
+
+JAX_PLATFORMS=cpu \
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+uv run jaxtitan profile bench moe --warmup 0 --iters 1 --json \
+  > /tmp/jaxtitan-profile-bench-moe.json
+
+JAX_PLATFORMS=cpu \
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+uv run jaxtitan profile bench muon --warmup 0 --iters 1 --json \
+  > /tmp/jaxtitan-profile-bench-muon.json
+
+JAX_PLATFORMS=cpu \
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+uv run pytest -q tests/jaxtitan
+
+git diff --check
+```
+
+Artifacts:
+
+- Analyzer implementation: `src/jaxtitan/runtime/profile_analysis.py`.
+- Benchmark implementation: `src/jaxtitan/runtime/profile_bench.py`.
+- CLI surfaces: `jaxtitan profile analyze` and `jaxtitan profile bench`.
+- H100 input archive:
+  `cloud_results/profile64_h100_sxm_2026-07-20.tgz`, SHA256
+  `87be3f018afad28f94ce6101e3bf11ef185bea0495694c927b44d69f27dffde5`.
+- Foundation branch: `codex/performance-guardrails`, based on profiling merge
+  `4153418`.
+
+Result:
+
+- Analyzer/benchmark/CLI unit tests: `35 passed`.
+- Focused four-device correctness matrix: `9 passed` in `23.68s`.
+- Complete four-fake-CPU Jaxtitan suite: `636 passed, 1 skipped` in
+  `370.26s`.
+- The analyzer found all 15 completed H100 runs, selected steps 16-63, and
+  reproduced the canonical deltas, including TP Muon `+62.8%`, large TP Muon
+  `+90.9%`, and MoE TP-by-EP `+5.2%` over EP.
+- HLO summaries count instruction definitions rather than textual references,
+  cover synchronous and asynchronous collectives, and report explicitly
+  scoped first-array result shapes and byte estimates. The captured TP Muon
+  train module reports 495 all-gather starts, 347 all-reduce starts, and 36
+  reduce-scatters.
+- Both benchmark smoke runs emitted four deterministic cases with structural
+  HLO reports. No timing threshold is asserted in pytest.
+- `git diff --check` passed.
+
+Next:
+
+- Begin M1 with a truthfully source-sharded, expert-major dispatcher. Restore
+  exact forward and VJP equivalence before applying structural or H100
+  performance gates.
+- After M1 correctness passes locally, rerun only the representative EP and
+  TP-by-EP H100 profiles and require expert GEMMs to replace the generic
+  scatter/reduce hot path.
+
+## 2026-07-19 [codex] All-to-all MoE backward RCA
+
+Context:
+
+- The M0 differential VJP guardrail found that the current all-to-all MoE
+  dispatcher matches the local reference in the forward pass but returns
+  incorrect replicated gradients for input activations and route weights.
+- The dispatcher predates the guardrail. Git blame traces the rank-dependent
+  route compaction and gather to `c324518` (`Add expert parallel MoE dispatch`);
+  `11cbb1b` subsequently reduced the fixed source capacity without changing
+  the failing differentiation pattern.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+JAX_PLATFORMS=cpu \
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+uv run pytest -q \
+  tests/jaxtitan/test_model.py::test_all_to_all_expert_dispatcher_preserves_edge_case_outputs_and_gradients \
+  --maxfail=1 -vv
+
+git blame -L 467,575 -- src/jaxtitan/models/components/moe.py
+git log -S 'source_rank = flat_assignment_ids % ep_size' \
+  --oneline --all -- src/jaxtitan/models/components/moe.py
+```
+
+Additional four-fake-CPU probes were run with `uv run python` against JAX
+`0.10.0`. They inspected `jax.typeof(...)`, every physical
+`addressable_shards` buffer, the VJP with `shard_map(check_vma=False)`, and an
+in-memory intervention that made the replicated differentiable operands
+explicitly varying before the rank-dependent gather. No probe source or
+artifact was retained.
+
+Artifacts:
+
+- Diagnostic guardrail used for RCA (not retained as a passing foundation
+  test):
+  `tests/jaxtitan/test_model.py::test_all_to_all_expert_dispatcher_preserves_edge_case_outputs_and_gradients`.
+- Fault site: `src/jaxtitan/models/components/moe.py`, inside
+  `_all_to_all_expert_swiglu`, at the rank-dependent `order` construction and
+  `flat_x[order]` / `flat_weights[order]` gathers.
+- Original implementation commit: `c324518`.
+
+Result:
+
+- Root cause: `order` depends on `axis_index("ep")` and therefore differs by
+  EP rank, but JAX's `shard_map` varying-manual-axis analysis classifies a
+  gather from replicated data using those varying indices as replica
+  invariant. The physical `flat_x[order]` and `flat_weights[order]` buffers
+  differ even though their inferred types omit `{V:ep}`. Reverse-mode's
+  `check_vma=True` optimization consequently omits the replica accumulation
+  required when transposing those gathers.
+- The earliest wrong values are the VJPs of `flat_x[order]` and
+  `flat_weights[order]`, before expert SwiGLU math or the reverse all-to-all.
+  Forward outputs are exact. Logical expert gate/up/down gradients remain
+  exact because those operands are genuinely EP-sharded; replicated input and
+  route-weight gradients are wrong and physically disagree across EP ranks.
+- A minimal partition/gather reproducer returns the identity in the forward
+  pass but gradients such as `[4, 3, 0, 0, 1, 0, 0, 0]` instead of all ones on
+  the first EP rank. Disabling VMA differentiation optimization makes every
+  replica return all ones. Keeping VMA enabled but truthfully marking the two
+  operands varying before the gather also restores the correct VJP.
+- The latter intervention matched the complete local SwiGLU reference for
+  forward output and all five differentiable inputs on balanced EP4,
+  data2-by-EP2, and TP2-by-EP2 probes; maximum observed error was
+  `9.54e-7`. It is diagnostic evidence, not an accepted production fix.
+- Post-hoc replica sum or mean does not repair the corrupted tensors. In the
+  small EP4 probe, maximum errors versus reference remained `3.93` / `0.98`
+  for input-gradient sum / mean and `2.07` / `0.52` for route-weight-gradient
+  sum / mean. The training loop's replica averaging therefore cannot make the
+  current backward pass correct.
+
+Next:
+
+- Reintroduce the differential VJP as a required passing correctness target in
+  the replacement-dispatcher PR; do not encode the known defect as an xfail or
+  as expected behavior in the foundation suite.
+- Do not ship `check_vma=False` as the fix; it disables useful validation and
+  produced materially heavier transpose compilation in the probe.
+- Design M1 so route payloads are truthfully source-sharded or otherwise
+  explicitly varying before dynamic compaction. Require exact forward and VJP
+  equivalence for balanced, empty-expert, all-to-one, and duplicate-route
+  cases across EP, data-by-EP, and TP-by-EP before performance profiling.
+
 ## 2026-07-20 [codex] Four-H100 profile triage and milestone roadmap
 
 Context:

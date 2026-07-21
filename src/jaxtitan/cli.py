@@ -72,6 +72,31 @@ def build_parser() -> argparse.ArgumentParser:
     kernels_bench_parser.add_argument("--iters", type=int, default=20, help="Measured iterations per shape.")
     kernels_bench_parser.add_argument("--json", action="store_true", help="Print benchmark JSON.")
 
+    profile_parser = commands.add_parser("profile", help="Analyze and benchmark Jaxtitan performance paths.")
+    profile_commands = profile_parser.add_subparsers(dest="profile_command", required=True)
+
+    profile_analyze_parser = profile_commands.add_parser(
+        "analyze",
+        help="Analyze completed profiling artifacts below a directory.",
+    )
+    profile_analyze_parser.add_argument("root", help="Run directory or capture root to analyze recursively.")
+    profile_analyze_parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=2,
+        help="Initial steps excluded before steady-state analysis.",
+    )
+    profile_analyze_parser.add_argument("--json", action="store_true", help="Print stable analysis JSON.")
+
+    profile_bench_parser = profile_commands.add_parser(
+        "bench",
+        help="Run a deterministic local performance microbenchmark.",
+    )
+    profile_bench_parser.add_argument("component", choices=["moe", "muon"], help="Component to benchmark.")
+    profile_bench_parser.add_argument("--warmup", type=int, default=3, help="Warmup executions per case.")
+    profile_bench_parser.add_argument("--iters", type=int, default=10, help="Measured executions per case.")
+    profile_bench_parser.add_argument("--json", action="store_true", help="Print stable benchmark JSON.")
+
     run_parser = commands.add_parser("run", help="Create and inspect local run artifacts.")
     run_commands = run_parser.add_subparsers(dest="run_command", required=True)
 
@@ -226,6 +251,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(benchmark_to_json(payload))
             else:
                 print(format_rmsnorm_benchmark(payload))
+            return 0
+
+        if args.command == "profile" and args.profile_command == "analyze":
+            from jaxtitan.runtime.profile_analysis import (
+                analyze_profile_root,
+                format_profile_analysis,
+                profile_analysis_to_json,
+            )
+
+            payload = analyze_profile_root(args.root, warmup_steps=args.warmup_steps)
+            if args.json:
+                print(profile_analysis_to_json(payload))
+            else:
+                print(format_profile_analysis(payload))
+            return 0
+
+        if args.command == "profile" and args.profile_command == "bench":
+            from jaxtitan.runtime.profile_bench import benchmark_component, benchmark_to_json, format_benchmark
+
+            payload = benchmark_component(args.component, warmup=args.warmup, iters=args.iters)
+            if args.json:
+                print(benchmark_to_json(payload))
+            else:
+                print(format_benchmark(payload))
             return 0
 
         if args.command == "run" and args.run_command == "init":
