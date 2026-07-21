@@ -23,6 +23,7 @@ uv run pytest -q tests/jaxtitan
 Artifacts:
 
 - Branch: `codex/moe-expert-major`, base `a083590`.
+- Implementation commit: `76b8af8`; draft PR: `#16`.
 - Local semantic reference: `LocalExpertDispatcher`.
 - Production route: `AllToAllExpertDispatcher`.
 - Existing RDEP implementation remains `RdepStaticExpertDispatcher`.
