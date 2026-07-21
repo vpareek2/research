@@ -263,10 +263,16 @@ def generate_tokens(
         raise ContractError(
             f"prompt_len + max_new_tokens ({total_len}) exceeds model.max_seq_len={model_spec.max_seq_len}"
         )
+    device_batch_size = _pad_to_data_multiple(batch_size, sharding)
     padded_prompt_len = _pad_to_cp_multiple(prompt_len, sharding)
     padded_total_len = _pad_to_cp_multiple(total_len, sharding)
-    cache = init_kv_cache(model_spec, batch_size=batch_size, max_cache_len=padded_total_len, sharding=sharding)
-    padded_prompt_ids = _pad_prompt_ids(prompt_ids, padded_prompt_len)
+    cache = init_kv_cache(
+        model_spec,
+        batch_size=device_batch_size,
+        max_cache_len=padded_total_len,
+        sharding=sharding,
+    )
+    padded_prompt_ids = _pad_prompt_ids(_pad_batch_rows(prompt_ids, device_batch_size), padded_prompt_len)
     positions = jnp.broadcast_to(jnp.arange(padded_prompt_len, dtype=jnp.int32)[None, :], padded_prompt_ids.shape)
     prompt_mask = jnp.broadcast_to(
         (jnp.arange(padded_prompt_len, dtype=jnp.int32) < prompt_len)[None, :],
@@ -280,7 +286,7 @@ def generate_tokens(
     prefill_step = make_prefill_step(graph, sharding=sharding)
     decode_step = make_decode_step(graph, sharding=sharding)
     prefill_out = prefill_step(state, prefill_batch, cache)
-    next_logits = prefill_out.logits[:, prompt_len - 1, :]
+    next_logits = prefill_out.logits[:batch_size, prompt_len - 1, :]
     cache = prefill_out.cache
     current_state = state
     generated = []
@@ -290,15 +296,17 @@ def generate_tokens(
         current_state = sample.state
         generated.append(sample.token_ids)
         logprobs.append(sample.logprobs)
+        decode_token_ids = _pad_batch_rows(sample.token_ids, device_batch_size)
         decode_positions = jnp.full((batch_size,), prompt_len + offset, dtype=jnp.int32)
-        attention_mask = jnp.arange(padded_total_len, dtype=jnp.int32)[None, :] <= decode_positions[:, None]
+        padded_decode_positions = _pad_batch_rows(decode_positions, device_batch_size)
+        attention_mask = jnp.arange(padded_total_len, dtype=jnp.int32)[None, :] <= padded_decode_positions[:, None]
         decode_batch = DecodeBatch(
-            token_ids=_place_batch_vector(sample.token_ids, sharding),
-            positions=_place_batch_vector(decode_positions, sharding),
+            token_ids=_place_batch_vector(decode_token_ids, sharding),
+            positions=_place_batch_vector(padded_decode_positions, sharding),
             attention_mask=_place_decode_mask(attention_mask, sharding),
         )
         decode_out = decode_step(current_state, decode_batch, cache)
-        next_logits = decode_out.logits
+        next_logits = decode_out.logits[:batch_size, :]
         cache = decode_out.cache
     generated_ids = jnp.stack(generated, axis=1)
     generated_logprobs = jnp.stack(logprobs, axis=1)
@@ -311,11 +319,27 @@ def generate_tokens(
     )
 
 
+def _pad_to_data_multiple(batch_size: int, sharding: ShardingPlan | None) -> int:
+    if sharding is None:
+        return batch_size
+    axis_size = sharding.mesh.data_axis_size
+    return ((batch_size + axis_size - 1) // axis_size) * axis_size
+
+
 def _pad_to_cp_multiple(length: int, sharding: ShardingPlan | None) -> int:
     if sharding is None or not sharding.parallelism.context_parallel:
         return length
     axis_size = sharding.context_parallel_axis_size
     return ((length + axis_size - 1) // axis_size) * axis_size
+
+
+def _pad_batch_rows(value: Any, padded_batch_size: int) -> Any:
+    if value.shape[0] == padded_batch_size:
+        return value
+    pad_rows = padded_batch_size - value.shape[0]
+    if pad_rows < 0:
+        raise ContractError(f"padded_batch_size {padded_batch_size} is smaller than batch size {value.shape[0]}")
+    return jnp.pad(value, ((0, pad_rows), *[(0, 0) for _ in range(value.ndim - 1)]))
 
 
 def _pad_prompt_ids(prompt_ids: Any, padded_len: int) -> Any:
