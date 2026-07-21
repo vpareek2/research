@@ -6,6 +6,7 @@ import pytest
 from jaxtitan.config import load_config
 from jaxtitan.errors import ContractError
 from jaxtitan.runtime.resume import (
+    _hash,
     build_resume_compat,
     checkpoint_metadata,
     validate_resume_compat,
@@ -170,10 +171,43 @@ def test_resume_fingerprint_changes_for_expert_parallel_axis(tmp_path: Path, pre
         "num_experts": 4,
         "experts_per_rank": 2,
         "dispatcher_backend": "all_to_all",
-        "capacity_policy": "strict_dropless_static_source_buckets",
-        "token_partition": "assignment_index_mod_ep",
-        "combine_policy": "reverse_all_to_all_then_psum",
+        "capacity_policy": "strict_dropless_static_worst_case_receive_bound",
+        "token_partition": "source_sequence_sharded_over_ep",
+        "combine_policy": "reverse_all_to_all_restore_source_order_then_all_gather",
+        "expert_execution": "expert_major_ragged_dot",
     }
+
+
+def test_resume_rejects_pre_grouped_gemm_expert_parallel_checkpoint(
+    tmp_path: Path,
+    prepared_dataset_factory,
+) -> None:
+    manifest = _manifest(prepared_dataset_factory, "old-ep-dispatch")
+    spec = _runtime_spec(
+        tmp_path,
+        manifest,
+        axis_names=("data", "ep"),
+        axis_sizes=(1, 4),
+        expert_parallel=True,
+        trinity_moe_num_experts=4,
+        hidden_size=16,
+        intermediate_size=32,
+        num_heads=4,
+        n_kv_heads=4,
+    )
+    metadata = checkpoint_metadata(spec, {"step": 1, "tokens_seen": 128, "loss": 1.0}, reason="interval")
+    policy = metadata["compatibility"]["parallelism"]["expert_parallel_policy"]
+    policy["capacity_policy"] = "strict_dropless_static_source_buckets"
+    policy["token_partition"] = "assignment_index_mod_ep"
+    policy["combine_policy"] = "reverse_all_to_all_then_psum"
+    del policy["expert_execution"]
+    metadata["runtime_fingerprint"] = _hash(metadata["compatibility"])
+
+    with pytest.raises(
+        ContractError,
+        match=r"compatibility\.parallelism\.expert_parallel_policy\.expert_execution",
+    ):
+        validate_resume_metadata(metadata, spec)
 
 
 def test_resume_fingerprint_changes_for_data_axis_rdep(tmp_path: Path, prepared_dataset_factory) -> None:

@@ -703,9 +703,10 @@ def test_run_preflight_reports_expert_parallel_policy(
         "num_experts": 4,
         "experts_per_rank": 1,
         "dispatcher_backend": "all_to_all",
-        "capacity_policy": "strict_dropless_static_source_buckets",
-        "token_partition": "assignment_index_mod_ep",
-        "combine_policy": "reverse_all_to_all_then_psum",
+        "capacity_policy": "strict_dropless_static_worst_case_receive_bound",
+        "token_partition": "source_sequence_sharded_over_ep",
+        "combine_policy": "reverse_all_to_all_restore_source_order_then_all_gather",
+        "expert_execution": "expert_major_ragged_dot",
     }
     assert payload["parallelism"]["execution_mode"] == "replicated_data_parallel+ep"
     assert payload["mesh"]["ep_axis_size"] == 4

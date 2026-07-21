@@ -46,9 +46,7 @@ def benchmark_component(component: str, *, warmup: int = 3, iters: int = 10) -> 
         "iters": iters,
         "timing_is_acceptance_gate": False,
         "correctness_is_checked": False,
-        "known_correctness_constraint": (
-            "current all_to_all backward is not an accepted correctness baseline" if component == "moe" else None
-        ),
+        "known_correctness_constraint": None,
         "cases": cases,
     }
 

@@ -1359,7 +1359,11 @@ def test_run_training_accepts_expert_parallel_moe_muon(
     assert summary.execution_mode == "replicated_data_parallel+ep"
     assert diagnostics["parallelism"]["expert_parallel"] is True
     assert diagnostics["parallelism"]["expert_parallel_policy"]["dispatcher_backend"] == "all_to_all"
-    assert diagnostics["parallelism"]["expert_parallel_policy"]["capacity_policy"] == "strict_dropless_static_source_buckets"
+    assert (
+        diagnostics["parallelism"]["expert_parallel_policy"]["capacity_policy"]
+        == "strict_dropless_static_worst_case_receive_bound"
+    )
+    assert diagnostics["parallelism"]["expert_parallel_policy"]["expert_execution"] == "expert_major_ragged_dot"
     assert diagnostics["parallelism"]["mesh"]["ep_axis_size"] == 4
     assert diagnostics["sharding"]["model_state"]["ep_sharded_leaves"] == 3
     assert diagnostics["sharding"]["optimizer_state"]["ep_sharded_leaves"] == 3
