@@ -862,7 +862,11 @@ def test_all_to_all_expert_dispatcher_lowers_collectives() -> None:
 
     jaxpr = str(jax.make_jaxpr(lambda hidden, ids, route_weights: AllToAllExpertDispatcher(mesh)(experts, hidden, ids, route_weights))(x, expert_ids, weights))
 
-    assert "all_to_all" in jaxpr
+    assert jax.config.jax_ragged_dot_use_gpu_pallas_triton_lowering is True
+    if jax.default_backend() == "cpu":
+        assert "all_to_all" in jaxpr
+    else:
+        assert jaxpr.count("ragged_all_to_all[") == 2
     assert jaxpr.count("ragged_dot_general[") == 3
 
 

@@ -15,6 +15,72 @@ from jaxtitan.models.output import AuxLoss, RouterStats
 from jaxtitan.specs.model import ModelSpec, TrinityMoeSpec
 
 
+# The production expert-major path is intentionally coupled to JAX's GPU
+# grouped-GEMM lowering. There is no silent generic ragged-dot fallback on GPU.
+jax.config.update("jax_ragged_dot_use_gpu_pallas_triton_lowering", True)
+
+
+def _ragged_all_to_all(
+    operand: jax.Array,
+    output: jax.Array,
+    input_offsets: jax.Array,
+    send_sizes: jax.Array,
+    output_offsets: jax.Array,
+    recv_sizes: jax.Array,
+    *,
+    axis_name: str,
+    axis_size: int,
+) -> jax.Array:
+    """Use native ragged transport, with a CPU-only semantic test lowering."""
+
+    if jax.default_backend() != "cpu":
+        return jax.lax.ragged_all_to_all(
+            operand,
+            output,
+            input_offsets,
+            send_sizes,
+            output_offsets,
+            recv_sizes,
+            axis_name=axis_name,
+        )
+
+    # XLA:CPU cannot lower ragged-all-to-all in JAX 0.10. Keep fake-device
+    # correctness coverage by expressing the same slices with fixed buffers.
+    # This branch is never selected by a GPU process.
+    slices_per_device = input_offsets.shape[0] // axis_size
+    buffer_size = operand.shape[0]
+    positions = jnp.arange(buffer_size, dtype=jnp.int32)
+    block_sizes = send_sizes.reshape(axis_size, slices_per_device)
+    block_offsets = (jnp.cumsum(block_sizes, axis=1, dtype=jnp.int32) - block_sizes).reshape(-1)
+    sent = jnp.zeros((axis_size, buffer_size, *operand.shape[1:]), dtype=operand.dtype)
+    for slice_index in range(input_offsets.shape[0]):
+        destination = slice_index // slices_per_device
+        operand_indices = jnp.clip(input_offsets[slice_index] + positions, 0, operand.shape[0] - 1)
+        sent_indices = jnp.clip(block_offsets[slice_index] + positions, 0, buffer_size - 1)
+        mask = positions < send_sizes[slice_index]
+        mask = mask.reshape((buffer_size,) + (1,) * (operand.ndim - 1))
+        sent = sent.at[destination, sent_indices].add(jnp.where(mask, operand[operand_indices], 0))
+    received = jax.lax.all_to_all(sent, axis_name, split_axis=0, concat_axis=0, tiled=True)
+    received_output_offsets = jax.lax.all_to_all(
+        output_offsets, axis_name, split_axis=0, concat_axis=0, tiled=True
+    )
+    received_block_sizes = recv_sizes.reshape(axis_size, slices_per_device)
+    received_block_offsets = (
+        jnp.cumsum(received_block_sizes, axis=1, dtype=jnp.int32) - received_block_sizes
+    ).reshape(-1)
+    result = output
+    for slice_index in range(input_offsets.shape[0]):
+        source = slice_index // slices_per_device
+        received_indices = jnp.clip(received_block_offsets[slice_index] + positions, 0, buffer_size - 1)
+        result_indices = jnp.clip(
+            received_output_offsets[slice_index] + positions, 0, output.shape[0] - 1
+        )
+        mask = positions < recv_sizes[slice_index]
+        mask = mask.reshape((buffer_size,) + (1,) * (operand.ndim - 1))
+        result = result.at[result_indices].add(jnp.where(mask, received[source, received_indices], 0))
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class RouterOutput:
     """Selected expert ids and normalized routing weights."""
@@ -505,53 +571,64 @@ def _all_to_all_expert_swiglu(
 
     def local_dispatch(local_x, local_expert_ids, local_weights, local_token_valid, local_gate, local_up, local_down):
         local_expert_count = local_gate.shape[0]
+        expert_count = ep_size * local_expert_count
         token_count = local_x.shape[0] * local_x.shape[1]
         top_k = local_expert_ids.shape[-1]
         assignment_count = token_count * top_k
         flat_x = jnp.repeat(jnp.reshape(local_x, (token_count, local_x.shape[-1])), top_k, axis=0)
         flat_expert_ids = jnp.reshape(local_expert_ids, (assignment_count,))
         flat_weights = jnp.reshape(local_weights, (assignment_count,))
-        flat_assignment_ids = jnp.arange(assignment_count, dtype=jnp.int32)
         flat_valid = jnp.repeat(jnp.reshape(local_token_valid, (token_count,)), top_k, axis=0)
-        owner_rank = flat_expert_ids // local_expert_count
 
-        def bucket_for_owner(owner):
-            mask = flat_valid & (owner_rank == owner)
-            order_key = jnp.where(mask, flat_assignment_ids, assignment_count + flat_assignment_ids)
-            order = jnp.argsort(order_key, stable=True)
-            valid = mask[order]
-            local_ids = flat_expert_ids[order] - owner * local_expert_count
-            return (
-                flat_x[order],
-                jnp.clip(local_ids, 0, local_expert_count - 1).astype(jnp.int32),
-                flat_weights[order],
-                flat_assignment_ids[order],
-                valid,
-            )
-
-        owners = jnp.arange(ep_size, dtype=jnp.int32)
-        send_x, send_local_ids, send_weights, send_assignment_ids, send_valid = jax.vmap(bucket_for_owner)(owners)
-        recv_x = jax.lax.all_to_all(send_x, axis_name, split_axis=0, concat_axis=0, tiled=True)
-        recv_local_ids = jax.lax.all_to_all(send_local_ids, axis_name, split_axis=0, concat_axis=0, tiled=True)
-        recv_weights = jax.lax.all_to_all(send_weights, axis_name, split_axis=0, concat_axis=0, tiled=True)
-        recv_valid = jax.lax.all_to_all(send_valid, axis_name, split_axis=0, concat_axis=0, tiled=True)
-
-        receive_capacity = recv_local_ids.size
-        flat_recv_x = jnp.reshape(recv_x, (receive_capacity, recv_x.shape[-1]))
-        flat_recv_local_ids = jnp.reshape(recv_local_ids, (receive_capacity,))
-        flat_recv_weights = jnp.reshape(recv_weights, (receive_capacity,))
-        flat_recv_valid = jnp.reshape(recv_valid, (receive_capacity,))
-        expert_order_key = jnp.where(flat_recv_valid, flat_recv_local_ids, local_expert_count)
-        expert_order = jnp.argsort(expert_order_key, stable=True)
-        packed_x = flat_recv_x[expert_order]
-        packed_weights = flat_recv_weights[expert_order]
-        packed_valid = flat_recv_valid[expert_order]
-        expert_indices = jnp.arange(local_expert_count, dtype=jnp.int32)
-        group_sizes = jnp.sum(
-            flat_recv_valid[None, :] & (flat_recv_local_ids[None, :] == expert_indices[:, None]),
+        # Sort the source assignments globally by destination expert. Invalid
+        # padding remains at the tail and is never transferred.
+        source_order = jnp.argsort(
+            jnp.where(flat_valid, flat_expert_ids, expert_count),
+            stable=True,
+        )
+        inverse_source_order = jnp.argsort(source_order, stable=True)
+        sorted_x = flat_x[source_order]
+        expert_indices = jnp.arange(expert_count, dtype=jnp.int32)
+        send_sizes = jnp.sum(
+            flat_valid[None, :] & (flat_expert_ids[None, :] == expert_indices[:, None]),
             axis=1,
             dtype=jnp.int32,
         )
+        input_offsets = jnp.cumsum(send_sizes, dtype=jnp.int32) - send_sizes
+
+        # Exchange only metadata with fixed all-to-all. The activation payload
+        # uses ragged all-to-all and lands directly in expert-major order.
+        all_send_sizes = jax.lax.all_gather(send_sizes, axis_name)
+        recv_sizes = jax.lax.all_to_all(send_sizes, axis_name, split_axis=0, concat_axis=0, tiled=True)
+        source_rank = jax.lax.axis_index(axis_name)
+        source_prefix = jnp.sum(
+            jnp.where(
+                jnp.arange(ep_size, dtype=jnp.int32)[:, None] < source_rank,
+                all_send_sizes,
+                0,
+            ),
+            axis=0,
+            dtype=jnp.int32,
+        )
+        expert_totals = jnp.sum(all_send_sizes, axis=0, dtype=jnp.int32).reshape(
+            ep_size, local_expert_count
+        )
+        expert_bases = (
+            jnp.cumsum(expert_totals, axis=1, dtype=jnp.int32) - expert_totals
+        ).reshape((expert_count,))
+        output_offsets = expert_bases + source_prefix
+        receive_capacity = ep_size * assignment_count
+        packed_x = _ragged_all_to_all(
+            sorted_x,
+            jnp.zeros((receive_capacity, local_x.shape[-1]), dtype=local_x.dtype),
+            input_offsets,
+            send_sizes,
+            output_offsets,
+            recv_sizes,
+            axis_name=axis_name,
+            axis_size=ep_size,
+        )
+        group_sizes = jnp.sum(recv_sizes.reshape(ep_size, local_expert_count), axis=0, dtype=jnp.int32)
 
         gate_x = jax.lax.ragged_dot(packed_x, local_gate, group_sizes)
         up_x = jax.lax.ragged_dot(packed_x, local_up, group_sizes)
@@ -559,19 +636,34 @@ def _all_to_all_expert_swiglu(
         packed_output = jax.lax.ragged_dot(expert_hidden, local_down, group_sizes)
         if expert_fsdp_axis_name is not None:
             packed_output = jax.lax.psum(packed_output, expert_fsdp_axis_name)
-        packed_output = jnp.where(
-            packed_valid[:, None],
-            packed_output * packed_weights[:, None],
-            0,
-        )
-        flat_recv_output = jnp.zeros_like(packed_output).at[expert_order].set(packed_output)
-        recv_output = jnp.reshape(flat_recv_output, recv_x.shape)
 
-        returned_output = jax.lax.all_to_all(recv_output, axis_name, split_axis=0, concat_axis=0, tiled=True)
-        token_ids = send_assignment_ids // top_k
-        flat_output = jnp.zeros((token_count, local_x.shape[-1]), dtype=local_x.dtype)
-        flat_output = flat_output.at[token_ids].add(jnp.where(send_valid[..., None], returned_output, 0))
-        return jnp.reshape(flat_output, local_x.shape)
+        # Reverse the same ragged exchange. The expert rank sends source-major
+        # chunks; each source receives them back in its expert-sorted order.
+        received_offsets = jax.lax.all_to_all(
+            output_offsets, axis_name, split_axis=0, concat_axis=0, tiled=True
+        )
+        returned_offsets = jax.lax.all_to_all(
+            input_offsets, axis_name, split_axis=0, concat_axis=0, tiled=True
+        )
+        returned_sorted = _ragged_all_to_all(
+            packed_output,
+            jnp.zeros((assignment_count, local_x.shape[-1]), dtype=local_x.dtype),
+            received_offsets,
+            recv_sizes,
+            returned_offsets,
+            send_sizes,
+            axis_name=axis_name,
+            axis_size=ep_size,
+        )
+        assignment_output = returned_sorted[inverse_source_order]
+        assignment_output = jnp.where(
+            flat_valid[:, None], assignment_output * flat_weights[:, None], 0
+        )
+        token_output = jnp.sum(
+            assignment_output.reshape(token_count, top_k, local_x.shape[-1]),
+            axis=1,
+        )
+        return jnp.reshape(token_output, local_x.shape)
 
     sequence_axes = tuple(
         name for name in (context_parallel_axis_name, axis_name) if name is not None

@@ -173,8 +173,10 @@ def test_resume_fingerprint_changes_for_expert_parallel_axis(tmp_path: Path, pre
         "dispatcher_backend": "all_to_all",
         "capacity_policy": "strict_dropless_static_worst_case_receive_bound",
         "token_partition": "source_sequence_sharded_over_ep",
-        "combine_policy": "reverse_all_to_all_restore_source_order_then_all_gather",
-        "expert_execution": "expert_major_ragged_dot",
+        "combine_policy": "reverse_ragged_all_to_all_restore_source_order_then_all_gather",
+        "transport": "jax_lax_ragged_all_to_all",
+        "expert_execution": "expert_major_jax_lax_ragged_dot",
+        "grouped_gemm_lowering": "gpu_pallas_triton",
     }
 
 
@@ -206,6 +208,38 @@ def test_resume_rejects_pre_grouped_gemm_expert_parallel_checkpoint(
     with pytest.raises(
         ContractError,
         match=r"compatibility\.parallelism\.expert_parallel_policy\.expert_execution",
+    ):
+        validate_resume_metadata(metadata, spec)
+
+
+def test_resume_rejects_pre_ragged_transport_expert_parallel_checkpoint(
+    tmp_path: Path,
+    prepared_dataset_factory,
+) -> None:
+    manifest = _manifest(prepared_dataset_factory, "old-expert-major-transport")
+    spec = _runtime_spec(
+        tmp_path,
+        manifest,
+        axis_names=("data", "ep"),
+        axis_sizes=(1, 4),
+        expert_parallel=True,
+        trinity_moe_num_experts=4,
+        hidden_size=16,
+        intermediate_size=32,
+        num_heads=4,
+        n_kv_heads=4,
+    )
+    metadata = checkpoint_metadata(spec, {"step": 1, "tokens_seen": 128, "loss": 1.0}, reason="interval")
+    policy = metadata["compatibility"]["parallelism"]["expert_parallel_policy"]
+    policy["combine_policy"] = "reverse_all_to_all_restore_source_order_then_all_gather"
+    policy["expert_execution"] = "expert_major_ragged_dot"
+    del policy["transport"]
+    del policy["grouped_gemm_lowering"]
+    metadata["runtime_fingerprint"] = _hash(metadata["compatibility"])
+
+    with pytest.raises(
+        ContractError,
+        match=r"compatibility\.parallelism\.expert_parallel_policy\.grouped_gemm_lowering",
     ):
         validate_resume_metadata(metadata, spec)
 

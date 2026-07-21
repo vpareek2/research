@@ -13,8 +13,10 @@ EXPERT_PARALLEL_DISPATCHER_BACKEND = "all_to_all"
 RDEP_STATIC_DISPATCHER_BACKEND = "rdep_static"
 EXPERT_PARALLEL_CAPACITY_POLICY = "strict_dropless_static_worst_case_receive_bound"
 EXPERT_PARALLEL_TOKEN_PARTITION = "source_sequence_sharded_over_ep"
-EXPERT_PARALLEL_COMBINE_POLICY = "reverse_all_to_all_restore_source_order_then_all_gather"
-EXPERT_PARALLEL_EXPERT_EXECUTION = "expert_major_ragged_dot"
+EXPERT_PARALLEL_TRANSPORT = "jax_lax_ragged_all_to_all"
+EXPERT_PARALLEL_COMBINE_POLICY = "reverse_ragged_all_to_all_restore_source_order_then_all_gather"
+EXPERT_PARALLEL_EXPERT_EXECUTION = "expert_major_jax_lax_ragged_dot"
+EXPERT_PARALLEL_GROUPED_GEMM_LOWERING = "gpu_pallas_triton"
 RDEP_STATIC_CAPACITY_POLICY = "strict_dropless_static_source_buckets"
 RDEP_STATIC_TOKEN_PARTITION = "route_row_source_data_axis"
 RDEP_STATIC_COMBINE_POLICY = "return_by_route_row_identity"
@@ -118,7 +120,9 @@ def expert_parallel_policy_payload(
         "combine_policy": combine_policy if enabled else None,
     }
     if backend == EXPERT_PARALLEL_DISPATCHER_BACKEND:
+        payload["transport"] = EXPERT_PARALLEL_TRANSPORT
         payload["expert_execution"] = EXPERT_PARALLEL_EXPERT_EXECUTION
+        payload["grouped_gemm_lowering"] = EXPERT_PARALLEL_GROUPED_GEMM_LOWERING
     if backend == RDEP_STATIC_DISPATCHER_BACKEND:
         payload["rdep_pool_axis"] = axis_name
         payload["route_row_identity"] = RDEP_STATIC_ROUTE_ROW_IDENTITY
