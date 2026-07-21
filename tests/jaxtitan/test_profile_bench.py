@@ -24,7 +24,7 @@ def test_benchmark_component_emits_stable_non_gating_payload(monkeypatch: pytest
     assert payload["component"] == "moe"
     assert payload["timing_is_acceptance_gate"] is False
     assert payload["correctness_is_checked"] is False
-    assert "not an accepted correctness baseline" in payload["known_correctness_constraint"]
+    assert payload["known_correctness_constraint"] is None
     assert payload["warmup"] == 1
     assert payload["iters"] == 2
     assert json.loads(profile_bench.benchmark_to_json(payload))["schema_version"] == 1

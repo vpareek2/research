@@ -3,6 +3,80 @@
 Purpose: turn measured Jaxtitan profiles into an ordered optimization program
 without weakening correctness or adding speculative kernel surfaces.
 
+## 2026-07-20 [codex] M1 expert-major MoE local acceptance
+
+Context:
+
+- Replaced the production all-to-all MoE path with truthfully source-sharded
+  sequence routing and expert-major `jax.lax.ragged_dot` execution.
+- Removed assignment-indexed gate/up/down matrix gathers. The local reference,
+  psum reference, and data-axis RDEP paths are unchanged.
+- Restored the differential VJP guardrail that exposed the original bug and
+  made the dispatcher topology part of the resume fingerprint.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+JAX_PLATFORMS=cpu \
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+uv run pytest -q \
+  tests/jaxtitan/test_model.py::test_all_to_all_expert_dispatcher_preserves_edge_case_outputs_and_gradients \
+  tests/jaxtitan/test_model.py::test_all_to_all_expert_dispatcher_matches_multistep_reference_updates \
+  tests/jaxtitan/test_model.py::test_all_to_all_expert_dispatcher_lowers_collectives \
+  tests/jaxtitan/test_preflight.py::test_run_preflight_reports_expert_parallel_policy \
+  tests/jaxtitan/test_preflight.py::test_run_preflight_reports_data_axis_rdep_policy \
+  tests/jaxtitan/test_resume_compat.py::test_resume_fingerprint_changes_for_expert_parallel_axis \
+  tests/jaxtitan/test_profile_bench.py::test_benchmark_component_emits_stable_non_gating_payload
+
+JAX_PLATFORMS=cpu \
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+uv run jaxtitan profile bench moe --warmup 0 --iters 1 --json \
+  > /tmp/jaxtitan-m1-moe-bench.json
+
+JAX_PLATFORMS=cpu \
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+uv run pytest -q tests/jaxtitan
+
+git diff --check
+```
+
+Artifacts:
+
+- Branch: `codex/moe-expert-major`, based on M0 merge `a083590`.
+- Dispatcher: `src/jaxtitan/models/components/moe.py`.
+- Runtime contract: `src/jaxtitan/models/execution.py`.
+- Directional local benchmark: `/tmp/jaxtitan-m1-moe-bench.json`; it is not a
+  retained performance claim.
+- H100 comparison baseline:
+  `cloud_results/profile64_h100_sxm_2026-07-20.tgz`.
+
+Result:
+
+- Focused correctness and artifact gate: `11 passed`.
+- Complete four-fake-CPU suite: `640 passed, 1 skipped` in `374.87s`.
+- Exact forward/VJP coverage passes for EP4, data2-by-EP2, TP2-by-EP2,
+  CP2-by-EP2, and EP2-by-expert-FSDP2 under balanced, empty-expert,
+  all-to-one, and duplicate routing. Every physical replica is compared with
+  the local reference at `rtol=1e-5, atol=1e-5`.
+- Three successive expert-parameter updates match the replicated reference.
+- The local forward/backward benchmark lowers expert work to nine direct dot
+  instructions. It no longer materializes assignment-shaped expert matrices;
+  the final EP replication is one all-gather.
+- Pre-change EP checkpoints fail resume compatibility at the explicit
+  `expert_execution` policy field. Evaluation remains independent of training
+  resume compatibility.
+- No H100 performance result exists yet, so the 5x M1 gate remains open.
+
+Next:
+
+- Run the short four-H100 correctness layouts, followed by the unchanged EP
+  and TP-by-EP AdamW/Muon 64-step profiles.
+- Keep the implementation PR draft until all four median step times improve by
+  at least 5x and trace evidence shows GEMMs replacing the prior 67-170 ms
+  scatter/reduce kernels.
+
 ## 2026-07-20 [codex] M0 local performance guardrails
 
 Context:

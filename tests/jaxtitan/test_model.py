@@ -530,24 +530,34 @@ def test_all_to_all_expert_dispatcher_matches_local_dispatcher_on_data_ep_mesh()
 
 
 @pytest.mark.parametrize(
-    ("mesh_shape", "axis_names", "expert_fsdp_axis", "batch_size"),
+    ("mesh_shape", "axis_names", "expert_fsdp_axis", "context_axis", "batch_size"),
     [
-        pytest.param((1, 4), ("data", "ep"), None, 1, id="ep4"),
-        pytest.param((2, 2), ("data", "ep"), None, 4, id="data2_ep2"),
-        pytest.param((1, 2, 2), ("data", "tp", "ep"), "tp", 1, id="tp2_ep2"),
+        pytest.param((1, 4), ("data", "ep"), None, None, 1, id="ep4"),
+        pytest.param((2, 2), ("data", "ep"), None, None, 4, id="data2_ep2"),
+        pytest.param((1, 2, 2), ("data", "tp", "ep"), "tp", None, 1, id="tp2_ep2"),
+        pytest.param((1, 2, 2), ("data", "cp", "ep"), None, "cp", 1, id="cp2_ep2"),
+        pytest.param(
+            (1, 2, 2),
+            ("data", "ep", "expert_fsdp"),
+            "expert_fsdp",
+            None,
+            1,
+            id="ep2_expert_fsdp2",
+        ),
     ],
 )
-def test_all_to_all_expert_dispatcher_preserves_edge_case_outputs(
+def test_all_to_all_expert_dispatcher_preserves_edge_case_outputs_and_gradients(
     mesh_shape,
     axis_names,
     expert_fsdp_axis,
+    context_axis,
     batch_size,
 ) -> None:
     mesh = Mesh(np.asarray(jax.devices()[:4], dtype=object).reshape(mesh_shape), axis_names)
     num_experts = 4
     hidden_size = 3
     intermediate_size = 4
-    seq_len = 4
+    seq_len = 6
     top_k = 2
     x = jnp.arange(batch_size * seq_len * hidden_size, dtype=jnp.float32).reshape(
         batch_size,
@@ -576,8 +586,9 @@ def test_all_to_all_expert_dispatcher_preserves_edge_case_outputs(
         axis=-1,
     )
 
-    sharded_x = jax.device_put(x, NamedSharding(mesh, P("data", None, None)))
-    sharded_weights = jax.device_put(weights, NamedSharding(mesh, P("data", None, None)))
+    activation_spec = P("data", context_axis, None)
+    sharded_x = jax.device_put(x, NamedSharding(mesh, activation_spec))
+    sharded_weights = jax.device_put(weights, NamedSharding(mesh, activation_spec))
     sharded_gate = jax.device_put(gate, NamedSharding(mesh, P("ep", None, expert_fsdp_axis)))
     sharded_up = jax.device_put(up, NamedSharding(mesh, P("ep", None, expert_fsdp_axis)))
     sharded_down = jax.device_put(down, NamedSharding(mesh, P("ep", expert_fsdp_axis, None)))
@@ -602,13 +613,25 @@ def test_all_to_all_expert_dispatcher_preserves_edge_case_outputs(
             mesh=mesh,
             axis_name="ep",
             expert_fsdp_axis_name=expert_fsdp_axis,
-            context_parallel_axis_name=None,
+            context_parallel_axis_name=context_axis,
         )
 
+    differentiable_args = (0, 2, 3, 4, 5)
+    cotangent = jnp.arange(x.size, dtype=jnp.float32).reshape(x.shape) / float(x.size)
+
+    def reference_loss(*args):
+        return jnp.sum(reference_output(*args) * cotangent)
+
+    def distributed_loss(*args):
+        return jnp.sum(distributed_output(*args) * cotangent)
+
+    compiled_reference_output = jax.jit(reference_output)
     compiled_distributed_output = jax.jit(distributed_output)
+    compiled_reference_grad = jax.jit(jax.grad(reference_loss, argnums=differentiable_args))
+    compiled_distributed_grad = jax.jit(jax.grad(distributed_loss, argnums=differentiable_args))
     for ids in (balanced, no_expert_three, all_one_expert, duplicate_routes):
-        sharded_ids = jax.device_put(ids, NamedSharding(mesh, P("data", None, None)))
-        expected_output = reference_output(
+        sharded_ids = jax.device_put(ids, NamedSharding(mesh, activation_spec))
+        expected_output = compiled_reference_output(
             x,
             ids,
             weights,
@@ -616,6 +639,7 @@ def test_all_to_all_expert_dispatcher_preserves_edge_case_outputs(
             up,
             down,
         )
+        expected_gradients = compiled_reference_grad(x, ids, weights, gate, up, down)
         actual_output = compiled_distributed_output(
             sharded_x,
             sharded_ids,
@@ -624,7 +648,23 @@ def test_all_to_all_expert_dispatcher_preserves_edge_case_outputs(
             sharded_up,
             sharded_down,
         )
-        repeated = compiled_distributed_output(
+        actual_gradients = compiled_distributed_grad(
+            sharded_x,
+            sharded_ids,
+            sharded_weights,
+            sharded_gate,
+            sharded_up,
+            sharded_down,
+        )
+        repeated_output = compiled_distributed_output(
+            sharded_x,
+            sharded_ids,
+            sharded_weights,
+            sharded_gate,
+            sharded_up,
+            sharded_down,
+        )
+        repeated_gradients = compiled_distributed_grad(
             sharded_x,
             sharded_ids,
             sharded_weights,
@@ -634,9 +674,94 @@ def test_all_to_all_expert_dispatcher_preserves_edge_case_outputs(
         )
 
         assert ids.size == assignment_count
-        assert actual_output.sharding.spec == P("data", None, None)
+        assert actual_output.sharding.spec == activation_spec
         np.testing.assert_allclose(actual_output, expected_output, rtol=1e-5, atol=1e-5)
-        np.testing.assert_array_equal(repeated, actual_output)
+        np.testing.assert_array_equal(repeated_output, actual_output)
+        for actual_gradient, expected_gradient, repeated_gradient in zip(
+            actual_gradients,
+            expected_gradients,
+            repeated_gradients,
+            strict=True,
+        ):
+            np.testing.assert_allclose(actual_gradient, expected_gradient, rtol=1e-5, atol=1e-5)
+            np.testing.assert_array_equal(repeated_gradient, actual_gradient)
+            assert bool(jnp.all(jnp.isfinite(actual_gradient)))
+            expected_array = np.asarray(expected_gradient)
+            for shard in actual_gradient.addressable_shards:
+                np.testing.assert_allclose(shard.data, expected_array[shard.index], rtol=1e-5, atol=1e-5)
+
+
+def test_all_to_all_expert_dispatcher_matches_multistep_reference_updates() -> None:
+    mesh = Mesh(np.asarray(jax.devices()[:4], dtype=object).reshape((1, 4)), ("data", "ep"))
+    num_experts = 4
+    hidden_size = 3
+    intermediate_size = 4
+    x = jnp.arange(1 * 6 * hidden_size, dtype=jnp.float32).reshape(1, 6, hidden_size) / 17.0
+    expert_ids = jnp.arange(1 * 6 * 2, dtype=jnp.int32).reshape(1, 6, 2) % num_experts
+    weights = jnp.tile(jnp.asarray([0.3, 0.7], dtype=jnp.float32), (1, 6, 1))
+    gate = jnp.arange(num_experts * hidden_size * intermediate_size, dtype=jnp.float32).reshape(
+        num_experts,
+        hidden_size,
+        intermediate_size,
+    ) / 37.0
+    up = jnp.flip(gate, axis=-1) / 1.3
+    down = jnp.arange(num_experts * intermediate_size * hidden_size, dtype=jnp.float32).reshape(
+        num_experts,
+        intermediate_size,
+        hidden_size,
+    ) / 43.0
+    sharded_x = jax.device_put(x, NamedSharding(mesh, P("data", None, None)))
+    sharded_ids = jax.device_put(expert_ids, NamedSharding(mesh, P("data", None, None)))
+    sharded_weights = jax.device_put(weights, NamedSharding(mesh, P("data", None, None)))
+    parameter_specs = (P("ep", None, None), P("ep", None, None), P("ep", None, None))
+
+    def reference_loss(local_gate, local_up, local_down):
+        selected_gate = local_gate[expert_ids]
+        selected_up = local_up[expert_ids]
+        selected_down = local_down[expert_ids]
+        gate_x = jnp.einsum("...h,...khi->...ki", x, selected_gate)
+        up_x = jnp.einsum("...h,...khi->...ki", x, selected_up)
+        output = jnp.einsum("...ki,...kih->...kh", jax.nn.silu(gate_x) * up_x, selected_down)
+        return jnp.mean(jnp.square(jnp.sum(output * weights[..., None], axis=-2)))
+
+    def distributed_loss(local_gate, local_up, local_down):
+        output = _all_to_all_expert_swiglu(
+            x=sharded_x,
+            expert_ids=sharded_ids,
+            weights=sharded_weights,
+            gate=local_gate,
+            up=local_up,
+            down=local_down,
+            mesh=mesh,
+            axis_name="ep",
+            expert_fsdp_axis_name=None,
+            context_parallel_axis_name=None,
+        )
+        return jnp.mean(jnp.square(output))
+
+    reference_grad = jax.jit(jax.grad(reference_loss, argnums=(0, 1, 2)))
+    distributed_grad = jax.jit(jax.grad(distributed_loss, argnums=(0, 1, 2)))
+    expected_params = (gate, up, down)
+    actual_params = tuple(
+        jax.device_put(param, NamedSharding(mesh, spec))
+        for param, spec in zip(expected_params, parameter_specs, strict=True)
+    )
+    learning_rate = jnp.asarray(1e-3, dtype=jnp.float32)
+    for _ in range(3):
+        expected_gradients = reference_grad(*expected_params)
+        actual_gradients = distributed_grad(*actual_params)
+        expected_params = tuple(
+            param - learning_rate * gradient
+            for param, gradient in zip(expected_params, expected_gradients, strict=True)
+        )
+        actual_params = tuple(
+            param - learning_rate * gradient
+            for param, gradient in zip(actual_params, actual_gradients, strict=True)
+        )
+
+    for actual_param, expected_param in zip(actual_params, expected_params, strict=True):
+        np.testing.assert_allclose(actual_param, expected_param, rtol=1e-5, atol=1e-5)
+        assert bool(jnp.all(jnp.isfinite(actual_param)))
 
 
 def test_rdep_static_expert_dispatcher_matches_local_dispatcher_on_data_mesh() -> None:
@@ -738,6 +863,7 @@ def test_all_to_all_expert_dispatcher_lowers_collectives() -> None:
     jaxpr = str(jax.make_jaxpr(lambda hidden, ids, route_weights: AllToAllExpertDispatcher(mesh)(experts, hidden, ids, route_weights))(x, expert_ids, weights))
 
     assert "all_to_all" in jaxpr
+    assert jaxpr.count("ragged_dot_general[") == 3
 
 
 def test_sparse_moe_adds_shared_expert_output() -> None:

@@ -6,7 +6,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax.sharding import PartitionSpec as P
+from jax.sharding import NamedSharding, PartitionSpec as P
 
 from jaxtitan.errors import ContractError
 from jaxtitan.models.components.dtypes import dtype_from_name
@@ -177,7 +177,7 @@ class ExpertParallelDispatcher:
 
 
 class AllToAllExpertDispatcher:
-    """Fixed-shape EP dispatcher using explicit all-to-all token exchange."""
+    """Dropless source-sharded EP dispatcher with expert-major execution."""
 
     def __init__(
         self,
@@ -489,25 +489,36 @@ def _all_to_all_expert_swiglu(
         raise ContractError(
             f"expert count {gate.shape[0]} must be positive and divisible by ep axis size {ep_size}"
         )
-    def local_dispatch(local_x, local_expert_ids, local_weights, local_gate, local_up, local_down):
+    context_size = 1 if context_parallel_axis_name is None else int(mesh.shape[context_parallel_axis_name])
+    sequence_partition_size = context_size * ep_size
+    sequence_size = x.shape[1]
+    padded_sequence_size = (
+        (sequence_size + sequence_partition_size - 1) // sequence_partition_size
+    ) * sequence_partition_size
+    sequence_padding = padded_sequence_size - sequence_size
+    if sequence_padding:
+        x = jnp.pad(x, ((0, 0), (0, sequence_padding), (0, 0)))
+        expert_ids = jnp.pad(expert_ids, ((0, 0), (0, sequence_padding), (0, 0)))
+        weights = jnp.pad(weights, ((0, 0), (0, sequence_padding), (0, 0)))
+    token_valid = jnp.arange(padded_sequence_size, dtype=jnp.int32) < sequence_size
+    token_valid = jnp.broadcast_to(token_valid[None, :], x.shape[:2])
+
+    def local_dispatch(local_x, local_expert_ids, local_weights, local_token_valid, local_gate, local_up, local_down):
         local_expert_count = local_gate.shape[0]
-        local_rank = jax.lax.axis_index(axis_name)
         token_count = local_x.shape[0] * local_x.shape[1]
         top_k = local_expert_ids.shape[-1]
-        assignment_count = local_expert_ids.shape[0] * local_expert_ids.shape[1] * top_k
-        source_capacity = (assignment_count + ep_size - 1) // ep_size
+        assignment_count = token_count * top_k
         flat_x = jnp.repeat(jnp.reshape(local_x, (token_count, local_x.shape[-1])), top_k, axis=0)
         flat_expert_ids = jnp.reshape(local_expert_ids, (assignment_count,))
         flat_weights = jnp.reshape(local_weights, (assignment_count,))
         flat_assignment_ids = jnp.arange(assignment_count, dtype=jnp.int32)
-        source_rank = flat_assignment_ids % ep_size
+        flat_valid = jnp.repeat(jnp.reshape(local_token_valid, (token_count,)), top_k, axis=0)
         owner_rank = flat_expert_ids // local_expert_count
 
         def bucket_for_owner(owner):
-            is_local_source = source_rank == local_rank
-            mask = is_local_source & (owner_rank == owner)
+            mask = flat_valid & (owner_rank == owner)
             order_key = jnp.where(mask, flat_assignment_ids, assignment_count + flat_assignment_ids)
-            order = jnp.argsort(order_key)[:source_capacity]
+            order = jnp.argsort(order_key, stable=True)
             valid = mask[order]
             local_ids = flat_expert_ids[order] - owner * local_expert_count
             return (
@@ -523,54 +534,69 @@ def _all_to_all_expert_swiglu(
         recv_x = jax.lax.all_to_all(send_x, axis_name, split_axis=0, concat_axis=0, tiled=True)
         recv_local_ids = jax.lax.all_to_all(send_local_ids, axis_name, split_axis=0, concat_axis=0, tiled=True)
         recv_weights = jax.lax.all_to_all(send_weights, axis_name, split_axis=0, concat_axis=0, tiled=True)
-        recv_assignment_ids = jax.lax.all_to_all(
-            send_assignment_ids,
-            axis_name,
-            split_axis=0,
-            concat_axis=0,
-            tiled=True,
-        )
         recv_valid = jax.lax.all_to_all(send_valid, axis_name, split_axis=0, concat_axis=0, tiled=True)
 
-        selected_gate = local_gate[recv_local_ids]
-        selected_up = local_up[recv_local_ids]
-        selected_down = local_down[recv_local_ids]
-        gate_x = jnp.einsum("...h,...hi->...i", recv_x, selected_gate)
-        up_x = jnp.einsum("...h,...hi->...i", recv_x, selected_up)
+        receive_capacity = recv_local_ids.size
+        flat_recv_x = jnp.reshape(recv_x, (receive_capacity, recv_x.shape[-1]))
+        flat_recv_local_ids = jnp.reshape(recv_local_ids, (receive_capacity,))
+        flat_recv_weights = jnp.reshape(recv_weights, (receive_capacity,))
+        flat_recv_valid = jnp.reshape(recv_valid, (receive_capacity,))
+        expert_order_key = jnp.where(flat_recv_valid, flat_recv_local_ids, local_expert_count)
+        expert_order = jnp.argsort(expert_order_key, stable=True)
+        packed_x = flat_recv_x[expert_order]
+        packed_weights = flat_recv_weights[expert_order]
+        packed_valid = flat_recv_valid[expert_order]
+        expert_indices = jnp.arange(local_expert_count, dtype=jnp.int32)
+        group_sizes = jnp.sum(
+            flat_recv_valid[None, :] & (flat_recv_local_ids[None, :] == expert_indices[:, None]),
+            axis=1,
+            dtype=jnp.int32,
+        )
+
+        gate_x = jax.lax.ragged_dot(packed_x, local_gate, group_sizes)
+        up_x = jax.lax.ragged_dot(packed_x, local_up, group_sizes)
         expert_hidden = jax.nn.silu(gate_x) * up_x
-        recv_output = jnp.einsum("...i,...ih->...h", expert_hidden, selected_down)
+        packed_output = jax.lax.ragged_dot(expert_hidden, local_down, group_sizes)
         if expert_fsdp_axis_name is not None:
-            recv_output = jax.lax.psum(recv_output, expert_fsdp_axis_name)
-        recv_output = jnp.where(recv_valid[..., None], recv_output * recv_weights[..., None], 0)
+            packed_output = jax.lax.psum(packed_output, expert_fsdp_axis_name)
+        packed_output = jnp.where(
+            packed_valid[:, None],
+            packed_output * packed_weights[:, None],
+            0,
+        )
+        flat_recv_output = jnp.zeros_like(packed_output).at[expert_order].set(packed_output)
+        recv_output = jnp.reshape(flat_recv_output, recv_x.shape)
 
         returned_output = jax.lax.all_to_all(recv_output, axis_name, split_axis=0, concat_axis=0, tiled=True)
-        returned_assignment_ids = jax.lax.all_to_all(
-            recv_assignment_ids,
-            axis_name,
-            split_axis=0,
-            concat_axis=0,
-            tiled=True,
-        )
-        returned_valid = jax.lax.all_to_all(recv_valid, axis_name, split_axis=0, concat_axis=0, tiled=True)
-        token_ids = returned_assignment_ids // top_k
+        token_ids = send_assignment_ids // top_k
         flat_output = jnp.zeros((token_count, local_x.shape[-1]), dtype=local_x.dtype)
-        flat_output = flat_output.at[token_ids].add(jnp.where(returned_valid[..., None], returned_output, 0))
-        return jax.lax.psum(jnp.reshape(flat_output, local_x.shape), axis_name)
+        flat_output = flat_output.at[token_ids].add(jnp.where(send_valid[..., None], returned_output, 0))
+        return jnp.reshape(flat_output, local_x.shape)
+
+    sequence_axes = tuple(
+        name for name in (context_parallel_axis_name, axis_name) if name is not None
+    )
 
     mapped = jax.shard_map(
         local_dispatch,
         mesh=mesh,
         in_specs=(
-            P("data", context_parallel_axis_name, None),
-            P("data", context_parallel_axis_name, None),
-            P("data", context_parallel_axis_name, None),
+            P("data", sequence_axes, None),
+            P("data", sequence_axes, None),
+            P("data", sequence_axes, None),
+            P("data", sequence_axes),
             P(axis_name, None, expert_fsdp_axis_name),
             P(axis_name, None, expert_fsdp_axis_name),
             P(axis_name, expert_fsdp_axis_name, None),
         ),
-        out_specs=P("data", context_parallel_axis_name, None),
+        out_specs=P("data", sequence_axes, None),
     )
-    return mapped(x, expert_ids, weights, gate, up, down)
+    output = mapped(x, expert_ids, weights, token_valid, gate, up, down)
+    output = jax.lax.with_sharding_constraint(
+        output,
+        NamedSharding(mesh, P("data", context_parallel_axis_name, None)),
+    )
+    return output[:, :sequence_size, :]
 
 
 def _rdep_static_expert_swiglu(

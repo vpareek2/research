@@ -18,7 +18,7 @@ from jaxtitan import __version__
 from jaxtitan.kernels import kernel_plan
 from jaxtitan.models import ParamMetadata, count_parameters
 from jaxtitan.models.execution import (
-    EXPERT_PARALLEL_CAPACITY_POLICY,
+    expert_parallel_capacity_policy,
     expert_parallel_dispatcher_backend,
     expert_parallel_policy_payload,
     moe_tensor_parallel_policy_payload,
@@ -471,7 +471,7 @@ def sharding_policy_summary(plan: Any, *, has_moe: bool = False) -> dict[str, An
                     "expert_fsdp_axis_size": plan.expert_fsdp_axis_size,
                     "expert_fsdp_axis_sharing": plan.expert_fsdp_axis_sharing,
                     "dispatcher_backend": expert_parallel_dispatcher_backend(plan.expert_parallel_axis_sharing),
-                    "capacity_policy": EXPERT_PARALLEL_CAPACITY_POLICY,
+                    "capacity_policy": expert_parallel_capacity_policy(plan.expert_parallel_axis_sharing),
                 },
                 "tp": None
                 if not plan.parallelism.tensor_parallel
