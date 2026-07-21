@@ -45,6 +45,7 @@ git diff --check
 Artifacts:
 
 - Branch: `codex/moe-expert-major`, based on M0 merge `a083590`.
+- Implementation commit: `76b8af8`; draft PR: `#16`.
 - Dispatcher: `src/jaxtitan/models/components/moe.py`.
 - Runtime contract: `src/jaxtitan/models/execution.py`.
 - Directional local benchmark: `/tmp/jaxtitan-m1-moe-bench.json`; it is not a
