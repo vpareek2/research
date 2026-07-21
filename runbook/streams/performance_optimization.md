@@ -3,6 +3,86 @@
 Purpose: turn measured Jaxtitan profiles into an ordered optimization program
 without weakening correctness or adding speculative kernel surfaces.
 
+## 2026-07-21 [codex] M1 H100 runner and analysis prep
+
+Context:
+
+- Prepared the exact cloud runner and local analysis helper for PR `#16` H100
+  acceptance. No GPU run was launched in this step.
+- The runner executes the unchanged short correctness matrix first, then the
+  four 64-step MoE profile configs. It verifies hardware/data, dumps HLO text,
+  runs inspect/eval/sample for each run, and packages the selected `runs/`
+  artifacts plus provenance into `cloud_results/moe_m1_h100_*.tgz`.
+- The analyzer compares the copied candidate archive against the archived July
+  H100 baseline and reports per-profile median step speedup, residual
+  scatter/reduce fusion count, and GEMM trace fraction.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+bash -n scripts/jaxtitan/cloud_moe_m1_h100_matrix.sh
+uv run python -m py_compile scripts/jaxtitan/analyze_moe_m1_h100_results.py
+
+for cfg in \
+  configs/jaxtitan/cloud_4gpu_trinity_moe_ep_adamw_validation.toml \
+  configs/jaxtitan/cloud_4gpu_trinity_moe_tp_ep_adamw_validation.toml \
+  configs/jaxtitan/cloud_4gpu_trinity_moe_tp_ep_muon_validation.toml \
+  configs/jaxtitan/cloud_4gpu_trinity_moe_cp_ep_adamw_validation.toml \
+  configs/jaxtitan/cloud_4gpu_trinity_moe_folded_fsdp_ep_muon_validation.toml \
+  configs/jaxtitan/cloud_4gpu_trinity_moe_product_fsdp_ep_muon_validation.toml \
+  configs/jaxtitan/cloud_4gpu_trinity_moe_expert_fsdp_adamw_validation.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_trinity_moe_ep_adamw.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_trinity_moe_ep_muon.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_trinity_moe_tp_ep_adamw.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_trinity_moe_tp_ep_muon.toml
+do
+  uv run jaxtitan config check "$cfg"
+done
+```
+
+Cloud launch command:
+
+```bash
+cd ~/research
+git fetch origin
+git checkout codex/moe-expert-major
+git pull --ff-only
+tmux new -s moe-m1-h100
+scripts/jaxtitan/cloud_moe_m1_h100_matrix.sh --overwrite
+```
+
+Local analysis after copying back the generated archive and checksum:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+sha256sum -c cloud_results/moe_m1_h100_YYYYMMDDTHHMMSSZ.tgz.sha256
+uv run python scripts/jaxtitan/analyze_moe_m1_h100_results.py \
+  cloud_results/moe_m1_h100_YYYYMMDDTHHMMSSZ.tgz \
+  --json-out cloud_results/moe_m1_h100_YYYYMMDDTHHMMSSZ.analysis.json
+```
+
+Artifacts:
+
+- Runner: `scripts/jaxtitan/cloud_moe_m1_h100_matrix.sh`.
+- Analyzer: `scripts/jaxtitan/analyze_moe_m1_h100_results.py`.
+- Existing configs are reused; no TOML changes were required.
+- Baseline remains `cloud_results/profile64_h100_sxm_2026-07-20.tgz`.
+
+Result:
+
+- Script syntax and Python compilation passed locally.
+- All seven short correctness configs and all four profile64 configs pass
+  `jaxtitan config check`.
+- No performance result is claimed; the GPU gate remains open.
+
+Next:
+
+- On the next four-H100 allocation, run the tmux launch command above, keep the
+  node alive until the generated `.tgz` and `.sha256` are copied back and
+  checksum-verified, then run the analyzer against the July baseline.
+
 ## 2026-07-21 [codex] M1 native ragged transport local acceptance
 
 Context:
