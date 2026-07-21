@@ -3,6 +3,67 @@
 Purpose: track FSDP, ZeRO-2, EP, RDEP, expert-region FSDP, and optimizer
 semantics for Trinity-style MoE.
 
+## 2026-07-21 [codex] Native ragged transport amendment
+
+Context:
+
+- Amended M1 so the production GPU dispatcher uses
+  `jax.lax.ragged_all_to_all` for both dispatch and return instead of sending
+  rectangular activation, weight, identity, and validity buffers.
+- Route weights now remain on the source rank and are applied after the return
+  exchange. Received activations land directly in expert-major order.
+- Enabled JAX's GPU Pallas/Triton lowering for all three ragged dots. The local
+  reference and RDEP paths remain unchanged.
+- XLA:CPU in JAX 0.10 does not lower `ragged-all-to-all`; a CPU-only fixed-buffer
+  semantic lowering preserves the required fake-device forward/VJP tests. GPU
+  processes do not select that lowering.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+uv run pytest -q tests/jaxtitan/test_model.py \
+  -k 'all_to_all_expert_dispatcher' -x
+
+uv run pytest -q \
+  tests/jaxtitan/test_preflight.py::test_run_preflight_reports_expert_parallel_policy \
+  tests/jaxtitan/test_resume_compat.py::test_resume_fingerprint_changes_for_expert_parallel_axis \
+  tests/jaxtitan/test_resume_compat.py::test_resume_rejects_pre_grouped_gemm_expert_parallel_checkpoint \
+  tests/jaxtitan/test_runtime_training.py::test_run_training_accepts_expert_parallel_moe_muon \
+  -x
+
+uv run pytest -q tests/jaxtitan
+git diff --check
+```
+
+Artifacts:
+
+- Branch: `codex/moe-expert-major`; draft PR: `#16`.
+- Ragged transport implementation commit: `2af509f`.
+- Dispatcher: `src/jaxtitan/models/components/moe.py`.
+- Runtime/resume contract: `src/jaxtitan/models/execution.py`.
+
+Result:
+
+- Dispatcher matrix: `10 passed` in `95.90s` across EP4, data2-by-EP2,
+  TP2-by-EP2, CP2-by-EP2, and EP2-by-expert-FSDP2, including all
+  differentiable inputs, skew, empty experts, duplicate routes, and
+  non-divisible tokens.
+- Complete four-fake-CPU Jaxtitan suite: `641 passed, 1 skipped` in `484.58s`.
+- Direct fake-CPU use of the native primitive initially failed with
+  `UNIMPLEMENTED: HLO opcode ragged-all-to-all is not supported by XLA:CPU
+  ThunkEmitter`; the CPU-only semantic lowering is the remediation.
+- Runtime metadata now records `jax_lax_ragged_all_to_all`,
+  `expert_major_jax_lax_ragged_dot`, and `gpu_pallas_triton`. Pre-amendment
+  training checkpoints fail resume compatibility at the changed policy.
+
+Next:
+
+- Run the unchanged short correctness matrix and four 64-step profiles on four
+  H100s. Keep PR `#16` draft until native GPU lowering and the 5x performance
+  gate are demonstrated from local artifacts.
+
 ## 2026-07-20 [codex] Expert-major all-to-all dispatcher
 
 Context:

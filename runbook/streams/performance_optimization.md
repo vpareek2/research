@@ -3,6 +3,67 @@
 Purpose: turn measured Jaxtitan profiles into an ordered optimization program
 without weakening correctness or adding speculative kernel surfaces.
 
+## 2026-07-21 [codex] M1 native ragged transport local acceptance
+
+Context:
+
+- Replaced M1's rectangular activation exchange with native JAX ragged
+  all-to-all in both directions. Static allocation remains the dropless
+  worst-case receive bound, but only live assignment slices are transferred.
+- Global-expert source sorting plus exchanged count/offset metadata places
+  activations directly into expert-major groups. The three gate/up/down
+  `jax.lax.ragged_dot` calls are configured for GPU Pallas/Triton lowering.
+- Return values are restored to source assignment order before source-local
+  route weighting and deterministic top-k summation.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+uv run pytest -q tests/jaxtitan/test_model.py \
+  -k 'all_to_all_expert_dispatcher' -x
+
+uv run pytest -q \
+  tests/jaxtitan/test_resume_compat.py::test_resume_rejects_pre_ragged_transport_expert_parallel_checkpoint \
+  tests/jaxtitan/test_profile_bench.py -x
+
+uv run pytest -q tests/jaxtitan/test_runtime_training.py \
+  -k 'expert_parallel or per_expert_muon' -x
+
+uv run pytest -q tests/jaxtitan -x
+git diff --check
+```
+
+Artifacts:
+
+- Branch: `codex/moe-expert-major`; draft PR: `#16`.
+- Implementation commit: `2af509f`, based on the existing M1 commits
+  `76b8af8` and `cbb9a5e`.
+- H100 comparison baseline remains
+  `cloud_results/profile64_h100_sxm_2026-07-20.tgz`.
+- No new GPU profile artifact was produced locally.
+
+Result:
+
+- Dispatcher differential/VJP and structural gate: `10 passed` in `95.90s`.
+- Resume/profile contract gate: `6 passed`; expert-parallel training subset:
+  `3 passed, 64 deselected`.
+- Complete Jaxtitan fake-device suite: `641 passed, 1 skipped` in `484.58s`.
+- Fake CPU cannot lower native ragged all-to-all in JAX 0.10, so tests use an
+  explicitly CPU-only semantic lowering. GPU execution remains native ragged
+  transport; there is no TOML option or GPU fallback to the rectangular path.
+- No speedup is claimed without the four-H100 artifacts. The PR remains draft.
+
+Next:
+
+- Run short H100 correctness for EP, TP+EP, CP+EP, folded/product FSDP+EP,
+  and expert-FSDP, then the four unchanged 64-step EP/TP+EP AdamW/Muon
+  profiles. Analyze steps 16-63 and profiler steps 12-15 against the archive.
+- If all four profiles do not improve by at least 5x or ragged dots do not
+  lower to dominant expert GEMMs, retain the semantic dispatcher and use the
+  new trace to design the later custom grouped-GEMM bridge.
+
 ## 2026-07-20 [codex] M1 expert-major MoE local acceptance
 
 Context:
