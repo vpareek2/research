@@ -3,6 +3,53 @@
 Purpose: track what must be validated on cloud GPUs and what local work must
 finish before spending cloud time.
 
+## 2026-07-21 [codex] M1 MoE H100 queue is scripted
+
+Context:
+
+- The next cloud allocation is for PR `#16` M1 MoE native ragged transport
+  acceptance, not a new broad profiling sweep.
+- Added a single runner that prepares/verifies data, runs seven short
+  correctness configs followed by four 64-step profile configs, and packages
+  local artifacts before the instance is terminated.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+bash -n scripts/jaxtitan/cloud_moe_m1_h100_matrix.sh
+uv run python -m py_compile scripts/jaxtitan/analyze_moe_m1_h100_results.py
+```
+
+Cloud launch:
+
+```bash
+cd ~/research
+git fetch origin
+git checkout codex/moe-expert-major
+git pull --ff-only
+tmux new -s moe-m1-h100
+scripts/jaxtitan/cloud_moe_m1_h100_matrix.sh --overwrite
+```
+
+Artifacts:
+
+- Expected cloud output: `cloud_results/moe_m1_h100_*.tgz` and matching
+  `.sha256` file.
+- The archive includes hardware/topology/JAX device logs, per-run train logs,
+  HLO dumps, inspect/eval/sample outputs, and the selected run directories.
+
+Result:
+
+- Queue is ready for the next four-H100 allocation.
+- No cloud run was launched during this prep step.
+
+Next:
+
+- Prefer four H100 80GB SXM/NVLink for apples-to-apples comparison with
+  `cloud_results/profile64_h100_sxm_2026-07-20.tgz`; four H100 PCIe is still
+  useful for correctness but weaker for performance acceptance.
+
 ## 2026-07-20 [codex] Four-H100 profiling capture complete
 
 Context:
