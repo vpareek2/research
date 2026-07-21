@@ -185,6 +185,31 @@ def test_context_parallel_generation_matches_non_cp_with_sharded_padded_cache() 
     assert "cp" in getattr(actual.cache.values, "sharding", None).spec
 
 
+def test_data_parallel_generation_pads_device_batch_and_returns_prompt_batch() -> None:
+    if jax.local_device_count() < 2:
+        pytest.skip("data-parallel inference test requires at least two local devices")
+    spec = _tiny_spec(max_seq_len=8, compute_dtype="float32")
+    built = build_model(spec, seed=0)
+    state = initialize_inference_state(built.state, seed=1)
+    prompt = jnp.asarray([[1, 2, 3]], dtype=jnp.int32)
+    generation = GenerationSpec(max_new_tokens=2, top_k=1)
+    plan = _data_parallel_plan()
+
+    expected = generate_tokens(built.graph, state, spec, prompt, generation)
+    actual = generate_tokens(built.graph, state, spec, prompt, generation, sharding=plan)
+
+    assert actual.generated_ids.shape == expected.generated_ids.shape == (1, 2)
+    assert actual.full_ids.shape == expected.full_ids.shape == (1, 5)
+    assert actual.logprobs.shape == expected.logprobs.shape == (1, 2)
+    assert jnp.array_equal(actual.generated_ids, expected.generated_ids)
+    assert jnp.array_equal(actual.full_ids, expected.full_ids)
+    assert jnp.allclose(actual.logprobs, expected.logprobs, atol=1e-5)
+    assert actual.cache.keys.shape[1] == 2
+    assert actual.cache.values.shape[1] == 2
+    assert actual.cache.lengths.shape == (2,)
+    assert "data" in getattr(actual.cache.keys, "sharding", None).spec
+
+
 def test_dense_trinity_prefill_decode_matches_full_forward_logits() -> None:
     spec = _tiny_trinity_spec(max_seq_len=8, compute_dtype="float32")
     built = build_model(spec, seed=0)
@@ -474,6 +499,14 @@ def _context_parallel_plan():
         devices=tuple(jax.local_devices()[:2]),
     )
     return build_sharding_plan(context, parallelism=ParallelismSpec(context_parallel=True))
+
+
+def _data_parallel_plan():
+    context = build_mesh_context(
+        MeshSpec(axis_names=("data",), axis_sizes=(2,)),
+        devices=tuple(jax.local_devices()[:2]),
+    )
+    return build_sharding_plan(context, parallelism=ParallelismSpec())
 
 
 def _trees_equal(left, right) -> bool:
