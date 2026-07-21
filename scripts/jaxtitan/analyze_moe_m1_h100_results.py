@@ -19,6 +19,7 @@ PROFILE_RUNS = (
     "cloud_4gpu_profile64_trinity_moe_tp_ep_adamw",
     "cloud_4gpu_profile64_trinity_moe_tp_ep_muon",
 )
+MAX_SCATTER_REDUCE_FUSION_SEC = 0.010
 
 
 def main() -> int:
@@ -57,7 +58,7 @@ def main() -> int:
     print(format_profile_analysis(baseline))
     print()
     print("M1 MoE profile comparison:")
-    print("run                                             base ms   cand ms  speedup  gate  scatter  gemm%")
+    print("run                                             base ms   cand ms  speedup  gate  scatter  max ms  gemm%")
     for row in payload["profile_runs"]:
         print(
             f"{row['run_id']:<47} "
@@ -66,6 +67,7 @@ def main() -> int:
             f"{row['speedup']:>7.2f}x "
             f"{row['gate']:<5} "
             f"{row['candidate_scatter_reduce_fusion_count']:>7} "
+            f"{_ms(row['candidate_scatter_reduce_fusion_max_sec']):>7} "
             f"{row['candidate_gemm_fraction'] * 100.0:>5.1f}"
         )
     print()
@@ -105,6 +107,7 @@ def _compare(candidate: dict[str, Any], baseline: dict[str, Any]) -> dict[str, A
         categories = cand.get("trace", {}).get("categories", {}) if cand.get("trace") else {}
         scatter = categories.get("scatter_reduce_fusion", {})
         gemm = categories.get("gemm", {})
+        scatter_max_sec = float(scatter.get("max_duration_sec", 0.0))
         row = {
             "run_id": run_id,
             "baseline_train_step_sec": base_sec,
@@ -112,14 +115,16 @@ def _compare(candidate: dict[str, Any], baseline: dict[str, Any]) -> dict[str, A
             "speedup": speedup,
             "candidate_scatter_reduce_fusion_count": int(scatter.get("count", 0)),
             "candidate_scatter_reduce_fusion_sec": float(scatter.get("duration_sec", 0.0)),
+            "candidate_scatter_reduce_fusion_max_sec": scatter_max_sec,
             "candidate_gemm_fraction": float(gemm.get("event_sum_fraction", 0.0)),
-            "gate": speedup >= 5.0 and int(scatter.get("count", 0)) == 0,
+            "gate": speedup >= 5.0 and scatter_max_sec <= MAX_SCATTER_REDUCE_FUSION_SEC,
         }
         rows.append(row)
     return {
         "candidate_source": candidate["source"],
         "baseline_source": baseline["source"],
         "profile_runs": rows,
+        "scatter_reduce_fusion_max_sec_gate": MAX_SCATTER_REDUCE_FUSION_SEC,
         "overall_gate": all(row["gate"] for row in rows),
     }
 

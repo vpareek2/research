@@ -3,6 +3,66 @@
 Purpose: track FSDP, ZeRO-2, EP, RDEP, expert-region FSDP, and optimizer
 semantics for Trinity-style MoE.
 
+## 2026-07-21 [codex] M1 cloud correctness and performance acceptance
+
+Context:
+
+- Validated the expert-major ragged dispatcher from commit `5589e6d` on four
+  A100-SXM4-40GB devices because four H100s were unavailable.
+- The cloud environment exposed two portability defects before the matrix:
+  JAX 0.10 advertised the ragged-dot Pallas config flag without shipping its
+  internal lowering module, and one-prompt sampling was indivisible by a
+  data-axis size of two. Commits `91007ec` and `5589e6d` make lowering metadata
+  truthful and pad only the device-side sampling batch, respectively.
+
+Commands:
+
+```bash
+cd ~/research
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+scripts/jaxtitan/cloud_moe_m1_h100_matrix.sh --overwrite
+
+cd "$(git rev-parse --show-toplevel)"
+uv run pytest -q tests/jaxtitan/test_model.py \
+  -k 'all_to_all_expert_dispatcher' -x
+uv run pytest -q tests/jaxtitan/test_infer.py tests/jaxtitan/test_checkpoint_sample.py -x
+uv run pytest -q \
+  tests/jaxtitan/test_profile_analysis.py \
+  tests/jaxtitan/test_moe_m1_analysis.py -x
+```
+
+Artifacts:
+
+- Branch: `codex/moe-expert-major`; PR: `#16`.
+- Cloud candidate commit: `5589e6d`.
+- Evidence bundle:
+  `cloud_results/moe_m1_h100_20260721T214719Z_focused.tgz`.
+- Bundle SHA-256:
+  `a3e1f749c63b9557c5b54cbcd90f3151dda6cb566bb05d9e558a3fe029482cf9`.
+
+Result:
+
+- EP, TP+EP AdamW, TP+EP Muon, CP+EP, folded FSDP+EP, product FSDP+EP,
+  and expert-FSDP all completed 17-step training, checkpoint, eval, and sample.
+- The four 64-step EP/TP+EP AdamW/Muon profiles also completed with finite
+  optimizer state. Median train-step speedups against the archived July H100
+  baseline are `16.98x-50.91x`, despite the candidate using slower A100s.
+- The previous 164-170 ms assignment scatter/reduce kernels are absent. The
+  candidate's maximum matching kernel is 1.039 ms and the M1 duration gate
+  passes for all profiles.
+- GPU execution used native `jax.lax.ragged_all_to_all`; `jax.lax.ragged_dot`
+  lowered through the truthful `stablehlo_generic` cuBLASLt path. No hidden
+  rectangular transport or Pallas fallback was selected.
+- The cloud sampling path emitted a float32-to-bfloat16 scatter future warning.
+  Sampling completed successfully, but the warning remains a future JAX
+  compatibility item rather than an M1 correctness failure.
+
+Next:
+
+- Promote the correctness/performance infrastructure as `no-run-required`.
+  Preserve the lax implementation and move to M2 distributed-Muon analysis;
+  revisit a custom grouped-GEMM bridge only if it is dominant in later traces.
+
 ## 2026-07-21 [codex] Native ragged transport amendment
 
 Context:

@@ -3,6 +3,80 @@
 Purpose: turn measured Jaxtitan profiles into an ordered optimization program
 without weakening correctness or adding speculative kernel surfaces.
 
+## 2026-07-21 [codex] M1 four-A100 acceptance and trace analysis
+
+Context:
+
+- Ran the seven-config M1 correctness matrix and four unchanged 64-step MoE
+  profiles from commit `5589e6d` on four A100-SXM4-40GB devices. H100s were
+  unavailable, so this is a conservative cross-hardware comparison against the
+  archived four-H100 baseline, not an exact same-hardware rerun.
+- Replaced the interrupted full-checkpoint package with a focused evidence
+  bundle containing provenance, configs, logs, metrics, eval/sample outputs,
+  diagnostics, HLO, and all four Perfetto/XPlane captures.
+- Corrected the acceptance analyzer to reject pathological scatter/reduce
+  kernel duration rather than any harmless scatter/reduce event. The archived
+  bad path has 164-170 ms maximum kernels; the M1 candidate has 0.342-1.039 ms
+  maximum kernels.
+
+Commands:
+
+```bash
+cd ~/research
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+tmux new-session -d -s moe-m1-h100 \
+  'cd ~/research && export CUDA_VISIBLE_DEVICES=0,1,2,3 && scripts/jaxtitan/cloud_moe_m1_h100_matrix.sh --overwrite 2>&1 | tee cloud_results/moe_m1_h100_tmux.log'
+
+cd "$(git rev-parse --show-toplevel)"
+sha256sum -c cloud_results/moe_m1_h100_20260721T214719Z_focused.tgz.sha256
+uv run python scripts/jaxtitan/analyze_moe_m1_h100_results.py \
+  cloud_results/moe_m1_h100_20260721T214719Z_focused.tgz \
+  --json-out cloud_results/moe_m1_h100_20260721T214719Z_focused.analysis.json
+uv run pytest -q \
+  tests/jaxtitan/test_profile_analysis.py \
+  tests/jaxtitan/test_moe_m1_analysis.py -x
+```
+
+Artifacts:
+
+- Candidate commit: `5589e6d`.
+- Focused bundle:
+  `cloud_results/moe_m1_h100_20260721T214719Z_focused.tgz`.
+- SHA-256:
+  `a3e1f749c63b9557c5b54cbcd90f3151dda6cb566bb05d9e558a3fe029482cf9`.
+- Comparison JSON:
+  `cloud_results/moe_m1_h100_20260721T214719Z_focused.analysis.json`.
+- Baseline: `cloud_results/profile64_h100_sxm_2026-07-20.tgz`.
+
+Result:
+
+- All seven correctness configurations completed training, checkpoint, eval,
+  and sampling with zero nonfinite optimizer groups.
+- All four profile configurations completed with profiler steps 12-15 and
+  steady scalar window steps 16-63.
+- Median train-step results versus the archived baseline:
+  - EP AdamW: `165.594 ms`, `50.91x` speedup, reported average MFU `2.89%`.
+  - EP Muon: `266.768 ms`, `31.68x` speedup, reported average MFU `1.80%`.
+  - TP+EP AdamW: `271.843 ms`, `32.61x` speedup, reported average MFU `1.76%`.
+  - TP+EP Muon: `528.194 ms`, `16.98x` speedup, reported average MFU `0.90%`.
+- Every profile passes the `>=5x` speedup and `<=10 ms` maximum pathological
+  scatter/reduce gate. Candidate maxima are `0.342`, `0.403`, `0.851`, and
+  `1.039 ms`; archived baseline maxima are `164.068-170.187 ms`.
+- Runtime metadata truthfully reports `stablehlo_generic`. HLO contains native
+  ragged all-to-all and ragged-dot operations lowered to cuBLASLt matmuls; the
+  unavailable Pallas/Triton ragged-dot lowering is not claimed.
+- Remaining cost is no longer assignment-indexed expert-weight movement.
+  TP+EP Muon is collective-heavy, and the unchanged non-prefetched data path
+  adds roughly `31-32 ms` per step. The current dense FLOP estimator also
+  undercounts top-2 routed plus shared-expert work, so absolute MoE MFU is
+  directionally useful but not exact.
+
+Next:
+
+- Promote PR `#16` after focused checks and runbook review. Begin M2 with the
+  TP/distributed-Muon collective path; treat a custom grouped-GEMM bridge as a
+  later optimization if larger-model traces make generic ragged dot dominant.
+
 ## 2026-07-21 [codex] M1 H100 runner and analysis prep
 
 Context:

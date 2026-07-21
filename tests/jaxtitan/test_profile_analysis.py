@@ -35,6 +35,7 @@ def test_analyze_profile_root_selects_canonical_window_and_pairs_runs(tmp_path: 
     assert tp_muon["steady"]["medians"]["train_step_sec"] == pytest.approx(0.0195)
     assert tp_muon["trace_window"]["tax"]["train_step_sec"] == pytest.approx(1.35 / 1.95 - 1.0)
     assert tp_muon["trace"]["categories"]["nccl_all_gather"]["count"] == 1
+    assert tp_muon["trace"]["categories"]["nccl_all_gather"]["max_duration_sec"] == pytest.approx(0.0001)
     assert tp_muon["hlo"]["instruction_counts"] == {"all-gather-start": 1, "dot": 1}
     assert tp_muon["hlo"]["estimated_result_bytes"] == {"all-gather-start": 32, "dot": 64}
     assert {(item["kind"], item["candidate"], item["baseline"]) for item in payload["comparisons"]} == {
@@ -106,6 +107,19 @@ def test_summarize_perfetto_trace_requires_gpu_zero_metadata(tmp_path: Path) -> 
 
     with pytest.raises(ContractError, match="GPU:0"):
         summarize_perfetto_trace(trace_path)
+
+
+def test_analyze_profile_root_discovers_plain_hlo_capture_directory(tmp_path: Path) -> None:
+    _write_run(tmp_path, "dense_tp_muon", optimizer="muon", layout="tp", scale=1.0)
+    hlo_dir = tmp_path / "cloud_results" / "capture" / "hlo" / "dense_tp_muon"
+    hlo_dir.mkdir(parents=True)
+    (hlo_dir / "module_1.jit__compiled_impl.sm_gpu_after_optimizations.txt").write_text(
+        "ROOT %dot.1 = f32[4,4] dot(%p1, %p2)\n"
+    )
+
+    payload = analyze_profile_root(tmp_path)
+
+    assert payload["runs"][0]["hlo"]["instruction_counts"] == {"dot": 1}
 
 
 def _write_run(

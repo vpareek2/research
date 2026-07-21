@@ -209,7 +209,7 @@ def summarize_perfetto_trace(path: str | Path) -> dict[str, Any]:
         raise ContractError(f"Perfetto trace has no /device:GPU:0 process metadata: {trace_path}")
 
     by_name: defaultdict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
-    by_category: defaultdict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
+    by_category: defaultdict[str, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
     total_us = 0.0
     for event in events:
         if not isinstance(event, Mapping) or event.get("pid") != gpu_zero_pid or event.get("ph") != "X":
@@ -225,6 +225,7 @@ def summarize_perfetto_trace(path: str | Path) -> dict[str, Any]:
         category = _kernel_category(name)
         by_category[category][0] += 1
         by_category[category][1] += duration_us
+        by_category[category][2] = max(by_category[category][2], duration_us)
 
     top = sorted(by_name.items(), key=lambda item: (-item[1][1], item[0]))[:20]
     return {
@@ -235,6 +236,7 @@ def summarize_perfetto_trace(path: str | Path) -> dict[str, Any]:
             name: {
                 "count": int(value[0]),
                 "duration_sec": value[1] / 1_000_000.0,
+                "max_duration_sec": value[2] / 1_000_000.0,
                 "event_sum_fraction": value[1] / total_us if total_us else 0.0,
             }
             for name, value in sorted(by_category.items())
@@ -390,9 +392,12 @@ def _median_or_none(values: Iterable[float]) -> float | None:
 
 def _discover_hlo_roots(root: Path) -> dict[str, Path]:
     result = {}
-    for path in root.rglob("*_hlo"):
-        if not path.is_dir():
-            continue
+    hlo_roots = (
+        path
+        for path in root.rglob("*")
+        if path.is_dir() and (path.name == "hlo" or path.name.endswith("_hlo"))
+    )
+    for path in hlo_roots:
         for child in path.iterdir():
             if child.is_dir():
                 result.setdefault(child.name, child)
