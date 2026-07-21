@@ -20,6 +20,7 @@ current conclusions. Keep it factual and command-oriented.
 
 ## Active Streams
 
+- [Performance optimization](streams/performance_optimization.md)
 - [Tensor parallel completion](streams/tp_completion.md)
 - [MoE parallelism](streams/moe_parallelism.md)
 - [Cloud validation queue](streams/cloud_validation_queue.md)
