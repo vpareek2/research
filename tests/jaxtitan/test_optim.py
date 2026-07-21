@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from jaxtitan.errors import ContractError
@@ -425,24 +426,36 @@ def test_tensor_parallel_muon_takes_precedence_over_fsdp_dion2_route(mode: str) 
 
 
 @pytest.mark.parametrize(
+    ("axis_names", "axis_sizes"),
+    [
+        pytest.param(("data", "tp"), (1, 4), id="tp4"),
+        pytest.param(("data", "fsdp", "tp"), (1, 2, 2), id="fsdp2_tp2"),
+        pytest.param(("data", "tp", "ep"), (1, 2, 2), id="tp2_ep2"),
+    ],
+)
+@pytest.mark.parametrize(
     "partition_spec",
     [
         pytest.param(jax.sharding.PartitionSpec("tp", None), id="row_sharded"),
         pytest.param(jax.sharding.PartitionSpec(None, "tp"), id="column_sharded"),
     ],
 )
-def test_exact_distributed_muon_update_matches_replicated_muon_for_tp_shards(partition_spec) -> None:
+def test_exact_distributed_muon_update_matches_replicated_muon_for_tp_shards(
+    axis_names,
+    axis_sizes,
+    partition_spec,
+) -> None:
     require_fake_devices()
-    full_params = {"w": jnp.arange(24, dtype=jnp.float32).reshape(6, 4) / 10.0}
-    full_grads = {"w": jnp.arange(24, dtype=jnp.float32).reshape(6, 4) / 20.0}
-    metadata = (ParamMetadata(path=("w",), shape=(6, 4), dtype="float32", count=24, tag="attention_q"),)
+    full_params = {"w": jnp.arange(64, dtype=jnp.float32).reshape(8, 8) / 10.0}
+    full_grads = {"w": jnp.arange(64, dtype=jnp.float32).reshape(8, 8) / 20.0}
+    metadata = (ParamMetadata(path=("w",), shape=(8, 8), dtype="float32", count=64, tag="attention_q"),)
     spec = OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.0)
 
     replicated = build_optimizer(spec, full_params, metadata)
     replicated_params = full_params
     replicated_state = replicated.transform.init(replicated_params)
 
-    context = build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(1, 2)))
+    context = build_mesh_context(MeshSpec(axis_names=axis_names, axis_sizes=axis_sizes))
     sharding = jax.sharding.NamedSharding(context.mesh, partition_spec)
     sharded_params = {"w": jax.device_put(full_params["w"], sharding)}
     sharded_grads = {"w": jax.device_put(full_grads["w"], sharding)}
@@ -463,9 +476,17 @@ def test_exact_distributed_muon_update_matches_replicated_muon_for_tp_shards(par
             params=distributed_params,
         )
         assert jnp.allclose(distributed_updates["w"], replicated_updates["w"], rtol=1e-5, atol=1e-5)
+        for distributed_leaf, replicated_leaf in zip(
+            jax.tree.leaves(distributed_state),
+            jax.tree.leaves(replicated_state),
+            strict=True,
+        ):
+            assert jnp.allclose(distributed_leaf, replicated_leaf, rtol=1e-5, atol=1e-5)
+        _assert_physical_replicas_equal(distributed_state)
         replicated_params = jax.tree.map(lambda param, update: param + update, replicated_params, replicated_updates)
         distributed_params = jax.tree.map(lambda param, update: param + update, distributed_params, distributed_updates)
         assert jnp.allclose(distributed_params["w"], replicated_params["w"], rtol=1e-5, atol=1e-5)
+        _assert_physical_replicas_equal(distributed_params)
 
 
 def test_muon_build_init_and_update_accept_nnx_model_state() -> None:
@@ -724,3 +745,13 @@ def _tiny_trinity_spec(**overrides) -> ModelSpec:
 
 def _scalar(value) -> float:
     return float(jnp.asarray(value).item())
+
+
+def _assert_physical_replicas_equal(tree) -> None:
+    for leaf in jax.tree.leaves(tree):
+        copies_by_index: dict[str, list[np.ndarray]] = {}
+        for shard in getattr(leaf, "addressable_shards", ()):
+            copies_by_index.setdefault(str(shard.index), []).append(np.asarray(jax.device_get(shard.data)))
+        for copies in copies_by_index.values():
+            for copy in copies[1:]:
+                np.testing.assert_array_equal(copy, copies[0])

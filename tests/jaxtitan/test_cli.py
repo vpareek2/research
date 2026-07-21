@@ -207,6 +207,51 @@ def test_cli_kernels_bench_bad_rows_fails_cleanly(
     assert "Traceback" not in captured.err
 
 
+def test_cli_profile_analyze_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "jaxtitan.runtime.profile_analysis.analyze_profile_root",
+        lambda root, *, warmup_steps: {
+            "schema_version": 1,
+            "source": root,
+            "run_count": warmup_steps,
+            "hardware": [],
+            "runs": [],
+            "comparisons": [],
+        },
+    )
+
+    result = cli.main(["profile", "analyze", "capture", "--warmup-steps", "3", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["source"] == "capture"
+    assert payload["run_count"] == 3
+
+
+def test_cli_profile_bench_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "jaxtitan.runtime.profile_bench.benchmark_component",
+        lambda component, *, warmup, iters: {
+            "schema_version": 1,
+            "component": component,
+            "warmup": warmup,
+            "iters": iters,
+        },
+    )
+
+    result = cli.main(["profile", "bench", "muon", "--warmup", "2", "--iters", "4", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload == {"component": "muon", "iters": 4, "schema_version": 1, "warmup": 2}
+
+
 def test_cli_run_init(tmp_path: Path, minimal_config: str) -> None:
     config_path = tmp_path / "jaxtitan.toml"
     config_path.write_text(minimal_config)

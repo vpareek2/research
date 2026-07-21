@@ -23,7 +23,7 @@ from jaxtitan.models.components import (
     TrinityMoEBlock,
     full_sequence_attention_mask,
 )
-from jaxtitan.models.components.moe import _sequence_balance_loss
+from jaxtitan.models.components.moe import _all_to_all_expert_swiglu, _sequence_balance_loss
 from jaxtitan.specs.model import ModelSpec, TrinityMoeSpec, TrinitySpec
 
 
@@ -527,6 +527,116 @@ def test_all_to_all_expert_dispatcher_matches_local_dispatcher_on_data_ep_mesh()
 
     assert actual.sharding.spec == P("data", None, None)
     assert jnp.allclose(actual, expected, atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    ("mesh_shape", "axis_names", "expert_fsdp_axis", "batch_size"),
+    [
+        pytest.param((1, 4), ("data", "ep"), None, 1, id="ep4"),
+        pytest.param((2, 2), ("data", "ep"), None, 4, id="data2_ep2"),
+        pytest.param((1, 2, 2), ("data", "tp", "ep"), "tp", 1, id="tp2_ep2"),
+    ],
+)
+def test_all_to_all_expert_dispatcher_preserves_edge_case_outputs(
+    mesh_shape,
+    axis_names,
+    expert_fsdp_axis,
+    batch_size,
+) -> None:
+    mesh = Mesh(np.asarray(jax.devices()[:4], dtype=object).reshape(mesh_shape), axis_names)
+    num_experts = 4
+    hidden_size = 3
+    intermediate_size = 4
+    seq_len = 4
+    top_k = 2
+    x = jnp.arange(batch_size * seq_len * hidden_size, dtype=jnp.float32).reshape(
+        batch_size,
+        seq_len,
+        hidden_size,
+    ) / 17.0
+    gate = jnp.arange(num_experts * hidden_size * intermediate_size, dtype=jnp.float32).reshape(
+        num_experts,
+        hidden_size,
+        intermediate_size,
+    ) / 37.0
+    up = jnp.flip(gate, axis=-1) / 1.3
+    down = jnp.arange(num_experts * intermediate_size * hidden_size, dtype=jnp.float32).reshape(
+        num_experts,
+        intermediate_size,
+        hidden_size,
+    ) / 43.0
+    weights = jnp.tile(jnp.asarray([0.3, 0.7], dtype=jnp.float32), (batch_size, seq_len, 1))
+    assignment_count = batch_size * seq_len * top_k
+    balanced = jnp.arange(assignment_count, dtype=jnp.int32).reshape(batch_size, seq_len, top_k) % num_experts
+    no_expert_three = balanced % 3
+    all_one_expert = jnp.zeros_like(balanced)
+    duplicate_routes = jnp.repeat(
+        (jnp.arange(batch_size * seq_len, dtype=jnp.int32) % num_experts).reshape(batch_size, seq_len, 1),
+        top_k,
+        axis=-1,
+    )
+
+    sharded_x = jax.device_put(x, NamedSharding(mesh, P("data", None, None)))
+    sharded_weights = jax.device_put(weights, NamedSharding(mesh, P("data", None, None)))
+    sharded_gate = jax.device_put(gate, NamedSharding(mesh, P("ep", None, expert_fsdp_axis)))
+    sharded_up = jax.device_put(up, NamedSharding(mesh, P("ep", None, expert_fsdp_axis)))
+    sharded_down = jax.device_put(down, NamedSharding(mesh, P("ep", expert_fsdp_axis, None)))
+
+    def reference_output(local_x, local_ids, local_weights, local_gate, local_up, local_down):
+        selected_gate = local_gate[local_ids]
+        selected_up = local_up[local_ids]
+        selected_down = local_down[local_ids]
+        gate_x = jnp.einsum("...h,...khi->...ki", local_x, selected_gate)
+        up_x = jnp.einsum("...h,...khi->...ki", local_x, selected_up)
+        outputs = jnp.einsum("...ki,...kih->...kh", jax.nn.silu(gate_x) * up_x, selected_down)
+        return jnp.sum(outputs * local_weights[..., None], axis=-2)
+
+    def distributed_output(local_x, local_ids, local_weights, local_gate, local_up, local_down):
+        return _all_to_all_expert_swiglu(
+            x=local_x,
+            expert_ids=local_ids,
+            weights=local_weights,
+            gate=local_gate,
+            up=local_up,
+            down=local_down,
+            mesh=mesh,
+            axis_name="ep",
+            expert_fsdp_axis_name=expert_fsdp_axis,
+            context_parallel_axis_name=None,
+        )
+
+    compiled_distributed_output = jax.jit(distributed_output)
+    for ids in (balanced, no_expert_three, all_one_expert, duplicate_routes):
+        sharded_ids = jax.device_put(ids, NamedSharding(mesh, P("data", None, None)))
+        expected_output = reference_output(
+            x,
+            ids,
+            weights,
+            gate,
+            up,
+            down,
+        )
+        actual_output = compiled_distributed_output(
+            sharded_x,
+            sharded_ids,
+            sharded_weights,
+            sharded_gate,
+            sharded_up,
+            sharded_down,
+        )
+        repeated = compiled_distributed_output(
+            sharded_x,
+            sharded_ids,
+            sharded_weights,
+            sharded_gate,
+            sharded_up,
+            sharded_down,
+        )
+
+        assert ids.size == assignment_count
+        assert actual_output.sharding.spec == P("data", None, None)
+        np.testing.assert_allclose(actual_output, expected_output, rtol=1e-5, atol=1e-5)
+        np.testing.assert_array_equal(repeated, actual_output)
 
 
 def test_rdep_static_expert_dispatcher_matches_local_dispatcher_on_data_mesh() -> None:
