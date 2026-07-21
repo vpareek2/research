@@ -7,7 +7,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from jaxtitan.errors import ContractError
 from jaxtitan.models import ModelExecutionContext, ModelOutput, apply_model, apply_model_output, build_model, count_parameters, dtype_from_name
-from jaxtitan.models.execution import sequence_parallel_activation
+from jaxtitan.models.execution import ragged_dot_pallas_triton_available, sequence_parallel_activation
 from jaxtitan.models.components import (
     AllToAllExpertDispatcher,
     DecoderBlock,
@@ -862,7 +862,7 @@ def test_all_to_all_expert_dispatcher_lowers_collectives() -> None:
 
     jaxpr = str(jax.make_jaxpr(lambda hidden, ids, route_weights: AllToAllExpertDispatcher(mesh)(experts, hidden, ids, route_weights))(x, expert_ids, weights))
 
-    assert jax.config.jax_ragged_dot_use_gpu_pallas_triton_lowering is True
+    assert jax.config.jax_ragged_dot_use_gpu_pallas_triton_lowering is ragged_dot_pallas_triton_available()
     if jax.default_backend() == "cpu":
         assert "all_to_all" in jaxpr
     else:
