@@ -864,6 +864,9 @@ def test_run_training_auto_resolves_tensor_parallel_muon_to_exact_distributed_mu
     assert diagnostics["optimizer"]["auto_routing"]["active"] is True
     assert diagnostics["optimizer"]["dist_muon_exact"]["exact"] is True
     assert diagnostics["optimizer"]["dist_muon_exact"]["correctness_status"] == "four_h100_acceptance_passed"
+    leaf_plans = diagnostics["optimizer"]["dist_muon_exact"]["leaf_execution_plans"]
+    assert len(leaf_plans) == 7
+    assert {plan["execution"] for plan in leaf_plans} == {"reference_once"}
     assert row["optimizer_route_backend_counts"] == {"adamw": 7, "dist_muon_exact": 7}
     assert final["final_optimizer_route_backend_counts"] == row["optimizer_route_backend_counts"]
     assert metadata["compatibility"]["optimizer"]["policy"]["auto_routing"] == {

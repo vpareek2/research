@@ -247,6 +247,7 @@ def build_runtime_diagnostics(
         "optimizer": optimizer_policy_summary(
             spec.optimizer,
             None if optimizer is None else optimizer.route_assignments,
+            execution_plans=None if optimizer is None else optimizer.muon_execution_plans,
             parallelism_mode=spec.parallelism.mode,
             fsdp_axis_size=context.fsdp_axis_size,
             tp_axis_size=context.tp_axis_size,
