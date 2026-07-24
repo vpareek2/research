@@ -3,6 +3,68 @@
 Purpose: turn measured Jaxtitan profiles into an ordered optimization program
 without weakening correctness or adding speculative kernel surfaces.
 
+## 2026-07-24 [codex] Distributed Muon leaf selector implemented
+
+Context:
+
+- Added a correctness-checked extension of the existing
+  `jaxtitan profile bench muon` surface. It benchmarks duplicated, direct
+  small-Gram, partition-aligned large/right-Gram, and exchange-plus-small-Gram
+  execution without changing production routing or adding a TOML option.
+- The fixed matrix covers all seven rank-2 Muon leaf classes in the current
+  dense/Trinity profiles on TP4, plus K/V, O, and dense MLP confirmation on
+  FSDP2xTP2 and TP2xEP2.
+- Added production-sized 24-leaf K/V and 12-leaf O bucket cases. Candidate
+  timings use rotating order and canonical unprofiled measurements; an
+  explicitly non-canonical traced pass is optional.
+- The large-Gram path is benchmark-only. Its distinct BF16 multiplication
+  order must clear the existing five-step numerical envelope before the
+  selector can recommend it.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+bash -n scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh
+uv run python -m py_compile \
+  src/jaxtitan/runtime/muon_bench.py \
+  scripts/jaxtitan/analyze_dist_muon_leaf_bench.py
+uv run pytest -q \
+  tests/jaxtitan/test_profile_bench.py \
+  tests/jaxtitan/test_dist_muon_leaf_bench_analysis.py \
+  tests/jaxtitan/test_optim.py
+uv run pytest -q tests/jaxtitan
+git diff --check
+```
+
+Artifacts:
+
+- Branch: `codex/distributed-muon-leaf-bench`, stacked on distributed-mode
+  commit `4904e0d`.
+- Benchmark command: `uv run jaxtitan profile bench muon`.
+- Cloud runner: `scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh`.
+- Selector: `scripts/jaxtitan/analyze_dist_muon_leaf_bench.py`.
+- Expected cloud artifact:
+  `cloud_results/dist_muon_leaf_bench_YYYYMMDDTHHMMSSZ.tgz` plus `.sha256`.
+
+Result:
+
+- Targeted optimizer/benchmark/analyzer suite: `106 passed`.
+- Complete Jaxtitan suite: `701 passed, 1 skipped`.
+- Large/right-Gram HLO has one norm reduction and five right-Gram reductions,
+  with no logical-matrix all-gather or all-to-all.
+- The selector requires finite deterministic execution, exact momentum,
+  physical replica equality, update error at most `6e-4`, five-step parameter
+  error at most `1.25e-3`, stable timing, and a minimum `1.05x` speedup.
+- No GPU latency or route-selection result is claimed yet.
+
+Next:
+
+- Run the selector on four H100 80GB SXM/NVLink GPUs. Use the generated
+  hardware-specific recommendations to implement an internal per-leaf policy,
+  then confirm that policy with the existing 64-step training matrix.
+
 ## 2026-07-24 [codex] M2 distributed Muon local acceptance
 
 Context:

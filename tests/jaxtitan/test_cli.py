@@ -237,11 +237,13 @@ def test_cli_profile_bench_json(
 ) -> None:
     monkeypatch.setattr(
         "jaxtitan.runtime.profile_bench.benchmark_component",
-        lambda component, *, warmup, iters: {
+        lambda component, *, warmup, iters, artifact_dir, trace: {
             "schema_version": 1,
             "component": component,
             "warmup": warmup,
             "iters": iters,
+            "artifact_dir": artifact_dir,
+            "trace": trace,
         },
     )
 
@@ -249,7 +251,14 @@ def test_cli_profile_bench_json(
 
     payload = json.loads(capsys.readouterr().out)
     assert result == 0
-    assert payload == {"component": "muon", "iters": 4, "schema_version": 1, "warmup": 2}
+    assert payload == {
+        "artifact_dir": None,
+        "component": "muon",
+        "iters": 4,
+        "schema_version": 1,
+        "trace": False,
+        "warmup": 2,
+    }
 
 
 def test_cli_run_init(tmp_path: Path, minimal_config: str) -> None:

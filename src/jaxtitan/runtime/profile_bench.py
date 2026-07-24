@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from statistics import median
 import time
 from typing import Any, Callable, Mapping
@@ -10,10 +11,17 @@ from typing import Any, Callable, Mapping
 from jaxtitan.errors import ContractError
 
 
-PROFILE_BENCHMARK_SCHEMA_VERSION = 1
+PROFILE_BENCHMARK_SCHEMA_VERSION = 2
 
 
-def benchmark_component(component: str, *, warmup: int = 3, iters: int = 10) -> dict[str, Any]:
+def benchmark_component(
+    component: str,
+    *,
+    warmup: int = 3,
+    iters: int = 10,
+    artifact_dir: str | Path | None = None,
+    trace: bool = False,
+) -> dict[str, Any]:
     """Benchmark fixed synthetic cases for ``moe`` or ``muon``."""
 
     if component not in {"moe", "muon"}:
@@ -22,6 +30,12 @@ def benchmark_component(component: str, *, warmup: int = 3, iters: int = 10) -> 
         raise ContractError(f"profile benchmark warmup must be non-negative, got {warmup}")
     if iters <= 0:
         raise ContractError(f"profile benchmark iterations must be positive, got {iters}")
+    if artifact_dir is not None and component != "muon":
+        raise ContractError("--artifact-dir is currently supported only for the Muon profile benchmark")
+    if trace and artifact_dir is None:
+        raise ContractError("profile benchmark tracing requires --artifact-dir")
+    if trace and component != "muon":
+        raise ContractError("profile benchmark tracing is currently supported only for Muon")
 
     import jax
 
@@ -30,12 +44,30 @@ def benchmark_component(component: str, *, warmup: int = 3, iters: int = 10) -> 
             "profile benchmark requires four local JAX devices; for CPU use "
             "JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4"
         )
-    cases = _benchmark_moe(warmup=warmup, iters=iters) if component == "moe" else _benchmark_muon(
-        warmup=warmup,
-        iters=iters,
-    )
+    if component == "moe":
+        cases = _benchmark_moe(warmup=warmup, iters=iters)
+        correctness_is_checked = False
+        known_correctness_constraint = None
+        measurement_contract = None
+    else:
+        from jaxtitan.runtime.muon_bench import (
+            artifact_manifest,
+            benchmark_contract,
+            benchmark_muon,
+            write_benchmark_artifacts,
+        )
+
+        cases = benchmark_muon(
+            warmup=warmup,
+            iters=iters,
+            artifact_dir=artifact_dir,
+            trace=trace,
+        )
+        correctness_is_checked = True
+        known_correctness_constraint = "duplicated_five_step_calibrated_envelope"
+        measurement_contract = benchmark_contract()
     device = jax.devices()[0]
-    return {
+    payload = {
         "schema_version": PROFILE_BENCHMARK_SCHEMA_VERSION,
         "component": component,
         "kind": "directional_local_microbenchmark",
@@ -45,10 +77,15 @@ def benchmark_component(component: str, *, warmup: int = 3, iters: int = 10) -> 
         "warmup": warmup,
         "iters": iters,
         "timing_is_acceptance_gate": False,
-        "correctness_is_checked": False,
-        "known_correctness_constraint": None,
+        "correctness_is_checked": correctness_is_checked,
+        "known_correctness_constraint": known_correctness_constraint,
+        "measurement_contract": measurement_contract,
         "cases": cases,
     }
+    if artifact_dir is not None:
+        payload["artifacts"] = artifact_manifest(artifact_dir)
+        write_benchmark_artifacts(artifact_dir, payload=payload)
+    return payload
 
 
 def benchmark_to_json(payload: Mapping[str, Any]) -> str:
@@ -62,14 +99,27 @@ def format_benchmark(payload: Mapping[str, Any]) -> str:
 
     lines = [
         f"profile benchmark: component={payload['component']} backend={payload['backend']} "
-        f"device={payload['device_kind']} timing_gate=false correctness_check=false"
+        f"device={payload['device_kind']} timing_gate=false "
+        f"correctness_check={str(bool(payload['correctness_is_checked'])).lower()}"
     ]
     for case in payload["cases"]:
-        lines.append(
-            f"  {case['name']}: compile={case['compile_sec']:.3f}s "
-            f"median={case['timing_ms']['median']:.3f}ms "
-            f"p10={case['timing_ms']['p10']:.3f}ms p90={case['timing_ms']['p90']:.3f}ms"
-        )
+        if "candidates" in case:
+            lines.append(
+                f"  {case['name']}: shape={case['shape']} placement={case['partition_spec']}"
+            )
+            for candidate in case["candidates"]:
+                lines.append(
+                    f"    {candidate['execution']}: compile={candidate['compile_sec']:.3f}s "
+                    f"median={candidate['timing_ms']['median']:.3f}ms "
+                    f"p95={candidate['timing_ms']['p95']:.3f}ms "
+                    f"correct={str(candidate['correctness_gate']).lower()}"
+                )
+        else:
+            lines.append(
+                f"  {case['name']}: compile={case['compile_sec']:.3f}s "
+                f"median={case['timing_ms']['median']:.3f}ms "
+                f"p10={case['timing_ms']['p10']:.3f}ms p90={case['timing_ms']['p90']:.3f}ms"
+            )
     return "\n".join(lines)
 
 
@@ -166,57 +216,6 @@ def _benchmark_moe(*, warmup: int, iters: int) -> list[dict[str, Any]]:
     return cases
 
 
-def _benchmark_muon(*, warmup: int, iters: int) -> list[dict[str, Any]]:
-    import jax
-    import jax.numpy as jnp
-    import numpy as np
-    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-
-    from jaxtitan.optim.muon import distributed_muon_transform
-
-    devices = np.asarray(jax.devices()[:4], dtype=object)
-    cases = []
-    case_specs = (
-        ("tp4_column", (1, 4), ("data", "tp"), P(None, "tp"), (1024, 128)),
-        ("tp4_row", (1, 4), ("data", "tp"), P("tp", None), (128, 1024)),
-        ("fsdp2_tp2_column", (1, 2, 2), ("data", "fsdp", "tp"), P(None, "tp"), (1024, 128)),
-        ("tp2_ep2_column", (1, 2, 2), ("data", "tp", "ep"), P(None, "tp"), (1024, 128)),
-    )
-    for name, mesh_shape, axis_names, partition_spec, shape in case_specs:
-        mesh = Mesh(devices.reshape(mesh_shape), axis_names)
-        sharding = NamedSharding(mesh, partition_spec)
-        base = jnp.arange(shape[0] * shape[1], dtype=jnp.float32).reshape(shape) / float(shape[0] * shape[1])
-        params = {"w": jax.device_put(base, sharding)}
-        grads = {"w": jax.device_put(jnp.flip(base, axis=-1), sharding)}
-        transform = distributed_muon_transform(
-            lambda _count: jnp.asarray(0.02, dtype=jnp.float32),
-            weight_decay=0.1,
-            parameter_shardings={"w": sharding},
-        )
-        state = transform.init(params)
-
-        def update_fn(local_params, local_grads, local_state):
-            updates, next_state = transform.update(local_grads, local_state, params=local_params)
-            next_params = jax.tree.map(lambda param, update: param + update, local_params, updates)
-            return next_params, next_state
-
-        compiled, compile_sec, hlo = _compile(jax.jit(update_fn), (params, grads, state))
-        timing = _time_stateful(compiled, (params, grads, state), warmup=warmup, iters=iters)
-        cases.append(
-            {
-                "name": name,
-                "mesh": dict(zip(axis_names, mesh_shape, strict=True)),
-                "shape": list(shape),
-                "partition_spec": str(partition_spec),
-                "workload": "optimizer_update",
-                "compile_sec": compile_sec,
-                "timing_ms": timing,
-                "hlo": hlo,
-            }
-        )
-    return cases
-
-
 def _compile(function: Any, args: tuple[Any, ...]) -> tuple[Any, float, dict[str, Any]]:
     from jaxtitan.runtime.profile_analysis import summarize_hlo_text
 
@@ -233,26 +232,6 @@ def _time_calls(function: Callable[..., Any], args: tuple[Any, ...], *, warmup: 
     for _ in range(iters):
         started = time.perf_counter()
         _block(function(*args))
-        times.append((time.perf_counter() - started) * 1000.0)
-    return _timing_summary(times)
-
-
-def _time_stateful(
-    function: Callable[..., Any],
-    args: tuple[Any, ...],
-    *,
-    warmup: int,
-    iters: int,
-) -> dict[str, float]:
-    params, grads, state = args
-    for _ in range(warmup):
-        params, state = function(params, grads, state)
-        _block((params, state))
-    times = []
-    for _ in range(iters):
-        started = time.perf_counter()
-        params, state = function(params, grads, state)
-        _block((params, state))
         times.append((time.perf_counter() - started) * 1000.0)
     return _timing_summary(times)
 

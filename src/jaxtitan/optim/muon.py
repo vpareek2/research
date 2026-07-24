@@ -333,7 +333,11 @@ def _planned_zeropower(
             precision=MUON_NS_PRECISION,
         ).astype(value.dtype)
         return jax.lax.with_sharding_constraint(result, plan.update_sharding)
-    if plan.execution in {"distributed_direct", "distributed_exchange"}:
+    if plan.execution in {
+        "distributed_direct",
+        "distributed_exchange",
+        "distributed_large_gram",
+    }:
         return _distributed_zeropower(value, plan)
     raise ValueError(f"unsupported distributed Muon execution {plan.execution!r}")
 
@@ -358,10 +362,16 @@ def _bucketed_distributed_zeropower(
     mesh = plans[0].gradient_sharding.mesh
     execution = plans[0].execution
     bucket_id = plans[0].bucket_id
-    if execution not in {"distributed_direct", "distributed_exchange"}:
+    if execution not in {
+        "distributed_direct",
+        "distributed_exchange",
+        "distributed_large_gram",
+    }:
         raise ValueError(f"unsupported bucketed distributed Muon execution {execution!r}")
     if any(plan.gradient_sharding.mesh != mesh or plan.execution != execution for plan in plans):
         raise ValueError("distributed Muon bucket contains incompatible execution plans")
+    if execution == "distributed_large_gram" and any(plan.canonical_tp_dim != 0 for plan in plans):
+        raise ValueError("large-Gram distributed Muon requires the canonical row dimension to be TP-sharded")
 
     def kernel(*locals_: jax.Array) -> tuple[jax.Array, ...]:
         local_floats = tuple(local.astype(jnp.float32) for local in locals_)
@@ -391,13 +401,25 @@ def _bucketed_distributed_zeropower(
             xs.append(x)
         a, b, c = MUON_NS_COEFFICIENTS
         for _ in range(MUON_NS_STEPS):
-            gram_shapes = tuple((x.shape[0], x.shape[0]) for x in xs)
-            gram_sizes = tuple(rows * columns for rows, columns in gram_shapes)
-            local_grams = tuple(
-                (x @ jnp.swapaxes(x, -1, -2)).reshape(-1)
+            gram_shapes = tuple(
+                (x.shape[1], x.shape[1])
+                if execution == "distributed_large_gram"
+                else (x.shape[0], x.shape[0])
                 for x in xs
             )
-            with set_xla_metadata(muon_op="gram", muon_bucket=str(bucket_id)):
+            gram_sizes = tuple(rows * columns for rows, columns in gram_shapes)
+            local_grams = tuple(
+                (
+                    jnp.swapaxes(x, -1, -2) @ x
+                    if execution == "distributed_large_gram"
+                    else x @ jnp.swapaxes(x, -1, -2)
+                ).reshape(-1)
+                for x in xs
+            )
+            metadata = {"muon_op": "gram", "muon_bucket": str(bucket_id)}
+            if execution == "distributed_large_gram":
+                metadata["muon_gram_side"] = "right"
+            with set_xla_metadata(**metadata):
                 reduced_grams = jax.lax.psum(jnp.concatenate(local_grams), "tp")
             next_xs = []
             offset = 0
@@ -408,7 +430,12 @@ def _bucketed_distributed_zeropower(
                     gram_size,
                 ).reshape(gram_shape)
                 gram2 = gram @ gram
-                next_xs.append(a * x + (b * gram + c * gram2) @ x)
+                polynomial = b * gram + c * gram2
+                next_xs.append(
+                    a * x + x @ polynomial
+                    if execution == "distributed_large_gram"
+                    else a * x + polynomial @ x
+                )
                 offset += gram_size
             xs = next_xs
         results = []

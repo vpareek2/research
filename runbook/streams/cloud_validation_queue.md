@@ -3,6 +3,62 @@
 Purpose: track what must be validated on cloud GPUs and what local work must
 finish before spending cloud time.
 
+## 2026-07-24 [codex] Distributed Muon leaf benchmark queue is ready
+
+Context:
+
+- The matched eight-run M2 capture proved that the current global distributed
+  route beats duplicated execution in every tested layout. The next cloud task
+  is a synthetic leaf/bucket selector, not another training matrix.
+- Prepared a four-GPU benchmark for duplicated, direct small-Gram,
+  partition-aligned large-Gram, and exchange-plus-small-Gram Muon execution.
+- Canonical selection timing is unprofiled. `--with-trace` performs a separate
+  short trace pass and never supplies selection timings.
+- No cloud command was run in this step.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+bash -n scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh
+uv run pytest -q \
+  tests/jaxtitan/test_profile_bench.py \
+  tests/jaxtitan/test_dist_muon_leaf_bench_analysis.py \
+  tests/jaxtitan/test_optim.py
+uv run pytest -q tests/jaxtitan
+```
+
+Cloud launch:
+
+```bash
+cd ~/research
+git fetch origin
+git switch codex/distributed-muon-leaf-bench
+git pull --ff-only
+tmux new -s dist-muon-leaf-bench
+scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh
+```
+
+Artifacts:
+
+- Runner: `scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh`.
+- Expected bundle:
+  `cloud_results/dist_muon_leaf_bench_YYYYMMDDTHHMMSSZ.tgz`.
+- The bundle contains hardware/topology/JAX provenance, canonical benchmark
+  JSON, conservative selection JSON/text, raw optimized HLO, and checksums.
+
+Result:
+
+- Local targeted suite: `106 passed`; complete Jaxtitan suite:
+  `701 passed, 1 skipped`.
+- Production routing and resume fingerprints are unchanged.
+- No GPU winner table exists yet.
+
+Next:
+
+- Prefer four H100 80GB SXM/NVLink GPUs matching the prior M2 capture. Copy and
+  checksum-verify the generated archive before terminating the allocation.
+
 ## 2026-07-24 [codex] M2 distributed Muon four-GPU queue is ready
 
 Context:
