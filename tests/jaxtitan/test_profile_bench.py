@@ -93,6 +93,53 @@ def test_muon_timing_summary_reports_tail_and_stability() -> None:
     }
 
 
+def test_muon_calibration_matrix_covers_width_ratio_count_and_orientation() -> None:
+    cases = muon_bench._calibration_bucket_cases()
+
+    assert {case.leaf.shape[0] for case in cases} == {256, 1024, 2048}
+    assert {
+        case.leaf.shape[1] / case.leaf.shape[0]
+        for case in cases
+    } == {1.0, 2.0, 4.0}
+    assert {case.leaf_count for case in cases} == {1, 12, 24}
+    assert {case.leaf.tp_partition_dim for case in cases} == {0, 1}
+    assert len(cases) == 14
+
+
+def test_muon_production_bucket_matrix_covers_every_rank_two_role() -> None:
+    cases = muon_bench._PRODUCTION_BUCKET_CASES
+
+    assert {case.name for case in cases} == {
+        "attention_kv",
+        "attention_q_gate",
+        "attention_o",
+        "shared_mlp_gate_up",
+        "shared_mlp_down",
+        "dense_mlp_gate_up",
+        "dense_mlp_down",
+    }
+    assert {case.leaf_count for case in cases}.issuperset({10, 12, 20, 24})
+    assert {case.kind for case in cases} == {"production_bucket"}
+
+
+def test_muon_policy_features_are_shape_and_topology_only() -> None:
+    assert muon_bench._policy_features(
+        shape=(1024, 4096),
+        canonical_tp_dim=1,
+        tp_size=4,
+        leaf_count=24,
+    ) == {
+        "short_dimension": 1024,
+        "long_dimension": 4096,
+        "aspect_ratio": 4.0,
+        "canonical_tp_dim": 1,
+        "tp_size": 4,
+        "leaf_count": 24,
+        "matrix_elements_per_leaf": 4194304,
+        "aggregate_matrix_elements": 100663296,
+    }
+
+
 def test_muon_benchmark_scales_reference_error_envelope_to_production_lr() -> None:
     contract = muon_bench.benchmark_contract()
 

@@ -55,6 +55,8 @@ def _payload(candidates: list[dict[str, object]]) -> dict[str, object]:
                 "partition_spec": "P(None, 'tp')",
                 "tp_partition_dim": 1,
                 "canonical_tp_dim": 0,
+                "leaf_count": 24,
+                "kind": "production_bucket",
                 "candidates": candidates,
             }
         ],
@@ -75,6 +77,17 @@ def test_selector_chooses_clear_fastest_correct_candidate() -> None:
     assert result["overall_gate"] is True
     assert result["cases"][0]["selected_execution"] == "distributed_exchange"
     assert result["cases"][0]["selected_speedup_vs_duplicated"] == pytest.approx(1.0 / 0.7)
+    assert result["production_recommendations"][0]["policy_features"] == {
+        "short_dimension": 256,
+        "long_dimension": 1024,
+        "aspect_ratio": 4.0,
+        "canonical_tp_dim": 0,
+        "tp_size": 4,
+        "leaf_count": 24,
+        "matrix_elements_per_leaf": 262144,
+        "aggregate_matrix_elements": 6291456,
+    }
+    assert result["shape_topology_samples"][0]["selected_execution"] == "distributed_exchange"
 
 
 def test_selector_prefers_simpler_candidate_inside_tie_band() -> None:

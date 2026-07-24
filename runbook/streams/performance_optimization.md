@@ -17,6 +17,15 @@ Context:
 - Added production-sized 24-leaf K/V and 12-leaf O bucket cases. Candidate
   timings use rotating order and canonical unprofiled measurements; an
   explicitly non-canonical traced pass is optional.
+- Expanded the calibration matrix before freezing a production policy:
+  all seven current rank-2 role shapes now have production-sized buckets, and
+  a one-factor lattice covers hidden widths `256/1024/2048`, aspect ratios
+  `1/2/4`, leaf counts `1/12/24`, both canonical TP orientations, TP2/TP4,
+  and TP/FSDP+TP/TP+EP topologies. The resulting fixed matrix has 76 cases and
+  185 candidate programs.
+- Selector output now carries architecture-independent policy features:
+  short/long dimensions, aspect ratio, canonical TP dimension, TP size,
+  leaf count, and aggregate matrix elements.
 - The large-Gram path is benchmark-only. Its distinct BF16 multiplication
   order must clear the existing five-step numerical envelope before the
   selector can recommend it.
@@ -59,6 +68,7 @@ Artifacts:
 Result:
 
 - Targeted optimizer/benchmark/analyzer suite: `106 passed`.
+- Expanded selector optimizer/benchmark/analyzer gate: `85 passed`.
 - Complete Jaxtitan suite: `701 passed, 1 skipped`.
 - Large/right-Gram HLO has one norm reduction and five right-Gram reductions,
   with no logical-matrix all-gather or all-to-all.
@@ -80,13 +90,15 @@ Result:
   Other unbucketed MLP/Q/down cases and composed dense MLP gate/up did not
   clear the `1.05x` gate and selected duplicated execution.
 - No profiler trace was captured; canonical timing was unprofiled as required.
+- The 19-case artifact remains valid for K/V and O. The expanded 76-case
+  calibration has not yet been run on GPU and must replace it before the
+  shape/topology production selector is implemented.
 
 Next:
 
-- Implement the hardware-backed internal per-role policy: retain exchange for
-  K/V buckets, add large/right-Gram for O buckets, retain direct only where it
-  clears the selector, and use duplicated execution for the remaining current
-  leaf classes.
+- Run the expanded selector on the same four-H100 topology, derive a portable
+  shape/topology breakpoint from bucket—not singleton—evidence, and then
+  implement that policy without model-tag or exact-width branches.
 - Confirm that policy with the existing matched 64-step training matrix before
   making any production throughput claim.
 

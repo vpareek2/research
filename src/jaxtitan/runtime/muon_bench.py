@@ -41,6 +41,14 @@ class _Leaf:
     tp_partition_dim: int
 
 
+@dataclass(frozen=True, slots=True)
+class _BucketCase:
+    name: str
+    leaf: _Leaf
+    leaf_count: int
+    kind: str
+
+
 @dataclass(slots=True)
 class _CompiledCandidate:
     name: str
@@ -76,6 +84,50 @@ _COMPOSED_CONFIRMATION_LEAVES = (
     _CURRENT_LEAVES[5],
 )
 _GRAM_BUCKET_MAX_BYTES = 32 * 1024 * 1024
+_PRODUCTION_BUCKET_CASES = (
+    _BucketCase("attention_kv", _CURRENT_LEAVES[0], 24, "production_bucket"),
+    _BucketCase("attention_q_gate", _CURRENT_LEAVES[1], 12, "production_bucket"),
+    _BucketCase("attention_o", _CURRENT_LEAVES[2], 12, "production_bucket"),
+    _BucketCase("shared_mlp_gate_up", _CURRENT_LEAVES[3], 20, "production_bucket"),
+    _BucketCase("shared_mlp_down", _CURRENT_LEAVES[4], 10, "production_bucket"),
+    _BucketCase("dense_mlp_gate_up", _CURRENT_LEAVES[5], 24, "production_bucket"),
+    _BucketCase("dense_mlp_down", _CURRENT_LEAVES[6], 12, "production_bucket"),
+)
+
+
+def _calibration_bucket_cases() -> tuple[_BucketCase, ...]:
+    """Return a bounded one-factor shape/count lattice for policy calibration."""
+
+    points = (
+        (256, 2, 12),
+        (1024, 2, 12),
+        (2048, 2, 12),
+        (1024, 1, 12),
+        (1024, 4, 12),
+        (1024, 2, 1),
+        (1024, 2, 24),
+    )
+    cases = []
+    for short, aspect_ratio, leaf_count in points:
+        shape = (short, short * aspect_ratio)
+        for canonical_tp_dim in (0, 1):
+            orientation = "row" if canonical_tp_dim == 0 else "column"
+            cases.append(
+                _BucketCase(
+                    name=(
+                        f"calibration_w{short}_r{aspect_ratio}_"
+                        f"{orientation}_bucket{leaf_count}"
+                    ),
+                    leaf=_Leaf(
+                        role="calibration",
+                        shape=shape,
+                        tp_partition_dim=canonical_tp_dim,
+                    ),
+                    leaf_count=leaf_count,
+                    kind="calibration_bucket",
+                )
+            )
+    return tuple(cases)
 
 
 def benchmark_muon(
@@ -116,16 +168,15 @@ def benchmark_muon(
                     trace=trace,
                 )
             )
-        for leaf, leaf_count in (
-            (_CURRENT_LEAVES[0], 24),
-            (_CURRENT_LEAVES[2], 12),
-        ):
+        for bucket_case in (*_PRODUCTION_BUCKET_CASES, *_calibration_bucket_cases()):
             cases.append(
                 _benchmark_bucket(
                     topology=topology,
                     mesh=mesh,
-                    leaf=leaf,
-                    leaf_count=leaf_count,
+                    leaf=bucket_case.leaf,
+                    leaf_count=bucket_case.leaf_count,
+                    case_name=bucket_case.name,
+                    kind=bucket_case.kind,
                     warmup=warmup,
                     iters=iters,
                     artifact_root=artifact_root,
@@ -223,6 +274,8 @@ def _benchmark_bucket(
     mesh: Any,
     leaf: _Leaf,
     leaf_count: int,
+    case_name: str | None = None,
+    kind: str = "bucket",
     warmup: int,
     iters: int,
     artifact_root: Path | None,
@@ -235,6 +288,7 @@ def _benchmark_bucket(
 
     partition_spec = P("tp", None) if leaf.tp_partition_dim == 0 else P(None, "tp")
     sharding = NamedSharding(mesh, partition_spec)
+    name = case_name or f"{leaf.role}_bucket{leaf_count}"
     element_count = math.prod(leaf.shape)
     base_param = jax.random.normal(
         jax.random.key(element_count + leaf_count),
@@ -288,7 +342,7 @@ def _benchmark_bucket(
             )
         candidates.append(
             _compile_tree_candidate(
-                name=f"{topology.name}_{leaf.role}_bucket{leaf_count}_{execution}",
+                name=f"{topology.name}_{name}_{execution}",
                 execution=execution,
                 params=params,
                 grads=grads,
@@ -332,8 +386,8 @@ def _benchmark_bucket(
         )
         rows.append(result)
     return {
-        "kind": "bucket",
-        "name": f"{topology.name}_{leaf.role}_bucket{leaf_count}",
+        "kind": kind,
+        "name": f"{topology.name}_{name}",
         "topology": topology.name,
         "mesh": dict(zip(topology.axes, topology.shape, strict=True)),
         "role": leaf.role,
@@ -342,6 +396,12 @@ def _benchmark_bucket(
         "tp_partition_dim": leaf.tp_partition_dim,
         "canonical_tp_dim": candidates[0].plans["w000"].canonical_tp_dim,
         "leaf_count": leaf_count,
+        "policy_features": _policy_features(
+            shape=leaf.shape,
+            canonical_tp_dim=candidates[0].plans["w000"].canonical_tp_dim,
+            tp_size=int(mesh.shape["tp"]),
+            leaf_count=leaf_count,
+        ),
         "workload": "production_shape_bucket_optimizer_update_latency",
         "reference": "duplicated",
         "candidates": rows,
@@ -673,6 +733,27 @@ def _collective_operand_model(
         payload["exchange_operand_bytes_per_rank_each_direction"] = elements * bf16_bytes // tp_size
         payload["exchange_directions"] = 2
     return payload
+
+
+def _policy_features(
+    *,
+    shape: tuple[int, int],
+    canonical_tp_dim: int,
+    tp_size: int,
+    leaf_count: int,
+) -> dict[str, int | float]:
+    short_dimension = min(shape)
+    long_dimension = max(shape)
+    return {
+        "short_dimension": short_dimension,
+        "long_dimension": long_dimension,
+        "aspect_ratio": long_dimension / short_dimension,
+        "canonical_tp_dim": canonical_tp_dim,
+        "tp_size": tp_size,
+        "leaf_count": leaf_count,
+        "matrix_elements_per_leaf": math.prod(shape),
+        "aggregate_matrix_elements": math.prod(shape) * leaf_count,
+    }
 
 
 def _memory_analysis(compiled: Any) -> dict[str, int | None]:

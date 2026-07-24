@@ -12,6 +12,10 @@ Context:
   is a synthetic leaf/bucket selector, not another training matrix.
 - Prepared a four-GPU benchmark for duplicated, direct small-Gram,
   partition-aligned large-Gram, and exchange-plus-small-Gram Muon execution.
+- Expanded it to 76 fixed cases / 185 candidate programs so Q, attention gate,
+  dense/shared MLP, three width scales, three aspect ratios, three bucket
+  populations, and both canonical TP orientations are represented before
+  production policy selection.
 - Canonical selection timing is unprofiled. `--with-trace` performs a separate
   short trace pass and never supplies selection timings.
 - No cloud command was run in this step.
@@ -56,6 +60,7 @@ Result:
 
 - Local targeted suite: `106 passed`; complete Jaxtitan suite:
   `701 passed, 1 skipped`.
+- Expanded selector optimizer/benchmark/analyzer gate: `85 passed`.
 - Production routing and resume fingerprints are unchanged.
 - The first H100 invocation exposed an LR-unit bug in the benchmark gate: it
   applied the absolute envelope calibrated at LR `0.001` to production LR
@@ -70,12 +75,15 @@ Result:
   - O: large/right-Gram, `1.75x` over duplicated on TP4 and `2.17x` on the
     composed layouts; `1.16x` over the current exchange route.
 - No trace pass was run. The timing evidence is canonical and unprofiled.
+- The completed 19-case artifact remains the accepted K/V/O result. The new
+  76-case shape/topology calibration is queued and has no GPU claim yet.
 
 Next:
 
-- Cloud selection is complete. Implement the selected internal route policy,
-  then use the existing four-H100 64-step matrix as the production acceptance
-  gate.
+- Run the expanded canonical selector on the same four-H100 topology and copy
+  its checksum-verified bundle locally. Only then implement the portable
+  shape/topology policy and use the existing 64-step matrix as its production
+  acceptance gate.
 
 ## 2026-07-24 [codex] M2 distributed Muon four-GPU queue is ready
 

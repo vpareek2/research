@@ -67,6 +67,7 @@ def analyze_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
         "overall_gate": all(row["required_correctness_gate"] for row in rows),
         "selected_execution_counts": _counts(row["selected_execution"] for row in rows),
         "production_recommendations": recommendations,
+        "shape_topology_samples": _shape_topology_samples(rows),
     }
 
 
@@ -76,10 +77,13 @@ def _select_case(case: dict[str, Any]) -> dict[str, Any]:
     if duplicated is None:
         raise ValueError(f"Muon benchmark case {case.get('name')!r} is missing duplicated reference")
     duplicated_ms = _median_ms(duplicated)
-    current_execution = (
-        "distributed_direct"
-        if "distributed_direct" in candidates
-        else "distributed_exchange"
+    current_execution = next(
+        (
+            execution
+            for execution in ("distributed_direct", "distributed_exchange", "duplicated")
+            if execution in candidates
+        ),
+        "duplicated",
     )
     current = candidates.get(current_execution)
     if current is None:
@@ -102,6 +106,7 @@ def _select_case(case: dict[str, Any]) -> dict[str, Any]:
                 "speedup_vs_duplicated": speedup,
                 "correctness_gate": correct,
                 "stability_gate": stable,
+                "collective_operand_model": candidate.get("collective_operand_model"),
             }
         )
         if execution != "duplicated" and correct and stable and speedup >= MIN_SPEEDUP:
@@ -138,6 +143,10 @@ def _select_case(case: dict[str, Any]) -> dict[str, Any]:
         "tp_partition_dim": case["tp_partition_dim"],
         "canonical_tp_dim": case["canonical_tp_dim"],
         "leaf_count": case.get("leaf_count", 1),
+        "policy_features": case.get(
+            "policy_features",
+            _policy_features_from_case(case),
+        ),
         "current_execution": current_execution,
         "selected_execution": selected_execution,
         "selection_reason": reason,
@@ -163,12 +172,6 @@ def _counts(values) -> dict[str, int]:
 
 
 def _production_recommendations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    by_key: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in rows:
-        key = (row["topology"], row["role"])
-        current = by_key.get(key)
-        if current is None or (current["kind"] != "bucket" and row["kind"] == "bucket"):
-            by_key[key] = row
     return [
         {
             "topology": row["topology"],
@@ -177,12 +180,56 @@ def _production_recommendations(rows: list[dict[str, Any]]) -> list[dict[str, An
             "partition_spec": row["partition_spec"],
             "source_case": row["name"],
             "source_kind": row["kind"],
+            "policy_features": row["policy_features"],
             "selected_execution": row["selected_execution"],
             "speedup_vs_duplicated": row["selected_speedup_vs_duplicated"],
             "speedup_vs_current": row["selected_speedup_vs_current"],
         }
-        for row in sorted(by_key.values(), key=lambda item: (item["topology"], item["role"]))
+        for row in sorted(
+            (item for item in rows if item["kind"] == "production_bucket"),
+            key=lambda item: (
+                item["policy_features"]["tp_size"],
+                item["policy_features"]["canonical_tp_dim"],
+                item["policy_features"]["short_dimension"],
+                item["policy_features"]["aspect_ratio"],
+                item["policy_features"]["leaf_count"],
+                item["topology"],
+            ),
+        )
     ]
+
+
+def _shape_topology_samples(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "source_case": row["name"],
+            "source_kind": row["kind"],
+            "policy_features": row["policy_features"],
+            "selected_execution": row["selected_execution"],
+            "speedup_vs_duplicated": row["selected_speedup_vs_duplicated"],
+            "speedup_vs_current": row["selected_speedup_vs_current"],
+        }
+        for row in rows
+        if row["kind"] in {"production_bucket", "calibration_bucket"}
+    ]
+
+
+def _policy_features_from_case(case: dict[str, Any]) -> dict[str, int | float]:
+    rows, columns = (int(value) for value in case["shape"])
+    short_dimension = min(rows, columns)
+    long_dimension = max(rows, columns)
+    leaf_count = int(case.get("leaf_count", 1))
+    tp_size = int(case["mesh"]["tp"])
+    return {
+        "short_dimension": short_dimension,
+        "long_dimension": long_dimension,
+        "aspect_ratio": long_dimension / short_dimension,
+        "canonical_tp_dim": int(case["canonical_tp_dim"]),
+        "tp_size": tp_size,
+        "leaf_count": leaf_count,
+        "matrix_elements_per_leaf": rows * columns,
+        "aggregate_matrix_elements": rows * columns * leaf_count,
+    }
 
 
 def format_selection(selection: dict[str, Any]) -> str:
