@@ -85,13 +85,13 @@ _COMPOSED_CONFIRMATION_LEAVES = (
 )
 _GRAM_BUCKET_MAX_BYTES = 32 * 1024 * 1024
 _PRODUCTION_BUCKET_CASES = (
-    _BucketCase("attention_kv", _CURRENT_LEAVES[0], 24, "production_bucket"),
-    _BucketCase("attention_q_gate", _CURRENT_LEAVES[1], 12, "production_bucket"),
-    _BucketCase("attention_o", _CURRENT_LEAVES[2], 12, "production_bucket"),
-    _BucketCase("shared_mlp_gate_up", _CURRENT_LEAVES[3], 20, "production_bucket"),
-    _BucketCase("shared_mlp_down", _CURRENT_LEAVES[4], 10, "production_bucket"),
-    _BucketCase("dense_mlp_gate_up", _CURRENT_LEAVES[5], 24, "production_bucket"),
-    _BucketCase("dense_mlp_down", _CURRENT_LEAVES[6], 12, "production_bucket"),
+    _BucketCase("attention_kv_bucket24", _CURRENT_LEAVES[0], 24, "production_bucket"),
+    _BucketCase("attention_q_gate_bucket12", _CURRENT_LEAVES[1], 12, "production_bucket"),
+    _BucketCase("attention_o_bucket12", _CURRENT_LEAVES[2], 12, "production_bucket"),
+    _BucketCase("shared_mlp_gate_up_bucket20", _CURRENT_LEAVES[3], 20, "production_bucket"),
+    _BucketCase("shared_mlp_down_bucket10", _CURRENT_LEAVES[4], 10, "production_bucket"),
+    _BucketCase("dense_mlp_gate_up_bucket24", _CURRENT_LEAVES[5], 24, "production_bucket"),
+    _BucketCase("dense_mlp_down_bucket12", _CURRENT_LEAVES[6], 12, "production_bucket"),
 )
 
 

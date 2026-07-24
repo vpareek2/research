@@ -110,16 +110,17 @@ def test_muon_production_bucket_matrix_covers_every_rank_two_role() -> None:
     cases = muon_bench._PRODUCTION_BUCKET_CASES
 
     assert {case.name for case in cases} == {
-        "attention_kv",
-        "attention_q_gate",
-        "attention_o",
-        "shared_mlp_gate_up",
-        "shared_mlp_down",
-        "dense_mlp_gate_up",
-        "dense_mlp_down",
+        "attention_kv_bucket24",
+        "attention_q_gate_bucket12",
+        "attention_o_bucket12",
+        "shared_mlp_gate_up_bucket20",
+        "shared_mlp_down_bucket10",
+        "dense_mlp_gate_up_bucket24",
+        "dense_mlp_down_bucket12",
     }
     assert {case.leaf_count for case in cases}.issuperset({10, 12, 20, 24})
     assert {case.kind for case in cases} == {"production_bucket"}
+    assert len({case.name for case in cases}) == len(cases)
 
 
 def test_muon_policy_features_are_shape_and_topology_only() -> None:
