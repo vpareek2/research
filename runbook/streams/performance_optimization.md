@@ -3,6 +3,90 @@
 Purpose: turn measured Jaxtitan profiles into an ordered optimization program
 without weakening correctness or adding speculative kernel surfaces.
 
+## 2026-07-24 [codex] M2 distributed Muon local acceptance
+
+Context:
+
+- Added an explicit Megatron-style Muon TP contract: `duplicated` preserves the
+  accepted one-BF16-gather path, while `distributed` uses a global FP32 norm,
+  BF16 local Gram construction, five packed TP Gram reductions, and a
+  reversible tiled all-to-all for unfavorable matrix orientations.
+- Consolidated all TP Muon leaves into one transform with per-leaf decay
+  policy. Compatible leaves use deterministic, 32 MiB-capped reduction
+  buckets. Replica synchronization and parameter/gradient/momentum/update
+  shardings remain role-specific.
+- Distributed execution is intentionally marked non-exact: fake-device
+  calibration found bounded absolute differences from duplicated execution due
+  to floating-point reduction order. No GPU performance result is claimed.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+uv run pytest -q tests/jaxtitan/test_optim.py
+uv run pytest -q \
+  tests/jaxtitan/test_config.py \
+  tests/jaxtitan/test_preflight.py \
+  tests/jaxtitan/test_resume_compat.py \
+  tests/jaxtitan/test_checkpoints.py
+uv run pytest -q tests/jaxtitan/test_train_step.py
+uv run pytest -q tests/jaxtitan/test_runtime_training.py -k 'muon'
+uv run pytest -q tests/jaxtitan
+
+bash -n scripts/jaxtitan/cloud_dist_muon_m2_matrix.sh
+uv run python -m py_compile \
+  scripts/jaxtitan/analyze_dist_muon_m2_results.py
+uv run pytest -q tests/jaxtitan/test_dist_muon_m2_analysis.py
+
+for cfg in \
+  configs/jaxtitan/cloud_4gpu_profile64_dense_tp_muon.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_dense_tp_muon_distributed.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_dense_fsdp_tp_muon.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_dense_fsdp_tp_muon_distributed.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_dense_zero2_tp_muon.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_dense_zero2_tp_muon_distributed.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_trinity_moe_tp_ep_muon.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_trinity_moe_tp_ep_muon_distributed.toml
+do
+  uv run jaxtitan config check "$cfg"
+done
+
+git diff --check
+```
+
+Artifacts:
+
+- Branch: `codex/distributed-muon-mode`, stacked on the accepted
+  `reference_once` implementation commit `3f03d7e`.
+- Cloud runner:
+  `scripts/jaxtitan/cloud_dist_muon_m2_matrix.sh`.
+- Cloud comparison:
+  `scripts/jaxtitan/analyze_dist_muon_m2_results.py`.
+- Expected cloud evidence:
+  `cloud_results/dist_muon_m2_YYYYMMDDTHHMMSSZ_lightweight.tgz` and its
+  `.sha256`; full profiler trees remain in the eight `runs/` directories.
+
+Result:
+
+- Optimizer suite: `66 passed`.
+- Config/preflight/resume/checkpoint suite: `197 passed`.
+- Full train-step suite: `51 passed`.
+- Complete fake-device Jaxtitan suite: `691 passed, 1 skipped` in `553.24s`.
+- Direct and exchange HLO contain no logical-matrix all-gather, one named norm
+  reduction and five named packed Gram reductions per bucket. Exchange leaves
+  additionally contain one forward and one reverse all-to-all.
+- Five-step tests cover TP, FSDP+TP, ZeRO2+TP, and TP+EP, adversarial replica
+  disagreement, grad clipping, zero/near-zero inputs, checkpoint continuation,
+  and deterministic repeated execution.
+
+Next:
+
+- Run the eight-config matched matrix on one four-H100 node, preferably
+  SXM/NVLink. Require every run to complete train/checkpoint/eval/sample with
+  finite state and require distributed median step time to beat duplicated for
+  all four layouts before selecting it as the production default.
+
 ## 2026-07-21 [codex] M1 four-A100 acceptance and trace analysis
 
 Context:

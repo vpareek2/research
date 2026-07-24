@@ -37,7 +37,7 @@ RDEP_STATIC_ROUTE_ROW_IDENTITY = "((source_rank * T) + token) * top_k + slot"
 MOE_TP_SHARED_EXPERTS = "dense_tensor_parallel"
 MOE_TP_ROUTED_EXPERTS = "expert_axis_or_replicated_not_tensor_parallel"
 MOE_TP_ROUTED_EXPERT_TENSOR_PARALLEL = "unsupported_until_expert_tp_optimizer"
-TP_OPTIMIZER_POLICY = "muon_routes_to_dist_muon_exact"
+TP_OPTIMIZER_POLICY = "muon_routes_to_dist_muon"
 MOE_TP_OPTIMIZER_POLICY = TP_OPTIMIZER_POLICY
 
 

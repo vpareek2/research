@@ -8,6 +8,7 @@ import math
 import jax
 import jax.numpy as jnp
 import optax
+from jax.experimental.xla_metadata import set_xla_metadata
 from jax.sharding import NamedSharding, PartitionSpec as P
 
 PyTree = Any
@@ -54,8 +55,11 @@ class MuonLeafExecutionPlan:
     tp_partition_dim: int
     transpose_for_shape: bool
     canonical_tp_dim: int
+    requested_mode: str
     execution: str
+    fallback_reason: str | None
     bucket_id: int
+    weight_decay: bool
 
 
 def muon_transform(
@@ -170,7 +174,7 @@ def distributed_muon_transform(
     execution_plans: PyTree | None = None,
     parameter_shardings: PyTree | None = None,
 ) -> optax.GradientTransformationExtraArgs:
-    """Build the planned exact distributed-Muon transform."""
+    """Build the planned distributed-Muon transform."""
 
     if execution_plans is None:
         if parameter_shardings is None:
@@ -201,12 +205,12 @@ def distributed_muon_transform(
             raise ValueError("distributed Muon update requires params")
         base_lr = learning_rate(state.count)
 
-        def update_leaf(
+        def prepare_leaf(
             grad: jax.Array,
             momentum: jax.Array,
             param: jax.Array,
             plan: MuonLeafExecutionPlan,
-        ) -> _MuonLeafResult:
+        ) -> tuple[jax.Array, jax.Array, jax.Array]:
             grad = _average_declared_replicas(
                 grad,
                 plan.gradient_sharding,
@@ -228,10 +232,58 @@ def distributed_muon_transform(
                 if MUON_NESTEROV
                 else next_momentum
             )
-            orthogonalized = _planned_zeropower(muon_input, plan)
+            return muon_input, next_momentum, param
+
+        is_plan = lambda value: isinstance(value, MuonLeafExecutionPlan)
+        plan_leaves, plan_treedef = jax.tree_util.tree_flatten(
+            execution_plans,
+            is_leaf=is_plan,
+        )
+        update_leaves, update_treedef = jax.tree_util.tree_flatten(updates)
+        momentum_leaves, momentum_treedef = jax.tree_util.tree_flatten(state.momentum)
+        param_leaves, param_treedef = jax.tree_util.tree_flatten(params)
+        if not (
+            update_treedef == momentum_treedef == param_treedef == plan_treedef
+            and len(update_leaves) == len(plan_leaves)
+        ):
+            raise ValueError("distributed Muon execution plans must match the selected parameter tree")
+
+        prepared = [
+            prepare_leaf(grad, momentum, param, plan)
+            for grad, momentum, param, plan in zip(
+                update_leaves,
+                momentum_leaves,
+                param_leaves,
+                plan_leaves,
+                strict=True,
+            )
+        ]
+        orthogonalized: list[jax.Array | None] = [None] * len(plan_leaves)
+        distributed_buckets: dict[int, list[int]] = {}
+        for index, plan in enumerate(plan_leaves):
+            if plan.execution == "duplicated":
+                orthogonalized[index] = _planned_zeropower(prepared[index][0], plan)
+            else:
+                distributed_buckets.setdefault(plan.bucket_id, []).append(index)
+        for indices in distributed_buckets.values():
+            bucket_results = _bucketed_distributed_zeropower(
+                tuple(prepared[index][0] for index in indices),
+                tuple(plan_leaves[index] for index in indices),
+            )
+            for index, result in zip(indices, bucket_results, strict=True):
+                orthogonalized[index] = result
+
+        def finish_leaf(
+            prepared_leaf: tuple[jax.Array, jax.Array, jax.Array],
+            orthogonalized_leaf: jax.Array | None,
+            plan: MuonLeafExecutionPlan,
+        ) -> _MuonLeafResult:
+            if orthogonalized_leaf is None:
+                raise ValueError(f"missing distributed Muon result for {'.'.join(plan.path)!r}")
+            _muon_input, next_momentum, param = prepared_leaf
             adjusted_lr = base_lr * _rms_match_scale(plan.logical_shape)
-            update = -adjusted_lr.astype(orthogonalized.dtype) * orthogonalized
-            if weight_decay != 0.0:
+            update = -adjusted_lr.astype(orthogonalized_leaf.dtype) * orthogonalized_leaf
+            if plan.weight_decay and weight_decay != 0.0:
                 param_for_update = jax.lax.with_sharding_constraint(param, plan.update_sharding)
                 update = update - base_lr.astype(param_for_update.dtype) * weight_decay * param_for_update
             update = jax.lax.with_sharding_constraint(update, plan.update_sharding)
@@ -248,18 +300,17 @@ def distributed_muon_transform(
             )
             return _MuonLeafResult(update=update, momentum=next_momentum)
 
-        is_plan = lambda value: isinstance(value, MuonLeafExecutionPlan)
-        leaf_results = jax.tree.map(
-            update_leaf,
-            updates,
-            state.momentum,
-            params,
-            execution_plans,
-            is_leaf=is_plan,
-        )
-        is_result = lambda value: isinstance(value, _MuonLeafResult)
-        next_updates = jax.tree.map(lambda result: result.update, leaf_results, is_leaf=is_result)
-        next_momentum = jax.tree.map(lambda result: result.momentum, leaf_results, is_leaf=is_result)
+        leaf_results = [
+            finish_leaf(prepared_leaf, orthogonalized_leaf, plan)
+            for prepared_leaf, orthogonalized_leaf, plan in zip(
+                prepared,
+                orthogonalized,
+                plan_leaves,
+                strict=True,
+            )
+        ]
+        next_updates = update_treedef.unflatten([result.update for result in leaf_results])
+        next_momentum = momentum_treedef.unflatten([result.momentum for result in leaf_results])
         return next_updates, MuonState(
             count=optax.safe_increment(state.count),
             momentum=next_momentum,
@@ -272,17 +323,117 @@ def _planned_zeropower(
     value: jax.Array,
     plan: MuonLeafExecutionPlan,
 ) -> jax.Array:
-    if plan.execution != "reference_once":
-        raise ValueError(f"unsupported distributed Muon execution {plan.execution!r}")
-    logical_input = _all_gather_logical_matrix(
-        value.astype(jnp.bfloat16),
-        plan.gradient_sharding,
-    )
-    result = zeropower_via_newton_schulz(
-        logical_input,
-        precision=MUON_NS_PRECISION,
-    ).astype(value.dtype)
-    return jax.lax.with_sharding_constraint(result, plan.update_sharding)
+    if plan.execution == "duplicated":
+        logical_input = _all_gather_logical_matrix(
+            value.astype(jnp.bfloat16),
+            plan.gradient_sharding,
+        )
+        result = zeropower_via_newton_schulz(
+            logical_input,
+            precision=MUON_NS_PRECISION,
+        ).astype(value.dtype)
+        return jax.lax.with_sharding_constraint(result, plan.update_sharding)
+    if plan.execution in {"distributed_direct", "distributed_exchange"}:
+        return _distributed_zeropower(value, plan)
+    raise ValueError(f"unsupported distributed Muon execution {plan.execution!r}")
+
+
+def _distributed_zeropower(
+    value: jax.Array,
+    plan: MuonLeafExecutionPlan,
+) -> jax.Array:
+    """Run one Megatron-style Newton–Schulz update."""
+
+    return _bucketed_distributed_zeropower((value,), (plan,))[0]
+
+
+def _bucketed_distributed_zeropower(
+    values: tuple[jax.Array, ...],
+    plans: tuple[MuonLeafExecutionPlan, ...],
+) -> tuple[jax.Array, ...]:
+    """Share norm and Gram reductions across compatible TP-sharded matrices."""
+
+    if not values or len(values) != len(plans):
+        raise ValueError("distributed Muon bucket requires equally sized non-empty values and plans")
+    mesh = plans[0].gradient_sharding.mesh
+    execution = plans[0].execution
+    bucket_id = plans[0].bucket_id
+    if execution not in {"distributed_direct", "distributed_exchange"}:
+        raise ValueError(f"unsupported bucketed distributed Muon execution {execution!r}")
+    if any(plan.gradient_sharding.mesh != mesh or plan.execution != execution for plan in plans):
+        raise ValueError("distributed Muon bucket contains incompatible execution plans")
+
+    def kernel(*locals_: jax.Array) -> tuple[jax.Array, ...]:
+        local_floats = tuple(local.astype(jnp.float32) for local in locals_)
+        local_square_sums = jnp.stack(
+            [jnp.sum(jnp.square(local), dtype=jnp.float32) for local in local_floats]
+        )
+        with set_xla_metadata(muon_op="norm", muon_bucket=str(bucket_id)):
+            global_square_sums = jax.lax.psum(local_square_sums, "tp")
+        xs = []
+        for index, (local_float, plan) in enumerate(zip(local_floats, plans, strict=True)):
+            norm = jnp.sqrt(global_square_sums[index])
+            x = (
+                local_float
+                / jnp.maximum(norm, jnp.asarray(MUON_NS_EPS, dtype=jnp.float32))
+            ).astype(jnp.bfloat16)
+            if plan.transpose_for_shape:
+                x = jnp.swapaxes(x, -1, -2)
+            if execution == "distributed_exchange":
+                with set_xla_metadata(muon_op="exchange_forward", muon_bucket=str(bucket_id)):
+                    x = jax.lax.all_to_all(
+                        x,
+                        "tp",
+                        split_axis=1,
+                        concat_axis=0,
+                        tiled=True,
+                    )
+            xs.append(x)
+        a, b, c = MUON_NS_COEFFICIENTS
+        for _ in range(MUON_NS_STEPS):
+            gram_shapes = tuple((x.shape[0], x.shape[0]) for x in xs)
+            gram_sizes = tuple(rows * columns for rows, columns in gram_shapes)
+            local_grams = tuple(
+                (x @ jnp.swapaxes(x, -1, -2)).reshape(-1)
+                for x in xs
+            )
+            with set_xla_metadata(muon_op="gram", muon_bucket=str(bucket_id)):
+                reduced_grams = jax.lax.psum(jnp.concatenate(local_grams), "tp")
+            next_xs = []
+            offset = 0
+            for x, gram_shape, gram_size in zip(xs, gram_shapes, gram_sizes, strict=True):
+                gram = jax.lax.dynamic_slice_in_dim(
+                    reduced_grams,
+                    offset,
+                    gram_size,
+                ).reshape(gram_shape)
+                gram2 = gram @ gram
+                next_xs.append(a * x + (b * gram + c * gram2) @ x)
+                offset += gram_size
+            xs = next_xs
+        results = []
+        for x, local, plan in zip(xs, locals_, plans, strict=True):
+            if execution == "distributed_exchange":
+                with set_xla_metadata(muon_op="exchange_reverse", muon_bucket=str(bucket_id)):
+                    x = jax.lax.all_to_all(
+                        x,
+                        "tp",
+                        split_axis=0,
+                        concat_axis=1,
+                        tiled=True,
+                    )
+            if plan.transpose_for_shape:
+                x = jnp.swapaxes(x, -1, -2)
+            results.append(x.astype(local.dtype))
+        return tuple(results)
+
+    return jax.shard_map(
+        kernel,
+        mesh=mesh,
+        in_specs=tuple(plan.gradient_sharding.spec for plan in plans),
+        out_specs=tuple(plan.update_sharding.spec for plan in plans),
+        check_vma=True,
+    )(*values)
 
 
 def _average_declared_replicas(

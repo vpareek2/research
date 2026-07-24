@@ -43,6 +43,7 @@ def run_spec_from_resolved_mapping(raw: Mapping[str, Any]) -> RunSpec:
             adamw_fallback_schedule=None
             if optimizer_raw.get("adamw_fallback_schedule") is None
             else ScheduleSpec(**dict(_required_mapping(optimizer_raw, "adamw_fallback_schedule"))),
+            muon_tp_mode=str(optimizer_raw.get("muon_tp_mode", "duplicated")),
             route_rules=tuple(
                 ParamRouteRule(**dict(_require_mapping(rule, "optimizer.route_rules[]")))
                 for rule in _optional_list(optimizer_raw, "route_rules")

@@ -1,11 +1,11 @@
 [run]
-id = "cloud_4gpu_profile64_dense_zero2_tp_muon"
+id = "cloud_4gpu_profile64_dense_fsdp_tp_muon_distributed"
 seed = 123
 output_dir = "runs"
 
 [model]
 name = "decoder"
-variant = "cloud-4gpu-profile64-dense-zero2-tp-muon"
+variant = "cloud-4gpu-profile64-dense-fsdp-tp-muon"
 vocab_size = 50304
 hidden_size = 1024
 intermediate_size = 4096
@@ -22,7 +22,7 @@ remat = "block"
 
 [optimizer]
 name = "muon"
-muon_tp_mode = "duplicated"
+muon_tp_mode = "distributed"
 weight_decay = 0.1
 grad_clip_norm = 1.0
 
@@ -65,7 +65,7 @@ axis_names = ["data", "fsdp", "tp"]
 axis_sizes = [1, 2, 2]
 
 [parallelism]
-mode = "zero2"
+mode = "fsdp"
 tensor_parallel = true
 
 [profiling]

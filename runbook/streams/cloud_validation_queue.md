@@ -3,6 +3,61 @@
 Purpose: track what must be validated on cloud GPUs and what local work must
 finish before spending cloud time.
 
+## 2026-07-24 [codex] M2 distributed Muon four-GPU queue is ready
+
+Context:
+
+- Local fake-device acceptance for explicit duplicated/distributed Muon TP
+  modes is complete. The remaining gate is a same-node correctness and
+  performance comparison, not more local algorithm work.
+- Prepared four matched 64-step pairs: dense TP, dense FSDP+TP, dense
+  ZeRO2+TP, and Trinity TP+EP. Each pair differs only in `muon_tp_mode` and run
+  ID.
+- No cloud command was run in this step.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+bash -n scripts/jaxtitan/cloud_dist_muon_m2_matrix.sh
+uv run pytest -q tests/jaxtitan/test_dist_muon_m2_analysis.py
+```
+
+Cloud launch:
+
+```bash
+cd ~/research
+git fetch origin
+git checkout codex/distributed-muon-mode
+git pull --ff-only
+tmux new -s dist-muon-m2
+scripts/jaxtitan/cloud_dist_muon_m2_matrix.sh --overwrite
+```
+
+Artifacts:
+
+- Runner: `scripts/jaxtitan/cloud_dist_muon_m2_matrix.sh`.
+- Analyzer: `scripts/jaxtitan/analyze_dist_muon_m2_results.py`.
+- Expected lightweight output:
+  `cloud_results/dist_muon_m2_YYYYMMDDTHHMMSSZ_lightweight.tgz` plus
+  `.sha256`.
+- Full trace trees stay under each run directory and can be analyzed on the
+  instance or transferred selectively.
+
+Result:
+
+- All eight configs pass `jaxtitan config check`.
+- Complete local suite: `691 passed, 1 skipped`.
+- No GPU correctness or speedup claim exists yet.
+
+Next:
+
+- Prefer exactly four H100 80GB SXM/NVLink GPUs. Four H100 PCIe or four A100
+  40/80GB GPUs remain useful for correctness, but performance comparison must
+  be interpreted as hardware-specific.
+- Copy and checksum-verify the lightweight archive before terminating the
+  instance. Preserve full traces until the comparison is reviewed.
+
 ## 2026-07-21 [codex] M1 MoE H100 queue is scripted
 
 Context:

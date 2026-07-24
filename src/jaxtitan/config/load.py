@@ -84,6 +84,7 @@ def run_spec_from_mapping(raw: Mapping[str, Any]) -> RunSpec:
                 adamw_fallback_schedule=None
                 if optimizer_section.adamw_fallback_schedule is None
                 else ScheduleSpec(**asdict(optimizer_section.adamw_fallback_schedule)),
+                muon_tp_mode=optimizer_section.muon_tp_mode,
             ),
             data=DataSpec(
                 mode=data_section.mode,
@@ -227,6 +228,7 @@ def _optimizer_section(raw: Mapping[str, Any]) -> TomlOptimizerSection:
         adamw_fallback_schedule=None
         if fallback_raw is None
         else _schedule_section(_ensure_mapping(fallback_raw, "optimizer.adamw_fallback_schedule")),
+        muon_tp_mode=_optional_str(raw, "muon_tp_mode", "optimizer", default="duplicated"),
     )
 
 

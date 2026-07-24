@@ -22,6 +22,7 @@ remat = "block"
 
 [optimizer]
 name = "muon"
+muon_tp_mode = "duplicated"
 weight_decay = 0.1
 grad_clip_norm = 1.0
 
