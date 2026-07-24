@@ -93,6 +93,16 @@ def test_muon_timing_summary_reports_tail_and_stability() -> None:
     }
 
 
+def test_muon_benchmark_scales_reference_error_envelope_to_production_lr() -> None:
+    contract = muon_bench.benchmark_contract()
+
+    assert contract["benchmark_learning_rate"] == pytest.approx(0.02)
+    assert contract["reference_calibration_learning_rate"] == pytest.approx(0.001)
+    assert contract["update_atol"] == pytest.approx(0.012)
+    assert contract["parameter_atol"] == pytest.approx(0.025)
+    assert contract["tolerance_scaling"] == "linear_with_learning_rate"
+
+
 def test_profile_benchmark_trace_requires_artifact_directory() -> None:
     with pytest.raises(ContractError, match="artifact-dir"):
         profile_bench.benchmark_component("muon", warmup=1, iters=1, trace=True)

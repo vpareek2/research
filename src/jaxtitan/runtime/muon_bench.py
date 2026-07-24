@@ -14,8 +14,17 @@ from jaxtitan.optim.muon import MuonLeafExecutionPlan, distributed_muon_transfor
 from jaxtitan.runtime.profile_analysis import summarize_hlo_text
 
 
-MUON_BENCHMARK_UPDATE_ATOL = 6e-4
-MUON_BENCHMARK_PARAMETER_ATOL = 1.25e-3
+MUON_BENCHMARK_LEARNING_RATE = 0.02
+MUON_REFERENCE_CALIBRATION_LEARNING_RATE = 0.001
+MUON_REFERENCE_UPDATE_ATOL = 6e-4
+MUON_REFERENCE_PARAMETER_ATOL = 1.25e-3
+_LEARNING_RATE_SCALE = (
+    MUON_BENCHMARK_LEARNING_RATE / MUON_REFERENCE_CALIBRATION_LEARNING_RATE
+)
+MUON_BENCHMARK_UPDATE_ATOL = MUON_REFERENCE_UPDATE_ATOL * _LEARNING_RATE_SCALE
+MUON_BENCHMARK_PARAMETER_ATOL = (
+    MUON_REFERENCE_PARAMETER_ATOL * _LEARNING_RATE_SCALE
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,7 +391,7 @@ def _compile_tree_candidate(
     import jax.numpy as jnp
 
     transform = distributed_muon_transform(
-        lambda _count: jnp.asarray(0.02, dtype=jnp.float32),
+        lambda _count: jnp.asarray(MUON_BENCHMARK_LEARNING_RATE, dtype=jnp.float32),
         weight_decay=0.1,
         execution_plans=plans,
     )
@@ -552,6 +561,13 @@ def _check_candidates(candidates: list[_CompiledCandidate]) -> dict[str, dict[st
             and candidate_result["max_update_abs_error"] <= MUON_BENCHMARK_UPDATE_ATOL
             and candidate_result["max_parameter_abs_error"] <= MUON_BENCHMARK_PARAMETER_ATOL
             and _output_shardings_match(params[execution], candidate.plans)
+        )
+        candidate_result["max_update_abs_error_per_lr"] = (
+            candidate_result["max_update_abs_error"] / MUON_BENCHMARK_LEARNING_RATE
+        )
+        candidate_result["max_parameter_abs_error_per_lr"] = (
+            candidate_result["max_parameter_abs_error"]
+            / MUON_BENCHMARK_LEARNING_RATE
         )
         results[execution] = candidate_result
     return results
@@ -758,6 +774,11 @@ def benchmark_contract() -> dict[str, Any]:
 
     return {
         "correctness_steps": 5,
+        "benchmark_learning_rate": MUON_BENCHMARK_LEARNING_RATE,
+        "reference_calibration_learning_rate": MUON_REFERENCE_CALIBRATION_LEARNING_RATE,
+        "reference_update_atol": MUON_REFERENCE_UPDATE_ATOL,
+        "reference_parameter_atol": MUON_REFERENCE_PARAMETER_ATOL,
+        "tolerance_scaling": "linear_with_learning_rate",
         "update_atol": MUON_BENCHMARK_UPDATE_ATOL,
         "parameter_atol": MUON_BENCHMARK_PARAMETER_ATOL,
         "candidate_order": "rotating",

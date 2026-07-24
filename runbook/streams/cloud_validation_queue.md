@@ -52,7 +52,12 @@ Result:
 - Local targeted suite: `106 passed`; complete Jaxtitan suite:
   `701 passed, 1 skipped`.
 - Production routing and resume fingerprints are unchanged.
-- No GPU winner table exists yet.
+- The first H100 invocation exposed an LR-unit bug in the benchmark gate: it
+  applied the absolute envelope calibrated at LR `0.001` to production LR
+  `0.02`. All candidates were finite, deterministic, replica-equal, and had
+  exact momentum, but the selector correctly refused to emit winners. The gate
+  now scales that same numerical envelope linearly with LR; a clean rerun is
+  required before recording a winner table.
 
 Next:
 

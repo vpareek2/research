@@ -55,8 +55,10 @@ Result:
 - Large/right-Gram HLO has one norm reduction and five right-Gram reductions,
   with no logical-matrix all-gather or all-to-all.
 - The selector requires finite deterministic execution, exact momentum,
-  physical replica equality, update error at most `6e-4`, five-step parameter
-  error at most `1.25e-3`, stable timing, and a minimum `1.05x` speedup.
+  physical replica equality, stable timing, and a minimum `1.05x` speedup.
+  Its five-step absolute-error envelope is scaled linearly from the existing
+  LR `0.001` calibration (`6e-4` update, `1.25e-3` parameter) to the production
+  benchmark LR `0.02` (`1.2e-2` update, `2.5e-2` parameter).
 - No GPU latency or route-selection result is claimed yet.
 
 Next:
