@@ -3,6 +3,70 @@
 Purpose: turn measured Jaxtitan profiles into an ordered optimization program
 without weakening correctness or adding speculative kernel surfaces.
 
+## 2026-07-23 [codex] Distributed projection compute-dtype contract
+
+Context:
+
+- Fixed the shared TP/CP projection helper, which bypassed NNX dtype promotion
+  and promoted BF16 activations plus FP32 master weights to FP32 outputs.
+- Made KV-cache writes explicitly convert K/V values to the declared cache
+  dtype. This removes the JAX future incompatibility for FP32-to-BF16 scatter
+  updates without adding a new precision abstraction or configuration surface.
+- The distributed helper now reuses each NNX linear's existing
+  `promote_dtype`, `dot_general`, precision, and preferred-element-type
+  contract. FP32 master parameters remain FP32.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+    tests/jaxtitan/test_model.py::test_distributed_model_preserves_bfloat16_compute_dtype \
+    tests/jaxtitan/test_infer.py::test_tensor_parallel_bfloat16_generation_has_dtype_safe_cache_writes
+
+JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+    tests/jaxtitan/test_model.py \
+    tests/jaxtitan/test_infer.py \
+    tests/jaxtitan/test_train_step.py \
+    tests/jaxtitan/test_checkpoint_sample.py -x
+
+JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q tests/jaxtitan -x
+
+git diff --check
+```
+
+Artifacts:
+
+- Branch: `codex/distributed-linear-dtype`.
+- Production paths:
+  `src/jaxtitan/models/execution.py` and
+  `src/jaxtitan/models/components/attention.py`.
+- No cloud run or retained performance artifact was produced.
+
+Result:
+
+- The new TP regression failed before the fix because BF16-configured
+  distributed logits were FP32; TP and CP now both return BF16.
+- Treating the incompatible scatter FutureWarning as an error passes for
+  BF16 TP prefill and decode, and the cache remains BF16.
+- StableHLO inspection found eight projection dot-generals with BF16 inputs,
+  weights, and outputs. Intentionally FP32 attention-score dot products remain
+  FP32.
+- Targeted model/inference/train-step/checkpoint-sampling suite:
+  `126 passed`.
+- Complete four-device Jaxtitan suite: `648 passed, 1 skipped`.
+- No performance improvement is claimed without a GPU profile.
+
+Next:
+
+- Merge the correctness-maintenance PR, then continue M2 distributed-Muon
+  design and profiling. A later low-precision project can replace the single
+  distributed projection boundary without changing today's TOML surface.
+
 ## 2026-07-21 [codex] M1 four-A100 acceptance and trace analysis
 
 Context:
