@@ -31,7 +31,7 @@ uv run pytest -q tests/jaxtitan
 Cloud launch:
 
 ```bash
-cd ~/research
+cd "$(git rev-parse --show-toplevel)"
 git fetch origin
 git switch codex/distributed-muon-leaf-bench
 git pull --ff-only
@@ -46,6 +46,11 @@ Artifacts:
   `cloud_results/dist_muon_leaf_bench_YYYYMMDDTHHMMSSZ.tgz`.
 - The bundle contains hardware/topology/JAX provenance, canonical benchmark
   JSON, conservative selection JSON/text, raw optimized HLO, and checksums.
+- Completed bundle:
+  `cloud_results/dist_muon_leaf_bench_20260724T211855Z.tgz`.
+- SHA-256:
+  `f8311c431dbb518ddadf943b5cec6c2f96c335a9dd6e1b0f88068d5cc970d0b0`.
+- Commit: `e96010d8eaf0afad073a62ae0d78707c52d159e9`.
 
 Result:
 
@@ -56,13 +61,21 @@ Result:
   applied the absolute envelope calibrated at LR `0.001` to production LR
   `0.02`. All candidates were finite, deterministic, replica-equal, and had
   exact momentum, but the selector correctly refused to emit winners. The gate
-  now scales that same numerical envelope linearly with LR; a clean rerun is
-  required before recording a winner table.
+  now scales that same numerical envelope linearly with LR.
+- The clean rerun on four H100 80GB HBM3 GPUs passed all required correctness
+  gates and produced a checksum-verified local bundle.
+- Bucket recommendations:
+  - K/V: exchange, `1.73x` over duplicated on TP4 and `2.28-2.30x` on
+    FSDP2xTP2/TP2xEP2.
+  - O: large/right-Gram, `1.75x` over duplicated on TP4 and `2.17x` on the
+    composed layouts; `1.16x` over the current exchange route.
+- No trace pass was run. The timing evidence is canonical and unprofiled.
 
 Next:
 
-- Prefer four H100 80GB SXM/NVLink GPUs matching the prior M2 capture. Copy and
-  checksum-verify the generated archive before terminating the allocation.
+- Cloud selection is complete. Implement the selected internal route policy,
+  then use the existing four-H100 64-step matrix as the production acceptance
+  gate.
 
 ## 2026-07-24 [codex] M2 distributed Muon four-GPU queue is ready
 

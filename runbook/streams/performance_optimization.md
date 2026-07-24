@@ -36,6 +36,9 @@ uv run pytest -q \
   tests/jaxtitan/test_optim.py
 uv run pytest -q tests/jaxtitan
 git diff --check
+
+cd "$(git rev-parse --show-toplevel)"
+scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh
 ```
 
 Artifacts:
@@ -47,6 +50,11 @@ Artifacts:
 - Selector: `scripts/jaxtitan/analyze_dist_muon_leaf_bench.py`.
 - Expected cloud artifact:
   `cloud_results/dist_muon_leaf_bench_YYYYMMDDTHHMMSSZ.tgz` plus `.sha256`.
+- H100 artifact:
+  `cloud_results/dist_muon_leaf_bench_20260724T211855Z.tgz`.
+- Artifact SHA-256:
+  `f8311c431dbb518ddadf943b5cec6c2f96c335a9dd6e1b0f88068d5cc970d0b0`.
+- Cloud commit: `e96010d8eaf0afad073a62ae0d78707c52d159e9`.
 
 Result:
 
@@ -59,13 +67,28 @@ Result:
   Its five-step absolute-error envelope is scaled linearly from the existing
   LR `0.001` calibration (`6e-4` update, `1.25e-3` parameter) to the production
   benchmark LR `0.02` (`1.2e-2` update, `2.5e-2` parameter).
-- No GPU latency or route-selection result is claimed yet.
+- Four H100 80GB HBM3 GPUs with NV18 links completed all 19 cases and
+  50 candidate programs; `overall_gate=True`. Every candidate was finite,
+  deterministic, physically replica-equal, correctly sharded, and had exact
+  momentum.
+- Production-shaped K/V buckets selected `distributed_exchange`: `1.73x`
+  versus duplicated on TP4 and `2.28-2.30x` on FSDP2xTP2/TP2xEP2.
+- Production-shaped O buckets selected `distributed_large_gram`: `1.75x`
+  versus duplicated on TP4 and `2.17x` on both composed layouts. This was
+  `1.16x` faster than the current exchange execution.
+- TP4 shared-MLP gate/up selected the current direct route at `1.06x`.
+  Other unbucketed MLP/Q/down cases and composed dense MLP gate/up did not
+  clear the `1.05x` gate and selected duplicated execution.
+- No profiler trace was captured; canonical timing was unprofiled as required.
 
 Next:
 
-- Run the selector on four H100 80GB SXM/NVLink GPUs. Use the generated
-  hardware-specific recommendations to implement an internal per-leaf policy,
-  then confirm that policy with the existing 64-step training matrix.
+- Implement the hardware-backed internal per-role policy: retain exchange for
+  K/V buckets, add large/right-Gram for O buckets, retain direct only where it
+  clears the selector, and use duplicated execution for the remaining current
+  leaf classes.
+- Confirm that policy with the existing matched 64-step training matrix before
+  making any production throughput claim.
 
 ## 2026-07-24 [codex] M2 distributed Muon local acceptance
 
