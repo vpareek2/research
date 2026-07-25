@@ -16,6 +16,7 @@ from jaxtitan.kernels import require_kernel_plan_supported
 from jaxtitan.mesh import (
     build_mesh_context,
     build_sharding_plan,
+    gradient_shardings_like,
     place_accumulated_batch,
     place_batch,
     place_model_state,
@@ -82,7 +83,13 @@ def run_preflight(config_path: str | Path) -> PreflightReport:
     )
     model_state = place_model_state(model.state, sharding)
     optimizer_init_state = place_optimizer_init_state(model.state, sharding)
-    optimizer = build_optimizer(runtime_spec.optimizer, optimizer_init_state, model.metadata)
+    optimizer = build_optimizer(
+        runtime_spec.optimizer,
+        optimizer_init_state,
+        model.metadata,
+        runtime_parameter_state=model_state,
+        gradient_shardings=gradient_shardings_like(model_state, sharding),
+    )
     runtime_diagnostics = build_runtime_diagnostics(
         runtime_spec,
         context,

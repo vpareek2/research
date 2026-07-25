@@ -1,6 +1,7 @@
 """Native JAX Muon transform."""
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, NamedTuple
 import math
 
@@ -28,6 +29,33 @@ class MuonState(NamedTuple):
 
     count: jax.Array
     momentum: PyTree
+
+
+@dataclass(frozen=True, slots=True)
+class _MuonLeafResult:
+    update: jax.Array
+    momentum: jax.Array
+
+
+@dataclass(frozen=True, slots=True)
+class MuonLeafExecutionPlan:
+    """Host-static sharding and execution contract for one distributed Muon leaf."""
+
+    path: tuple[str, ...]
+    logical_shape: tuple[int, int]
+    parameter_sharding: NamedSharding
+    gradient_sharding: NamedSharding
+    momentum_sharding: NamedSharding
+    update_sharding: NamedSharding
+    parameter_replica_axes: tuple[str, ...]
+    gradient_replica_axes: tuple[str, ...]
+    momentum_replica_axes: tuple[str, ...]
+    update_replica_axes: tuple[str, ...]
+    tp_partition_dim: int
+    transpose_for_shape: bool
+    canonical_tp_dim: int
+    execution: str
+    bucket_id: int
 
 
 def muon_transform(
@@ -65,30 +93,33 @@ def muon_transform(
                 grad = _average_model_replicas(grad, sharding)
                 momentum = _average_model_replicas(momentum, sharding)
                 param = _average_model_replicas(param, sharding)
-            if reference_logical_matrix:
-                grad = _replicate_logical_matrix(grad, sharding)
-                momentum = _replicate_logical_matrix(momentum, sharding)
-                param_ref = _replicate_logical_matrix(param, sharding)
-            else:
-                param_ref = param
             next_momentum = MUON_MOMENTUM * momentum + (1.0 - MUON_MOMENTUM) * grad
             muon_input = (
                 (1.0 - MUON_MOMENTUM) * grad + MUON_MOMENTUM * next_momentum
                 if MUON_NESTEROV
                 else next_momentum
             )
-            orthogonalized = zeropower_via_newton_schulz(
-                muon_input,
-                precision=newton_schulz_precision,
-            )
-            adjusted_lr = base_lr * _rms_match_scale(param_ref.shape)
+            if reference_logical_matrix:
+                logical_input = _all_gather_logical_matrix(
+                    muon_input.astype(jnp.bfloat16),
+                    sharding,
+                )
+                orthogonalized = zeropower_via_newton_schulz(
+                    logical_input,
+                    precision=newton_schulz_precision,
+                ).astype(muon_input.dtype)
+                orthogonalized = _constrain_like(orthogonalized, sharding)
+            else:
+                orthogonalized = zeropower_via_newton_schulz(
+                    muon_input,
+                    precision=newton_schulz_precision,
+                )
+            adjusted_lr = base_lr * _rms_match_scale(param.shape)
             update = -adjusted_lr.astype(orthogonalized.dtype) * orthogonalized
             if weight_decay != 0.0:
-                update = update - base_lr.astype(param_ref.dtype) * weight_decay * param_ref
+                update = update - base_lr.astype(param.dtype) * weight_decay * param
             if not (synchronize_model_replicas or reference_logical_matrix):
                 return update
-            if reference_logical_matrix:
-                update = _constrain_like(update, sharding)
             return _average_model_replicas(update, sharding)
 
         def momentum_leaf(
@@ -99,14 +130,9 @@ def muon_transform(
             if synchronize_model_replicas or reference_logical_matrix:
                 grad = _average_model_replicas(grad, sharding)
                 momentum = _average_model_replicas(momentum, sharding)
-            if reference_logical_matrix:
-                next_momentum = MUON_MOMENTUM * _replicate_logical_matrix(momentum, sharding) + (
-                    1.0 - MUON_MOMENTUM
-                ) * _replicate_logical_matrix(grad, sharding)
-                return _average_model_replicas(_constrain_like(next_momentum, sharding), sharding)
-            if synchronize_model_replicas:
+            if synchronize_model_replicas or reference_logical_matrix:
                 next_momentum = MUON_MOMENTUM * momentum + (1.0 - MUON_MOMENTUM) * grad
-                return _average_model_replicas(next_momentum, sharding)
+                return _average_model_replicas(_constrain_like(next_momentum, sharding), sharding)
             return MUON_MOMENTUM * momentum + (1.0 - MUON_MOMENTUM) * grad
 
         if synchronize_model_replicas or reference_logical_matrix:
@@ -141,18 +167,138 @@ def distributed_muon_transform(
     learning_rate: Callable[[Any], jax.Array],
     *,
     weight_decay: float,
-    parameter_shardings: PyTree,
+    execution_plans: PyTree | None = None,
+    parameter_shardings: PyTree | None = None,
 ) -> optax.GradientTransformationExtraArgs:
-    """Build the correctness-first logical-matrix Muon transform."""
+    """Build the planned exact distributed-Muon transform."""
 
-    return muon_transform(
-        learning_rate,
-        weight_decay=weight_decay,
-        newton_schulz_precision=MUON_NS_PRECISION,
-        reference_logical_matrix=True,
-        synchronize_model_replicas=True,
-        parameter_shardings=parameter_shardings,
+    if execution_plans is None:
+        if parameter_shardings is None:
+            raise ValueError("distributed Muon requires static execution plans")
+        return muon_transform(
+            learning_rate,
+            weight_decay=weight_decay,
+            newton_schulz_precision=MUON_NS_PRECISION,
+            reference_logical_matrix=True,
+            synchronize_model_replicas=True,
+            parameter_shardings=parameter_shardings,
+        )
+
+    def init_fn(params: PyTree) -> MuonState:
+        return MuonState(
+            count=jnp.asarray(0, dtype=jnp.int32),
+            momentum=jax.tree.map(jnp.zeros_like, params),
+        )
+
+    def update_fn(
+        updates: PyTree,
+        state: MuonState,
+        params: PyTree | None = None,
+        **extra_args,
+    ) -> tuple[PyTree, MuonState]:
+        del extra_args
+        if params is None:
+            raise ValueError("distributed Muon update requires params")
+        base_lr = learning_rate(state.count)
+
+        def update_leaf(
+            grad: jax.Array,
+            momentum: jax.Array,
+            param: jax.Array,
+            plan: MuonLeafExecutionPlan,
+        ) -> _MuonLeafResult:
+            grad = _average_declared_replicas(
+                grad,
+                plan.gradient_sharding,
+                plan.gradient_replica_axes,
+            )
+            momentum = _average_declared_replicas(
+                momentum,
+                plan.momentum_sharding,
+                plan.momentum_replica_axes,
+            )
+            param = _average_declared_replicas(
+                param,
+                plan.parameter_sharding,
+                plan.parameter_replica_axes,
+            )
+            next_momentum = MUON_MOMENTUM * momentum + (1.0 - MUON_MOMENTUM) * grad
+            muon_input = (
+                (1.0 - MUON_MOMENTUM) * grad + MUON_MOMENTUM * next_momentum
+                if MUON_NESTEROV
+                else next_momentum
+            )
+            orthogonalized = _planned_zeropower(muon_input, plan)
+            adjusted_lr = base_lr * _rms_match_scale(plan.logical_shape)
+            update = -adjusted_lr.astype(orthogonalized.dtype) * orthogonalized
+            if weight_decay != 0.0:
+                param_for_update = jax.lax.with_sharding_constraint(param, plan.update_sharding)
+                update = update - base_lr.astype(param_for_update.dtype) * weight_decay * param_for_update
+            update = jax.lax.with_sharding_constraint(update, plan.update_sharding)
+            next_momentum = jax.lax.with_sharding_constraint(next_momentum, plan.momentum_sharding)
+            update = _average_declared_replicas(
+                update,
+                plan.update_sharding,
+                plan.update_replica_axes,
+            )
+            next_momentum = _average_declared_replicas(
+                next_momentum,
+                plan.momentum_sharding,
+                plan.momentum_replica_axes,
+            )
+            return _MuonLeafResult(update=update, momentum=next_momentum)
+
+        is_plan = lambda value: isinstance(value, MuonLeafExecutionPlan)
+        leaf_results = jax.tree.map(
+            update_leaf,
+            updates,
+            state.momentum,
+            params,
+            execution_plans,
+            is_leaf=is_plan,
+        )
+        is_result = lambda value: isinstance(value, _MuonLeafResult)
+        next_updates = jax.tree.map(lambda result: result.update, leaf_results, is_leaf=is_result)
+        next_momentum = jax.tree.map(lambda result: result.momentum, leaf_results, is_leaf=is_result)
+        return next_updates, MuonState(
+            count=optax.safe_increment(state.count),
+            momentum=next_momentum,
+        )
+
+    return optax.GradientTransformationExtraArgs(init_fn, update_fn)
+
+
+def _planned_zeropower(
+    value: jax.Array,
+    plan: MuonLeafExecutionPlan,
+) -> jax.Array:
+    if plan.execution != "reference_once":
+        raise ValueError(f"unsupported distributed Muon execution {plan.execution!r}")
+    logical_input = _all_gather_logical_matrix(
+        value.astype(jnp.bfloat16),
+        plan.gradient_sharding,
     )
+    result = zeropower_via_newton_schulz(
+        logical_input,
+        precision=MUON_NS_PRECISION,
+    ).astype(value.dtype)
+    return jax.lax.with_sharding_constraint(result, plan.update_sharding)
+
+
+def _average_declared_replicas(
+    value: jax.Array,
+    sharding: NamedSharding,
+    replica_axes: tuple[str, ...],
+) -> jax.Array:
+    if not replica_axes:
+        return value
+    return jax.shard_map(
+        lambda local: jax.lax.pmean(local, replica_axes),
+        mesh=sharding.mesh,
+        in_specs=sharding.spec,
+        out_specs=sharding.spec,
+        check_vma=False,
+    )(value)
 
 
 def zeropower_via_newton_schulz(value: jax.Array, *, precision: str = MUON_NS_PRECISION) -> jax.Array:
@@ -207,12 +353,44 @@ def _validate_newton_schulz_precision(precision: str) -> None:
         raise ValueError(f"unsupported Muon Newton-Schulz precision {precision!r}")
 
 
-def _replicate_logical_matrix(value: jax.Array, sharding: NamedSharding | None) -> jax.Array:
+def _all_gather_logical_matrix(value: jax.Array, sharding: NamedSharding | None) -> jax.Array:
     if not isinstance(sharding, NamedSharding):
         return value
     if _is_replicated_named_sharding(sharding):
         return value
-    return jax.lax.with_sharding_constraint(value, NamedSharding(sharding.mesh, P()))
+    tp_dimensions = [
+        index
+        for index, axis in enumerate(tuple(sharding.spec))
+        if axis == "tp" or (isinstance(axis, tuple) and "tp" in axis)
+    ]
+    if len(tp_dimensions) != 1:
+        raise ValueError(f"distributed Muon requires exactly one TP-sharded matrix dimension, got {sharding.spec}")
+    tp_dimension = tp_dimensions[0]
+
+    def gather_bfloat16(local: jax.Array) -> jax.Array:
+        if local.dtype != jnp.bfloat16:
+            raise ValueError(f"reference_once expects a bfloat16 Muon input, got {local.dtype}")
+        # Preserve the two-byte collective payload through XLA algebraic
+        # simplification. Without the bitcast, the CPU SPMD optimizer legally
+        # hoists the preceding FP32-to-BF16 conversion past all_gather.
+        bits = jax.lax.bitcast_convert_type(local, jnp.uint16)
+        gathered_bits = jax.lax.all_gather(
+            bits,
+            "tp",
+            axis=tp_dimension,
+            tiled=True,
+        )
+        return jax.lax.bitcast_convert_type(gathered_bits, jnp.bfloat16)
+
+    return jax.shard_map(
+        gather_bfloat16,
+        mesh=sharding.mesh,
+        in_specs=sharding.spec,
+        out_specs=P(),
+        # JAX 0.10 does not infer that tiled all_gather makes every TP
+        # participant hold the same logical matrix.
+        check_vma=False,
+    )(value)
 
 
 def _constrain_like(value: jax.Array, sharding: NamedSharding | None) -> jax.Array:

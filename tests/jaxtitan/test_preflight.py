@@ -357,6 +357,9 @@ def test_run_preflight_auto_resolves_tensor_parallel_muon_to_exact_distributed_m
     assert payload["optimizer"]["policy"]["dist_muon_exact"]["correctness_status"] == (
         "four_h100_acceptance_passed"
     )
+    leaf_plans = payload["optimizer"]["policy"]["dist_muon_exact"]["leaf_execution_plans"]
+    assert len(leaf_plans) == 7
+    assert {plan["execution"] for plan in leaf_plans} == {"reference_once"}
     assert {route["backend"] for route in payload["optimizer"]["policy"]["routes"]} == {
         "adamw",
         "dist_muon_exact",

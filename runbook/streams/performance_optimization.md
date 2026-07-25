@@ -723,3 +723,80 @@ Next:
   route available in tests, but expose no second user-facing runtime stack.
 - Re-run only the four representative MoE profiles after M1; do not repeat the
   full 15-run matrix until a shared hot path changes.
+
+## 2026-07-23 [codex] M2 Phase 0-2 local numerical gate
+
+Context:
+
+- Bound host-static, role-specific parameter, gradient, momentum, and update
+  shardings for every `dist_muon_exact` leaf.
+- Implemented the Phase 1 `reference_once` traversal: replica synchronization,
+  local momentum/Nesterov, one physical two-byte logical-matrix gather,
+  unchanged BF16 Newton-Schulz, and local momentum/update/decay.
+- Prototyped unbucketed `gram5_direct` and `gram5_exchange`. The direct path
+  failed the unchanged multi-step `rtol=1e-5, atol=1e-5` numerical gate, so the
+  candidate was removed rather than exposed as an exact production execution.
+
+Commands:
+
+```bash
+cd /home/veer/Master/projects/research
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_optim.py::test_distributed_gram_muon_matches_reference_over_multiple_steps \
+  --maxfail=2
+
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_optim.py \
+  -k 'distributed_muon_binds_role_specific or exact_distributed_muon_update or reference_once_lowers' \
+  tests/jaxtitan/test_preflight.py \
+  tests/jaxtitan/test_runtime_training.py
+
+git diff --check
+
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q tests/jaxtitan/test_optim.py tests/jaxtitan/test_preflight.py \
+  -k 'muon or optimizer_policy or preflight_auto_resolves_tensor_parallel_muon'
+
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q tests/jaxtitan/test_runtime_training.py \
+  -k 'muon or optimizer_policy'
+
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q tests/jaxtitan/test_optim.py
+```
+
+Artifacts:
+
+- Branch: `codex/distributed-muon-m2`, base commit `3000985`.
+- No cloud run or W&B artifact was produced.
+
+Result:
+
+- Phase 0-1 focused gate: `9 passed, 145 deselected`.
+- Optimizer/preflight Muon gate: `29 passed, 49 deselected`.
+- Runtime-training Muon gate: `7 passed, 60 deselected`.
+- Complete optimizer module: `38 passed`.
+- `git diff --check` passed.
+- Optimized CPU HLO contains one `u16[8,16]` all-gather for the Phase 1
+  reference leaf and no FP32 full-matrix gather.
+- The Phase 2 matrix `(8, 32)` with `P(None, "tp")` failed after momentum
+  evolution with `assert jnp.allclose(..., rtol=1e-5, atol=1e-5)`.
+- The earliest mismatch is BF16 reduction ordering: the logical reference and
+  sharded partial norm/Gram reductions do not preserve the same accumulation
+  tree. Newton-Schulz amplifies the rounded difference to approximately
+  `1e-4` in an update. FP32 partial accumulators do not restore equivalence
+  because the split GEMM and collective still change the accumulation order.
+- This is not a transpose, exchange, or replica-axis bug. It is an
+  incompatibility between eliminating the full gather and requiring the
+  current BF16 reference result at `1e-5` for arbitrary inputs.
+
+Next:
+
+- Decide whether M2 should preserve exact current BF16 semantics and stop at
+  `reference_once`, or define a new numerically stable distributed Muon
+  reference (for example FP32 norm/Gram semantics) and validate that optimizer
+  change as a scored mechanism before implementing direct/exchange buckets.
+- Do not run four-GPU performance acceptance for `gram5_direct` until that
+  numerical contract is decided.

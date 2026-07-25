@@ -17,7 +17,12 @@ import optax
 from jaxtitan.errors import ContractError
 from jaxtitan.models import ParamMetadata
 from jaxtitan.optim.dion2 import dion2_policy_constants, dion2_transform
-from jaxtitan.optim.muon import distributed_muon_transform, muon_policy_constants, muon_transform
+from jaxtitan.optim.muon import (
+    MuonLeafExecutionPlan,
+    distributed_muon_transform,
+    muon_policy_constants,
+    muon_transform,
+)
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
 
 PyTree = Any
@@ -97,6 +102,7 @@ class OptimizerBuildResult:
     adamw_fallback_schedule: Callable[[Any], jax.Array] | None
     route_assignments: tuple[RouteAssignment, ...]
     description: str
+    muon_execution_plans: tuple[MuonLeafExecutionPlan, ...] = ()
 
 
 def build_lr_schedule(spec: ScheduleSpec) -> Callable[[Any], jax.Array]:
@@ -136,6 +142,9 @@ def build_optimizer(
     spec: OptimizerSpec,
     model_state: PyTree,
     metadata: Iterable[ParamMetadata],
+    *,
+    runtime_parameter_state: PyTree | None = None,
+    gradient_shardings: PyTree | None = None,
 ) -> OptimizerBuildResult:
     """Build the first Jaxtitan optimizer runtime boundary."""
 
@@ -146,8 +155,19 @@ def build_optimizer(
         )
 
     metadata = tuple(metadata)
+    runtime_parameter_state = model_state if runtime_parameter_state is None else runtime_parameter_state
+    if jax.tree.structure(runtime_parameter_state) != jax.tree.structure(model_state):
+        raise ContractError("runtime parameter state must match optimizer-init model state structure")
+    if gradient_shardings is not None and jax.tree.structure(gradient_shardings) != jax.tree.structure(model_state):
+        raise ContractError("gradient sharding tree must match optimizer-init model state structure")
     params_by_path = _params_by_metadata_path(model_state)
     assignments = _route_assignments(spec, metadata, params_by_path)
+    muon_execution_plans = _build_muon_execution_plans(
+        assignments,
+        optimizer_init_state=model_state,
+        runtime_parameter_state=runtime_parameter_state,
+        gradient_shardings=gradient_shardings,
+    )
     schedule = build_lr_schedule(spec.schedule)
     adamw_fallback_schedule = None
     if spec.adamw_fallback_schedule is not None:
@@ -168,6 +188,7 @@ def build_optimizer(
                 spec,
                 assignments,
                 model_state,
+                muon_execution_plans,
             )
         )
     else:
@@ -182,6 +203,7 @@ def build_optimizer(
         schedule=schedule,
         adamw_fallback_schedule=adamw_fallback_schedule,
         route_assignments=assignments,
+        muon_execution_plans=muon_execution_plans,
         description=describe_optimizer(spec),
     )
 
@@ -208,6 +230,7 @@ def optimizer_policy_summary(
     spec: OptimizerSpec,
     assignments: Iterable[RouteAssignment] | None = None,
     *,
+    execution_plans: Iterable[MuonLeafExecutionPlan] | None = None,
     parallelism_mode: str | None = None,
     fsdp_axis_size: int | None = None,
     tp_axis_size: int | None = None,
@@ -258,7 +281,8 @@ def optimizer_policy_summary(
             "exact": True,
             "correctness_status": "four_h100_acceptance_passed",
             "approximation": "none",
-            "performance": "replicate_logical_matrix_reference",
+            "execution": "reference_once",
+            "performance": "single_bf16_logical_matrix_gather",
             "newton_schulz_precision": muon_policy_constants()["newton_schulz_precision"],
             "replicated_model_axis_reduction": "pmean",
             "auto_selected_for": "tp_sharded_muon_matrix_routes",
@@ -301,7 +325,39 @@ def optimizer_policy_summary(
         payload["route_counts"] = dict(sorted(route_counts.items()))
         payload["fallback_counts"] = dict(sorted(fallback_counts.items()))
         payload["routes"] = routes
+    if execution_plans is not None:
+        payload["dist_muon_exact"]["leaf_execution_plans"] = [
+            _execution_plan_payload(plan)
+            for plan in execution_plans
+        ]
     return payload
+
+
+def _execution_plan_payload(plan: MuonLeafExecutionPlan) -> dict[str, Any]:
+    def role_payload(
+        sharding: jax.sharding.NamedSharding,
+        replica_axes: tuple[str, ...],
+    ) -> dict[str, Any]:
+        return {
+            "partition_spec": repr(sharding.spec),
+            "replica_axes": list(replica_axes),
+        }
+
+    return {
+        "path": list(plan.path),
+        "logical_shape": list(plan.logical_shape),
+        "tp_partition_dim": plan.tp_partition_dim,
+        "transpose_for_shape": plan.transpose_for_shape,
+        "canonical_tp_dim": plan.canonical_tp_dim,
+        "execution": plan.execution,
+        "bucket_id": plan.bucket_id,
+        "roles": {
+            "parameter": role_payload(plan.parameter_sharding, plan.parameter_replica_axes),
+            "gradient": role_payload(plan.gradient_sharding, plan.gradient_replica_axes),
+            "momentum": role_payload(plan.momentum_sharding, plan.momentum_replica_axes),
+            "update": role_payload(plan.update_sharding, plan.update_replica_axes),
+        },
+    }
 
 
 def _auto_routing_active(
@@ -436,6 +492,7 @@ def _muon_primary_transforms(
     spec: OptimizerSpec,
     assignments: tuple[RouteAssignment, ...],
     params: PyTree,
+    execution_plans: tuple[MuonLeafExecutionPlan, ...],
 ) -> list[optax.GradientTransformationExtraArgs]:
     transforms = []
     muon_decay_mask = _mask_from_assignments(
@@ -548,7 +605,11 @@ def _muon_primary_transforms(
                 distributed_muon_transform(
                     schedule,
                     weight_decay=spec.weight_decay,
-                    parameter_shardings=_masked_parameter_shardings(params, dist_muon_decay_mask),
+                    execution_plans=_masked_execution_plans(
+                        params,
+                        dist_muon_decay_mask,
+                        execution_plans,
+                    ),
                 ),
                 dist_muon_decay_mask,
                 mask_compatible_extra_args=True,
@@ -560,7 +621,11 @@ def _muon_primary_transforms(
                 distributed_muon_transform(
                     schedule,
                     weight_decay=0.0,
-                    parameter_shardings=_masked_parameter_shardings(params, dist_muon_no_decay_mask),
+                    execution_plans=_masked_execution_plans(
+                        params,
+                        dist_muon_no_decay_mask,
+                        execution_plans,
+                    ),
                 ),
                 dist_muon_no_decay_mask,
                 mask_compatible_extra_args=True,
@@ -686,6 +751,113 @@ def _params_by_metadata_path(params: PyTree) -> dict[tuple[str, ...], Any]:
     return {_metadata_path_from_jax_path(path): value for path, value in jax.tree_util.tree_flatten_with_path(params)[0]}
 
 
+def _build_muon_execution_plans(
+    assignments: tuple[RouteAssignment, ...],
+    *,
+    optimizer_init_state: PyTree,
+    runtime_parameter_state: PyTree,
+    gradient_shardings: PyTree | None,
+) -> tuple[MuonLeafExecutionPlan, ...]:
+    optimizer_by_path = _params_by_metadata_path(optimizer_init_state)
+    runtime_by_path = _params_by_metadata_path(runtime_parameter_state)
+    gradient_by_path = (
+        None
+        if gradient_shardings is None
+        else {
+            _metadata_path_from_jax_path(path): value
+            for path, value in jax.tree_util.tree_flatten_with_path(gradient_shardings)[0]
+        }
+    )
+    plans = []
+    for assignment in assignments:
+        if assignment.backend != "dist_muon_exact":
+            continue
+        parameter_sharding = _require_named_sharding(runtime_by_path[assignment.path], assignment.path, "parameter")
+        momentum_sharding = _require_named_sharding(optimizer_by_path[assignment.path], assignment.path, "momentum")
+        gradient_sharding = (
+            parameter_sharding
+            if gradient_by_path is None
+            else _require_named_sharding_value(gradient_by_path[assignment.path], assignment.path, "gradient")
+        )
+        update_sharding = gradient_sharding
+        tp_partition_dim = _single_named_sharding_axis(momentum_sharding, "tp", assignment.path)
+        if tp_partition_dim is None:
+            raise ContractError(
+                f"distributed Muon execution plan for {'.'.join(assignment.path)!r} requires a TP-sharded momentum"
+            )
+        rows, columns = assignment.logical_shape
+        transpose_for_shape = rows > columns
+        canonical_tp_dim = 1 - tp_partition_dim if transpose_for_shape else tp_partition_dim
+        plans.append(
+            MuonLeafExecutionPlan(
+                path=assignment.path,
+                logical_shape=(rows, columns),
+                parameter_sharding=parameter_sharding,
+                gradient_sharding=gradient_sharding,
+                momentum_sharding=momentum_sharding,
+                update_sharding=update_sharding,
+                parameter_replica_axes=_replica_axes_for_sharding(parameter_sharding),
+                gradient_replica_axes=_replica_axes_for_sharding(gradient_sharding),
+                momentum_replica_axes=_replica_axes_for_sharding(momentum_sharding),
+                update_replica_axes=_replica_axes_for_sharding(update_sharding),
+                tp_partition_dim=tp_partition_dim,
+                transpose_for_shape=transpose_for_shape,
+                canonical_tp_dim=canonical_tp_dim,
+                execution="reference_once",
+                bucket_id=-1,
+            )
+        )
+    return tuple(plans)
+
+
+def _require_named_sharding(value: Any, path: tuple[str, ...], role: str) -> jax.sharding.NamedSharding:
+    return _require_named_sharding_value(getattr(value, "sharding", None), path, role)
+
+
+def _require_named_sharding_value(
+    value: Any,
+    path: tuple[str, ...],
+    role: str,
+) -> jax.sharding.NamedSharding:
+    if not isinstance(value, jax.sharding.NamedSharding):
+        raise ContractError(
+            f"distributed Muon execution plan for {'.'.join(path)!r} requires static NamedSharding for {role}"
+        )
+    return value
+
+
+def _single_named_sharding_axis(
+    sharding: jax.sharding.NamedSharding,
+    axis_name: str,
+    path: tuple[str, ...],
+) -> int | None:
+    axes = [index for index, axis in enumerate(tuple(sharding.spec)) if _axis_contains(axis, axis_name)]
+    if not axes:
+        return None
+    if len(axes) != 1:
+        raise ContractError(
+            f"distributed Muon execution plan for {'.'.join(path)!r} expects one {axis_name} matrix axis, "
+            f"got {sharding.spec}"
+        )
+    return axes[0]
+
+
+def _replica_axes_for_sharding(sharding: jax.sharding.NamedSharding) -> tuple[str, ...]:
+    partitioned_axes = set()
+    for axis in tuple(sharding.spec):
+        if isinstance(axis, str):
+            partitioned_axes.add(axis)
+        elif isinstance(axis, tuple):
+            partitioned_axes.update(str(name) for name in axis)
+    return tuple(
+        str(name)
+        for name, size in sharding.mesh.shape.items()
+        if name in {"fsdp", "tp", "ep", "expert_fsdp"}
+        and int(size) > 1
+        and name not in partitioned_axes
+    )
+
+
 def _fsdp_matrix_axis(leaf: Any) -> int | None:
     return _single_matrix_axis(leaf, "fsdp")
 
@@ -788,6 +960,25 @@ def _masked_parameter_shardings(params: PyTree, mask: PyTree) -> PyTree:
         return sharding
 
     return jax.tree.map(leaf_sharding, params, mask)
+
+
+def _masked_execution_plans(
+    params: PyTree,
+    mask: PyTree,
+    execution_plans: tuple[MuonLeafExecutionPlan, ...],
+) -> PyTree:
+    plans_by_path = {plan.path: plan for plan in execution_plans}
+
+    def leaf_plan(path, _param: Any, selected: bool) -> Any:
+        if not selected:
+            return optax.MaskedNode()
+        metadata_path = _metadata_path_from_jax_path(path)
+        plan = plans_by_path.get(metadata_path)
+        if plan is None:
+            raise ContractError(f"missing distributed Muon execution plan for {'.'.join(metadata_path)!r}")
+        return plan
+
+    return jax.tree_util.tree_map_with_path(leaf_plan, params, mask)
 
 
 def _replica_aware_muon_transform(

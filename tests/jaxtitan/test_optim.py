@@ -4,7 +4,13 @@ import numpy as np
 import pytest
 
 from jaxtitan.errors import ContractError
-from jaxtitan.mesh import build_mesh_context, build_sharding_plan, place_model_state, place_optimizer_init_state
+from jaxtitan.mesh import (
+    build_mesh_context,
+    build_sharding_plan,
+    gradient_shardings_like,
+    place_model_state,
+    place_optimizer_init_state,
+)
 from jaxtitan.models import ParamMetadata, build_model
 from jaxtitan.optim import (
     build_lr_schedule,
@@ -379,7 +385,8 @@ def test_tensor_parallel_muon_routes_to_exact_distributed_muon() -> None:
         "exact": True,
         "correctness_status": "four_h100_acceptance_passed",
         "approximation": "none",
-        "performance": "replicate_logical_matrix_reference",
+        "execution": "reference_once",
+        "performance": "single_bf16_logical_matrix_gather",
         "newton_schulz_precision": "bfloat16",
         "replicated_model_axis_reduction": "pmean",
         "auto_selected_for": "tp_sharded_muon_matrix_routes",
@@ -423,6 +430,64 @@ def test_tensor_parallel_muon_takes_precedence_over_fsdp_dion2_route(mode: str) 
     assert {assignment.matrix_axis for assignment in exact_routes} == {0, 1}
     assert {assignment.sharded_model_axes for assignment in exact_routes}
     assert any(assignment.replicated_model_axes == ("fsdp",) for assignment in exact_routes)
+
+
+@pytest.mark.parametrize("mode", ["fsdp", "zero2"])
+def test_distributed_muon_binds_role_specific_static_execution_plans(mode: str) -> None:
+    require_fake_devices()
+    result = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
+    context = build_mesh_context(MeshSpec(axis_names=("data", "fsdp", "tp"), axis_sizes=(1, 2, 2)))
+    sharding_plan = build_sharding_plan(
+        context,
+        parallelism=ParallelismSpec(mode=mode, tensor_parallel=True),
+        param_layouts=result.param_layouts,
+    )
+    runtime_parameters = place_model_state(result.state, sharding_plan)
+    optimizer_parameters = place_optimizer_init_state(result.state, sharding_plan)
+    gradient_shardings = gradient_shardings_like(runtime_parameters, sharding_plan)
+
+    built = build_optimizer(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.1),
+        optimizer_parameters,
+        result.metadata,
+        runtime_parameter_state=runtime_parameters,
+        gradient_shardings=gradient_shardings,
+    )
+
+    plans = built.muon_execution_plans
+    policy = optimizer_policy_summary(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3)),
+        built.route_assignments,
+        execution_plans=plans,
+    )
+    assert len(plans) == 7
+    assert {plan.execution for plan in plans} == {"reference_once"}
+    assert {plan.path for plan in plans} == {
+        assignment.path
+        for assignment in built.route_assignments
+        if assignment.backend == "dist_muon_exact"
+    }
+    for plan in plans:
+        assert plan.logical_shape
+        assert plan.parameter_sharding.spec == plan.gradient_sharding.spec
+        assert plan.gradient_sharding.spec == plan.update_sharding.spec
+        assert plan.momentum_sharding.spec == plan.parameter_sharding.spec
+        assert plan.parameter_replica_axes == ("fsdp",)
+        assert plan.gradient_replica_axes == ("fsdp",)
+        assert plan.momentum_replica_axes == ("fsdp",)
+        assert plan.update_replica_axes == ("fsdp",)
+        assert plan.tp_partition_dim in {0, 1}
+        expected_canonical_dim = 1 - plan.tp_partition_dim if plan.transpose_for_shape else plan.tp_partition_dim
+        assert plan.canonical_tp_dim == expected_canonical_dim
+    assert len(policy["dist_muon_exact"]["leaf_execution_plans"]) == 7
+    assert {
+        entry["execution"]
+        for entry in policy["dist_muon_exact"]["leaf_execution_plans"]
+    } == {"reference_once"}
+    assert all(
+        set(entry["roles"]) == {"parameter", "gradient", "momentum", "update"}
+        for entry in policy["dist_muon_exact"]["leaf_execution_plans"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -487,6 +552,38 @@ def test_exact_distributed_muon_update_matches_replicated_muon_for_tp_shards(
         distributed_params = jax.tree.map(lambda param, update: param + update, distributed_params, distributed_updates)
         assert jnp.allclose(distributed_params["w"], replicated_params["w"], rtol=1e-5, atol=1e-5)
         _assert_physical_replicas_equal(distributed_params)
+
+
+def test_reference_once_lowers_one_bfloat16_logical_matrix_gather() -> None:
+    require_fake_devices()
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "tp"))
+    params = {"w": jax.device_put(jnp.arange(128, dtype=jnp.float32).reshape(8, 16) / 10.0, sharding)}
+    grads = {"w": jax.device_put(jnp.arange(128, dtype=jnp.float32).reshape(8, 16) / 20.0, sharding)}
+    metadata = (ParamMetadata(path=("w",), shape=(8, 16), dtype="float32", count=128, tag="attention_q"),)
+    optimizer = build_optimizer(
+        OptimizerSpec(name="muon", schedule=ScheduleSpec(peak_lr=1e-3), weight_decay=0.0),
+        params,
+        metadata,
+    )
+    state = optimizer.transform.init(params)
+    lowered = jax.jit(
+        lambda current_grads, current_state, current_params: optimizer.transform.update(
+            current_grads,
+            current_state,
+            params=current_params,
+        )
+    ).lower(grads, state, params)
+    optimized_hlo = lowered.compile().as_text()
+    gather_lines = [
+        line.strip()
+        for line in optimized_hlo.splitlines()
+        if " all-gather(" in line
+    ]
+
+    assert len(gather_lines) == 1
+    assert "u16[8,16]" in gather_lines[0]
+    assert "f32[8,16]" not in gather_lines[0]
 
 
 def test_muon_build_init_and_update_accept_nnx_model_state() -> None:
