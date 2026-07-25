@@ -3,6 +3,88 @@
 Purpose: track what must be validated on cloud GPUs and what local work must
 finish before spending cloud time.
 
+## 2026-07-24 [codex] Shape-policy cloud gate now audits restored state
+
+Context:
+
+- Hardened the pending four-H100 workflow without changing its four configs,
+  frozen selector, training numerics, or performance thresholds.
+- The analyzer now reports structured per-run failures for metrics, optimizer
+  groups, final/eval/sample artifacts, retained-checkpoint identity, restored
+  checkpoint state, runtime-plan/HLO agreement, and exact physical-replica
+  equality.
+- The runner invokes a post-training checkpoint audit after eval and sampling,
+  retains `checkpoints/index.json`, and packages the audit JSON even when the
+  audit command exits nonzero. No cloud command was run in this entry.
+
+Commands:
+
+```bash
+cd /home/veer/Master/projects/research
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_dist_muon_shape_policy_analysis.py \
+  tests/jaxtitan/test_dist_muon_checkpoint_audit.py
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_dist_muon_shape_policy_analysis.py \
+  tests/jaxtitan/test_dist_muon_checkpoint_audit.py \
+  tests/jaxtitan/test_config.py \
+  tests/jaxtitan/test_checkpoints.py \
+  tests/jaxtitan/test_checkpoint_eval.py \
+  tests/jaxtitan/test_checkpoint_sample.py \
+  tests/jaxtitan/test_resume_compat.py \
+  tests/jaxtitan/test_optim.py
+uv run pytest -q tests/jaxtitan
+bash -n scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh
+uv run python -m py_compile \
+  scripts/jaxtitan/analyze_dist_muon_shape_policy_results.py \
+  scripts/jaxtitan/audit_dist_muon_checkpoint.py
+git diff --check
+```
+
+Cloud launch:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+git fetch origin
+git switch codex/distributed-muon-shape-policy
+git pull --ff-only
+tmux new -s dist-muon-shape-policy
+scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh --overwrite
+```
+
+Artifacts:
+
+- Audit script: `scripts/jaxtitan/audit_dist_muon_checkpoint.py`.
+- Per-run evidence: `replica_audit_<run_id>.json` plus the retained
+  `checkpoints/index.json`.
+- Structured final comparison:
+  `dist_muon_shape_policy_comparison.json`, schema version `2`.
+- Frozen baseline:
+  `cloud_results/dist_muon_m2_20260724T192739Z_lightweight.tgz`.
+- Frozen baseline SHA-256:
+  `65fb879f2636778aa5a25d6566b1538a9ea533cfceb1439428bcdbd433d2db72`.
+
+Result:
+
+- Hardened analyzer/audit gate: `24 passed`.
+- Focused optimizer/config/checkpoint/resume gate: `280 passed`.
+- Full Jaxtitan suite: `748 passed, 1 skipped`.
+- Archived H100 validation found six expected dense-TP buckets and no HLO
+  planning/signature mismatch.
+- The config-drift test proves each candidate config differs from its
+  current-distributed baseline only by run ID.
+- No candidate H100 result exists, so PR #21 remains draft and makes no new
+  performance claim.
+
+Next:
+
+- Run the matrix on exactly four H100 80GB GPUs, bring back the lightweight
+  bundle and checksum, and require all artifact/HLO/replica gates plus the
+  existing per-layout and geometric-mean performance gates before making the
+  PR ready.
+
 ## 2026-07-24 [codex] Shape-policy four-H100 acceptance queued
 
 Context:

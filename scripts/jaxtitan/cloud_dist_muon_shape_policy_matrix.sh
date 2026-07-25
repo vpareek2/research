@@ -103,6 +103,10 @@ capture_run_evidence() {
       cp -a "${source}/${path}" "$destination/"
     fi
   done
+  if [[ -f "${source}/checkpoints/index.json" ]]; then
+    mkdir -p "${destination}/checkpoints"
+    cp -a "${source}/checkpoints/index.json" "${destination}/checkpoints/"
+  fi
   find "${source}/profiles" -type f 2>/dev/null | sort \
     > "${capture_dir}/profile_files_${run_id}.txt" || true
   du -sh "$source" | tee "${capture_dir}/du_${run_id}.txt"
@@ -136,6 +140,15 @@ run_one() {
   uv run jaxtitan sample checkpoint "runs/${run_id}" --checkpoint latest \
     --prompt-ids "15496,11" --max-new-tokens 8 --top-k 1 --json \
     > "${capture_dir}/sample_${run_id}.json"
+  local audit_status=0
+  if ! uv run python scripts/jaxtitan/audit_dist_muon_checkpoint.py \
+    "runs/${run_id}" --checkpoint latest \
+    --json-out "${capture_dir}/replica_audit_${run_id}.json" \
+    > "${log_dir}/replica_audit_${run_id}.log"; then
+    audit_status=1
+  fi
+  echo "REPLICA_AUDIT_EXIT=${audit_status} ${run_id}" \
+    | tee -a "${log_dir}/replica_audit_${run_id}.log"
   capture_run_evidence "$run_id"
   marker "END PROFILE64 ${run_id}"
 }

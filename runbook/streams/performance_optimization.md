@@ -3,6 +3,85 @@
 Purpose: turn measured Jaxtitan profiles into an ordered optimization program
 without weakening correctness or adding speculative kernel surfaces.
 
+## 2026-07-24 [codex] Shape-policy acceptance harness hardened
+
+Context:
+
+- Hardened the draft shape-policy PR's validation tooling without changing the
+  selector, Muon numerics, acceptance configs, or runtime hot path.
+- Replaced the analyzer's artifact-existence boolean with structured gates for
+  every training row and optimizer group, final/eval/sample completion,
+  checkpoint identity, replica audit, and the compiled HLO signature implied by
+  each runtime bucket plan.
+- Added a post-training checkpoint audit that reconstructs the exact training
+  state, restores the latest retained checkpoint, checks complete model and
+  optimizer state for finiteness, and compares physical replicas grouped by
+  logical shard index with an exact-zero-difference requirement.
+- Updated the cloud runner to preserve `checkpoints/index.json`, run the audit
+  after checkpoint eval/sample, and package audit evidence even when its gate
+  fails. The final analyzer remains the single acceptance decision.
+
+Commands:
+
+```bash
+cd /home/veer/Master/projects/research
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_dist_muon_shape_policy_analysis.py \
+  tests/jaxtitan/test_dist_muon_checkpoint_audit.py
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_dist_muon_shape_policy_analysis.py \
+  tests/jaxtitan/test_dist_muon_checkpoint_audit.py \
+  tests/jaxtitan/test_config.py \
+  tests/jaxtitan/test_checkpoints.py \
+  tests/jaxtitan/test_checkpoint_eval.py \
+  tests/jaxtitan/test_checkpoint_sample.py \
+  tests/jaxtitan/test_resume_compat.py \
+  tests/jaxtitan/test_optim.py
+uv run pytest -q tests/jaxtitan
+bash -n scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh
+uv run python -m py_compile \
+  scripts/jaxtitan/analyze_dist_muon_shape_policy_results.py \
+  scripts/jaxtitan/audit_dist_muon_checkpoint.py
+git diff --check
+```
+
+Artifacts:
+
+- Checkpoint audit:
+  `scripts/jaxtitan/audit_dist_muon_checkpoint.py`.
+- Per-run audit output:
+  `replica_audit_<run_id>.json`.
+- Structured comparison schema:
+  `scripts/jaxtitan/analyze_dist_muon_shape_policy_results.py`, schema version
+  `2`.
+- Runner:
+  `scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh`.
+- Archived H100 HLO inspected locally:
+  `cloud_results/dist_muon_m2_20260724T192739Z_lightweight.tgz`.
+- Frozen baseline SHA-256 remains
+  `65fb879f2636778aa5a25d6566b1538a9ea533cfceb1439428bcdbd433d2db72`.
+
+Result:
+
+- Hardened analyzer/audit tests: `24 passed`.
+- Focused optimizer/config/checkpoint/resume gate: `280 passed`.
+- Full Jaxtitan suite: `748 passed, 1 skipped`.
+- The HLO parser matched all six expected buckets in the archived dense-TP
+  H100 compilation dump with no planning or signature failures.
+- Synthetic negative coverage rejects missing/malformed artifacts, nonfinite
+  rows and optimizer groups, checkpoint mismatches, invalid HLO signatures,
+  nonfinite state, missing physical replica evidence, and unequal replicas.
+- No GPU run was launched and no new throughput claim is made.
+
+Next:
+
+- Run the unchanged four-layout shape-policy matrix on four H100 80GB GPUs.
+  Acceptance additionally requires every structured artifact, HLO, and replica
+  gate to pass before applying the frozen performance thresholds. Keep PR #21
+  draft until that evidence exists.
+
 ## 2026-07-24 [codex] Shape/topology Muon policy ready for H100 acceptance
 
 Context:
