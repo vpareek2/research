@@ -10,6 +10,7 @@ from statistics import median
 import time
 from typing import Any
 
+from jaxtitan.errors import ContractError
 from jaxtitan.optim.muon import MuonLeafExecutionPlan, distributed_muon_transform, muon_policy_constants
 from jaxtitan.runtime.profile_analysis import summarize_hlo_text
 
@@ -881,6 +882,34 @@ def artifact_manifest(artifact_dir: str | Path) -> dict[str, Any]:
         "hlo_files": sorted(path.relative_to(root).as_posix() for path in (root / "hlo").glob("*.txt")),
         "profile_files": sorted(path.relative_to(root).as_posix() for path in (root / "profiles").rglob("*") if path.is_file()),
     }
+
+
+def validate_artifact_manifest(
+    cases: list[dict[str, Any]],
+    manifest: dict[str, Any],
+) -> None:
+    """Require one uniquely named optimized HLO artifact per candidate."""
+
+    expected = {
+        f"hlo/{candidate['name']}.txt"
+        for case in cases
+        for candidate in case["candidates"]
+    }
+    expected_count = sum(len(case["candidates"]) for case in cases)
+    if len(expected) != expected_count:
+        raise ContractError(
+            "Muon benchmark candidate names are not unique: "
+            f"candidates={expected_count} unique_names={len(expected)}"
+        )
+    actual = set(manifest["hlo_files"])
+    if actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        raise ContractError(
+            "Muon benchmark HLO artifact set is incomplete: "
+            f"expected={len(expected)} actual={len(actual)} "
+            f"first_missing={missing[:1]} first_extra={extra[:1]}"
+        )
 
 
 def write_benchmark_artifacts(

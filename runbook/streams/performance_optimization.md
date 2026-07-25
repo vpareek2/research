@@ -64,6 +64,11 @@ Artifacts:
 - Artifact SHA-256:
   `f8311c431dbb518ddadf943b5cec6c2f96c335a9dd6e1b0f88068d5cc970d0b0`.
 - Cloud commit: `e96010d8eaf0afad073a62ae0d78707c52d159e9`.
+- Expanded calibration artifact:
+  `cloud_results/dist_muon_leaf_bench_20260724T215030Z.tgz`.
+- Expanded artifact SHA-256:
+  `27fddd04d51cdb9f3262a3a074a2f319e8bf0f880ba80851d3a546a5bef6b1e6`.
+- Expanded cloud commit: `dcb00b40a216f3a75382c8856b1fa78217613ff3`.
 
 Result:
 
@@ -91,14 +96,21 @@ Result:
   clear the `1.05x` gate and selected duplicated execution.
 - No profiler trace was captured; canonical timing was unprofiled as required.
 - The 19-case artifact remains valid for K/V and O. The expanded 76-case
-  calibration has not yet been run on GPU and must replace it before the
-  shape/topology production selector is implemented.
+  calibration completed with `overall_gate=True`, 76 cases, 185 candidates,
+  and exactly 185 uniquely named optimized HLO files.
+- Every production-sized aligned bucket selected direct execution. Square
+  row-sharded buckets selected right-Gram; medium/large aspect-2/4 row-sharded
+  buckets selected exchange. Small-width and singleton crossover cases provide
+  the bucket-population and collective-latency breakpoints.
+- A preceding successful timing capture at `20260724T213504Z` was superseded
+  because 32 singleton/bucket HLO filenames collided. Its timing JSON was
+  intact, but it is not the canonical artifact. The benchmark now fails if
+  candidate names are non-unique or any expected HLO file is absent.
 
 Next:
 
-- Run the expanded selector on the same four-H100 topology, derive a portable
-  shape/topology breakpoint from bucket—not singleton—evidence, and then
-  implement that policy without model-tag or exact-width branches.
+- Implement the zero-role-input shape/topology cost rule derived from the clean
+  bucket evidence, then confirm it with the matched 64-step matrix.
 - Confirm that policy with the existing matched 64-step training matrix before
   making any production throughput claim.
 

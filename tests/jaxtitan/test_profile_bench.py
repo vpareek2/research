@@ -141,6 +141,35 @@ def test_muon_policy_features_are_shape_and_topology_only() -> None:
     }
 
 
+def test_muon_artifact_manifest_requires_one_unique_hlo_per_candidate() -> None:
+    cases = [
+        {
+            "candidates": [
+                {"name": "case_duplicated"},
+                {"name": "case_distributed"},
+            ]
+        }
+    ]
+    manifest = {
+        "hlo_files": [
+            "hlo/case_duplicated.txt",
+            "hlo/case_distributed.txt",
+        ]
+    }
+
+    muon_bench.validate_artifact_manifest(cases, manifest)
+    with pytest.raises(ContractError, match="incomplete"):
+        muon_bench.validate_artifact_manifest(
+            cases,
+            {"hlo_files": ["hlo/case_duplicated.txt"]},
+        )
+    with pytest.raises(ContractError, match="not unique"):
+        muon_bench.validate_artifact_manifest(
+            [{"candidates": [{"name": "same"}, {"name": "same"}]}],
+            {"hlo_files": ["hlo/same.txt"]},
+        )
+
+
 def test_muon_benchmark_scales_reference_error_envelope_to_production_lr() -> None:
     contract = muon_bench.benchmark_contract()
 

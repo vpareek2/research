@@ -54,6 +54,7 @@ def benchmark_component(
             artifact_manifest,
             benchmark_contract,
             benchmark_muon,
+            validate_artifact_manifest,
             write_benchmark_artifacts,
         )
 
@@ -83,7 +84,10 @@ def benchmark_component(
         "cases": cases,
     }
     if artifact_dir is not None:
-        payload["artifacts"] = artifact_manifest(artifact_dir)
+        manifest = artifact_manifest(artifact_dir)
+        if component == "muon":
+            validate_artifact_manifest(cases, manifest)
+        payload["artifacts"] = manifest
         write_benchmark_artifacts(artifact_dir, payload=payload)
     return payload
 

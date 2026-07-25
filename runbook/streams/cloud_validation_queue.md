@@ -55,6 +55,11 @@ Artifacts:
 - SHA-256:
   `f8311c431dbb518ddadf943b5cec6c2f96c335a9dd6e1b0f88068d5cc970d0b0`.
 - Commit: `e96010d8eaf0afad073a62ae0d78707c52d159e9`.
+- Expanded bundle:
+  `cloud_results/dist_muon_leaf_bench_20260724T215030Z.tgz`.
+- Expanded SHA-256:
+  `27fddd04d51cdb9f3262a3a074a2f319e8bf0f880ba80851d3a546a5bef6b1e6`.
+- Expanded commit: `dcb00b40a216f3a75382c8856b1fa78217613ff3`.
 
 Result:
 
@@ -76,13 +81,21 @@ Result:
     composed layouts; `1.16x` over the current exchange route.
 - No trace pass was run. The timing evidence is canonical and unprofiled.
 - The completed 19-case artifact remains the accepted K/V/O result. The new
-  76-case shape/topology calibration is queued and has no GPU claim yet.
+  76-case shape/topology calibration also completed with
+  `overall_gate=True`, 185/185 uniquely named candidate HLO files, and a
+  checksum-verified local bundle.
+- The clean expanded result selects direct for all production-sized aligned
+  buckets, right-Gram for square row-sharded buckets, and exchange for the
+  medium/large aspect-2/4 row-sharded buckets. Small-width and singleton cases
+  identify the portable cost crossovers.
+- The earlier expanded timing capture at `20260724T213504Z` is superseded
+  because singleton and production-bucket HLO filenames collided. The final
+  capture fixes the names and verifies artifact completeness.
 
 Next:
 
-- Run the expanded canonical selector on the same four-H100 topology and copy
-  its checksum-verified bundle locally. Only then implement the portable
-  shape/topology policy and use the existing 64-step matrix as its production
+- GPU calibration is complete. Implement the portable shape/topology policy
+  locally, then use the existing four-layout 64-step matrix as its production
   acceptance gate.
 
 ## 2026-07-24 [codex] M2 distributed Muon four-GPU queue is ready
