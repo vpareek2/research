@@ -60,6 +60,15 @@ class MuonLeafExecutionPlan:
     fallback_reason: str | None
     bucket_id: int
     weight_decay: bool
+    policy_version: str | None = None
+    eligible_executions: tuple[str, ...] = ()
+    selection_reason: str | None = None
+    short_dimension: int | None = None
+    long_dimension: int | None = None
+    tp_size: int | None = None
+    cohort_size: int | None = None
+    gram_side: str | None = None
+    modeled_costs: tuple[tuple[str, int], ...] = ()
 
 
 def muon_transform(
@@ -266,6 +275,7 @@ def distributed_muon_transform(
             else:
                 distributed_buckets.setdefault(plan.bucket_id, []).append(index)
         for indices in distributed_buckets.values():
+            indices.sort(key=lambda index: plan_leaves[index].path)
             bucket_results = _bucketed_distributed_zeropower(
                 tuple(prepared[index][0] for index in indices),
                 tuple(plan_leaves[index] for index in indices),

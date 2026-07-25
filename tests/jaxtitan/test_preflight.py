@@ -324,7 +324,7 @@ def test_run_preflight_auto_resolves_sharded_muon_to_dion2(
         pytest.param("duplicated", {"duplicated"}, True, id="duplicated"),
         pytest.param(
             "distributed",
-            {"distributed_direct", "distributed_exchange"},
+            {"distributed_direct", "distributed_large_gram"},
             False,
             id="distributed",
         ),

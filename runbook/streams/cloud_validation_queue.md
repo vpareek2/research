@@ -3,6 +3,80 @@
 Purpose: track what must be validated on cloud GPUs and what local work must
 finish before spending cloud time.
 
+## 2026-07-24 [codex] Shape-policy four-H100 acceptance queued
+
+Context:
+
+- The host-static `shape_topology_v1` production selector is locally complete.
+  It reproduces the checksum-verified leaf-benchmark decisions without
+  inspecting parameter tags, model variants, or device names.
+- Prepared four new 64-step runs for dense TP, FSDP+TP, ZeRO2+TP, and Trinity
+  TP+EP. Each config differs from its accepted current-distributed baseline
+  only in run ID.
+- The runner captures hardware/topology, HLO, metrics, optimizer diagnostics,
+  checkpoints, eval, sampling, and lightweight run evidence. Its analyzer
+  applies the frozen same-node baseline medians and fails the requested
+  per-layout/geometric-mean gates.
+- No cloud command was run in this entry.
+
+Commands:
+
+```bash
+cd /home/veer/Master/projects/research
+for cfg in configs/jaxtitan/cloud_4gpu_profile64_*_muon_shape_policy.toml; do
+  uv run jaxtitan config check "$cfg"
+done
+bash -n scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh
+uv run pytest -q tests/jaxtitan/test_dist_muon_shape_policy_analysis.py
+git diff --check
+```
+
+Cloud launch:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+git fetch origin
+git switch codex/distributed-muon-shape-policy
+git pull --ff-only
+tmux new -s dist-muon-shape-policy
+scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh --overwrite
+```
+
+Artifacts:
+
+- Runner: `scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh`.
+- Analyzer:
+  `scripts/jaxtitan/analyze_dist_muon_shape_policy_results.py`.
+- Configs:
+  `configs/jaxtitan/cloud_4gpu_profile64_{dense_tp,dense_fsdp_tp,dense_zero2_tp,trinity_moe_tp_ep}_muon_shape_policy.toml`.
+- Calibration SHA-256:
+  `27fddd04d51cdb9f3262a3a074a2f319e8bf0f880ba80851d3a546a5bef6b1e6`.
+- Frozen baseline SHA-256:
+  `65fb879f2636778aa5a25d6566b1538a9ea533cfceb1439428bcdbd433d2db72`.
+- Expected output:
+  `cloud_results/dist_muon_shape_policy_YYYYMMDDTHHMMSSZ_lightweight.tgz`
+  plus `.sha256`.
+
+Result:
+
+- Local implementation gate: `730 passed, 1 skipped`; final focused
+  policy/bucket/analyzer/resume gate: `19 passed, 114 deselected`.
+- All four configs are valid. The clean calibration match is `63/63`.
+- Accepted current-distributed median baselines for steps 16-63 are:
+  TP `72.535 ms`, FSDP+TP `107.775 ms`, ZeRO2+TP `105.967 ms`, and TP+EP
+  `218.850 ms`.
+- No candidate H100 run exists, so no production throughput claim exists.
+
+Next:
+
+- Run the matrix on exactly four H100 80GB GPUs with NVLink where possible.
+- Require complete train/checkpoint/eval/sample artifacts, finite optimizer
+  groups, expected policy/HLO evidence, no layout more than 1% slower than the
+  current distributed baseline, at least 2% geometric-mean improvement, and
+  at least 5% speedup over duplicated in every layout.
+- Keep the implementation PR draft if any gate fails; revise only the portable
+  geometry/cost breakpoint and rerun.
+
 ## 2026-07-24 [codex] Distributed Muon leaf benchmark queue is ready
 
 Context:

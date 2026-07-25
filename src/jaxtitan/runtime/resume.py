@@ -208,6 +208,30 @@ def checkpoint_metadata(
 def validate_resume_metadata(metadata: Mapping[str, Any], current_spec: RunSpec) -> None:
     """Validate checkpoint metadata against the current effective runtime spec."""
 
+    stored_payload, current = _validate_metadata_envelope(metadata, current_spec)
+    stored_fingerprint = metadata["runtime_fingerprint"]
+    if stored_fingerprint != current.runtime_fingerprint:
+        mismatch = _preferred_mismatch(stored_payload, current.payload)
+        raise ContractError(f"resume compatibility mismatch at {mismatch}")
+
+
+def validate_inference_metadata(metadata: Mapping[str, Any], current_spec: RunSpec) -> None:
+    """Validate inference restore, allowing only the recorded Muon policy transition."""
+
+    stored_payload, current = _validate_metadata_envelope(metadata, current_spec)
+    stored_fingerprint = metadata["runtime_fingerprint"]
+    if stored_fingerprint == current.runtime_fingerprint:
+        return
+    if _allows_shape_policy_inference_transition(stored_payload, current.payload):
+        return
+    mismatch = _preferred_mismatch(stored_payload, current.payload)
+    raise ContractError(f"resume compatibility mismatch at {mismatch}")
+
+
+def _validate_metadata_envelope(
+    metadata: Mapping[str, Any],
+    current_spec: RunSpec,
+) -> tuple[Mapping[str, Any], ResumeCompatibility]:
     _require_int_equal(metadata, "schema_version", RESUME_METADATA_SCHEMA_VERSION)
     _require_int_equal(metadata, "compat_version", RESUME_COMPAT_VERSION)
     run_id = metadata.get("run_id")
@@ -222,19 +246,28 @@ def validate_resume_metadata(metadata: Mapping[str, Any], current_spec: RunSpec)
     expected_fingerprint = _hash(_normalize(stored_payload))
     if stored_fingerprint != expected_fingerprint:
         raise ContractError("resume metadata runtime_fingerprint does not match compatibility payload")
-    if stored_fingerprint != current.runtime_fingerprint:
-        mismatch = _preferred_mismatch(stored_payload, current.payload)
-        raise ContractError(f"resume compatibility mismatch at {mismatch}")
 
     checkpoint = _require_mapping(metadata.get("checkpoint"), "checkpoint")
     _required_int(checkpoint, "step", "checkpoint")
     _required_int(checkpoint, "tokens_seen", "checkpoint")
+    return stored_payload, current
 
 
 def validate_resume_compat(restored: CheckpointRestore, current_spec: RunSpec) -> None:
     """Validate a restored checkpoint before accepting it into runtime."""
 
     validate_resume_metadata(restored.metadata, current_spec)
+    _validate_restored_checkpoint_state(restored)
+
+
+def validate_inference_compat(restored: CheckpointRestore, current_spec: RunSpec) -> None:
+    """Validate a restored train-state container used only to extract model state."""
+
+    validate_inference_metadata(restored.metadata, current_spec)
+    _validate_restored_checkpoint_state(restored)
+
+
+def _validate_restored_checkpoint_state(restored: CheckpointRestore) -> None:
     checkpoint = _require_mapping(restored.metadata.get("checkpoint"), "checkpoint")
     metadata_step = _required_int(checkpoint, "step", "checkpoint")
     metadata_tokens = _required_int(checkpoint, "tokens_seen", "checkpoint")
@@ -254,6 +287,48 @@ def validate_resume_compat(restored: CheckpointRestore, current_spec: RunSpec) -
         )
     if restored.host_state.dataset != restored.dataset_state:
         raise ContractError("resume checkpoint host_state.dataset does not match dataset_state")
+
+
+def _allows_shape_policy_inference_transition(
+    stored_payload: Mapping[str, Any],
+    current_payload: Mapping[str, Any],
+) -> bool:
+    stored_dist_muon = _dist_muon_compat_policy(stored_payload)
+    current_dist_muon = _dist_muon_compat_policy(current_payload)
+    if stored_dist_muon is None or current_dist_muon is None:
+        return False
+    if stored_dist_muon.get("requested_mode") != "distributed":
+        return False
+    if stored_dist_muon.get("distributed_policy") != "sharded_gram_collectives":
+        return False
+    current_shape_policy = current_dist_muon.get("shape_topology_policy")
+    if not isinstance(current_shape_policy, Mapping):
+        return False
+    if current_shape_policy.get("version") != "shape_topology_v1":
+        return False
+    return _without_dist_muon_policy(stored_payload) == _without_dist_muon_policy(current_payload)
+
+
+def _dist_muon_compat_policy(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    optimizer = payload.get("optimizer")
+    if not isinstance(optimizer, Mapping):
+        return None
+    policy = optimizer.get("policy")
+    if not isinstance(policy, Mapping):
+        return None
+    dist_muon = policy.get("dist_muon")
+    return dist_muon if isinstance(dist_muon, Mapping) else None
+
+
+def _without_dist_muon_policy(payload: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = _normalize(payload)
+    projected = dict(normalized)
+    optimizer = dict(projected["optimizer"])
+    policy = dict(optimizer["policy"])
+    policy.pop("dist_muon", None)
+    optimizer["policy"] = policy
+    projected["optimizer"] = optimizer
+    return projected
 
 
 def _required_row_int(row: Mapping[str, Any], key: str) -> int:

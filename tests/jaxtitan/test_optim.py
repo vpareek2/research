@@ -24,6 +24,14 @@ from jaxtitan.optim import (
 )
 from jaxtitan.optim.dion2 import dion2_policy_constants, dion2_transform, polar_express, select_dion2_slices
 from jaxtitan.optim.muon import MuonLeafExecutionPlan, distributed_muon_transform
+from jaxtitan.optim.muon_policy import (
+    MUON_DIRECT_BUCKET_LIMIT_BYTES,
+    MUON_DIRECT_SINGLETON_LIMIT_BYTES,
+    MUON_EXCHANGE_LATENCY_ALLOWANCE_BYTES,
+    MUON_SHAPE_POLICY_VERSION,
+    muon_shape_policy_constants,
+    select_muon_execution,
+)
 from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec, TrinitySpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ParamRouteRule, ScheduleSpec
@@ -35,6 +43,172 @@ FAKE_DEVICE_COUNT = 4
 def require_fake_devices() -> None:
     if jax.local_device_count() < FAKE_DEVICE_COUNT:
         pytest.skip("JAX was initialized before fake CPU device flags were set")
+
+
+@pytest.mark.parametrize(
+    (
+        "shape",
+        "canonical_tp_dim",
+        "tp_size",
+        "cohort_size",
+        "expected",
+    ),
+    [
+        pytest.param((1024, 1024), 1, 4, 12, "distributed_direct", id="square-aligned-tp4"),
+        pytest.param((2048, 4096), 1, 4, 12, "distributed_direct", id="aspect2-aligned-tp4"),
+        pytest.param((2048, 4096), 1, 2, 12, "duplicated", id="aspect2-aligned-tp2"),
+        pytest.param((1024, 2048), 1, 2, 1, "duplicated", id="aligned-tp2-singleton"),
+        pytest.param((1024, 2048), 1, 2, 24, "distributed_direct", id="aligned-tp2-bucket"),
+        pytest.param((1024, 1024), 0, 4, 12, "distributed_large_gram", id="square-row"),
+        pytest.param((256, 512), 0, 2, 12, "distributed_large_gram", id="small-aspect2-tp2"),
+        pytest.param((256, 512), 0, 4, 12, "distributed_exchange", id="small-aspect2-tp4"),
+        pytest.param((1024, 4096), 0, 2, 12, "distributed_exchange", id="aspect4-tp2"),
+        pytest.param((1024, 4096), 0, 4, 12, "distributed_exchange", id="aspect4-tp4"),
+        pytest.param((1024, 4097), 0, 4, 12, "distributed_large_gram", id="exchange-nondivisible"),
+    ],
+)
+def test_muon_shape_policy_matches_calibrated_geometry(
+    shape: tuple[int, int],
+    canonical_tp_dim: int,
+    tp_size: int,
+    cohort_size: int,
+    expected: str,
+) -> None:
+    decision = select_muon_execution(
+        requested_mode="distributed",
+        canonical_tp_dim=canonical_tp_dim,
+        logical_shape=shape,
+        tp_size=tp_size,
+        cohort_size=cohort_size,
+    )
+
+    assert decision.execution == expected
+    assert decision.policy_version == MUON_SHAPE_POLICY_VERSION
+    assert decision.short_dimension == min(shape)
+    assert decision.long_dimension == max(shape)
+    assert decision.tp_size == tp_size
+    assert decision.cohort_size == cohort_size
+
+
+def test_muon_shape_policy_constants_and_boundaries_are_stable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constants = muon_shape_policy_constants()
+
+    assert constants["direct_singleton_limit_bytes"] == 384 * 1024
+    assert constants["direct_bucket_limit_bytes"] == 1024 * 1024
+    assert constants["exchange_latency_allowance_bytes"] == 6 * 1024 * 1024
+    assert constants["newton_schulz_steps"] == muon_policy_constants()["newton_schulz_steps"]
+    assert MUON_DIRECT_SINGLETON_LIMIT_BYTES < MUON_DIRECT_BUCKET_LIMIT_BYTES
+    assert MUON_EXCHANGE_LATENCY_ALLOWANCE_BYTES == 6 * 1024 * 1024
+
+    tie = select_muon_execution(
+        requested_mode="distributed",
+        canonical_tp_dim=1,
+        logical_shape=(2048, 4096),
+        tp_size=4,
+        cohort_size=12,
+    )
+    assert dict(tie.modeled_costs)["direct_pressure_bytes"] == MUON_DIRECT_BUCKET_LIMIT_BYTES
+    assert tie.execution == "distributed_direct"
+
+    singleton_tie = select_muon_execution(
+        requested_mode="distributed",
+        canonical_tp_dim=1,
+        logical_shape=(768, 1152),
+        tp_size=2,
+        cohort_size=1,
+    )
+    assert dict(singleton_tie.modeled_costs)["direct_pressure_bytes"] == MUON_DIRECT_SINGLETON_LIMIT_BYTES
+    assert singleton_tie.execution == "distributed_direct"
+
+    # Force an exact modeled-cost tie for a divisible row-sharded shape. The
+    # policy deliberately resolves equality toward the redistribution-free
+    # large-Gram path.
+    exact_allowance = (
+        10 * (512**2 - 256**2)
+        - 2 * 2 * 256 * 512 // 2
+    )
+    monkeypatch.setattr(
+        "jaxtitan.optim.muon_policy.MUON_EXCHANGE_LATENCY_ALLOWANCE_BYTES",
+        exact_allowance * 2,
+    )
+    collective_tie = select_muon_execution(
+        requested_mode="distributed",
+        canonical_tp_dim=0,
+        logical_shape=(256, 512),
+        tp_size=2,
+        cohort_size=12,
+    )
+    costs = dict(collective_tie.modeled_costs)
+    assert costs["large_gram_extra_bytes"] == (
+        costs["exchange_bytes"] + costs["exchange_latency_allowance_bytes"]
+    )
+    assert collective_tie.execution == "distributed_large_gram"
+
+
+def test_muon_shape_policy_has_no_model_or_accelerator_inputs() -> None:
+    assert muon_shape_policy_constants()["selection_inputs"] == [
+        "logical_shape",
+        "canonical_tp_dim",
+        "tp_size",
+        "compatible_cohort_size",
+    ]
+
+
+def test_muon_shape_policy_matches_all_63_accepted_calibration_samples() -> None:
+    # Compressed from the checksum-verified 2026-07-24 four-H100 selector
+    # artifact. The final item is the number of topology-distinct samples with
+    # the same portable policy features and accepted execution.
+    accepted = (
+        (256, 512, 0, 2, 12, "distributed_large_gram", 2),
+        (256, 512, 0, 4, 12, "distributed_exchange", 1),
+        (256, 512, 1, 2, 12, "distributed_direct", 2),
+        (256, 512, 1, 4, 12, "distributed_direct", 1),
+        (256, 1024, 0, 2, 24, "distributed_exchange", 2),
+        (256, 1024, 0, 4, 24, "distributed_exchange", 1),
+        (1024, 1024, 0, 2, 12, "distributed_large_gram", 4),
+        (1024, 1024, 0, 4, 12, "distributed_large_gram", 2),
+        (1024, 1024, 1, 2, 12, "distributed_direct", 4),
+        (1024, 1024, 1, 4, 12, "distributed_direct", 2),
+        (1024, 2048, 0, 2, 1, "distributed_exchange", 2),
+        (1024, 2048, 0, 2, 12, "distributed_exchange", 2),
+        (1024, 2048, 0, 2, 24, "distributed_exchange", 2),
+        (1024, 2048, 0, 4, 1, "distributed_exchange", 1),
+        (1024, 2048, 0, 4, 12, "distributed_exchange", 1),
+        (1024, 2048, 0, 4, 24, "distributed_exchange", 1),
+        (1024, 2048, 1, 2, 1, "duplicated", 2),
+        (1024, 2048, 1, 2, 10, "distributed_direct", 2),
+        (1024, 2048, 1, 2, 12, "distributed_direct", 2),
+        (1024, 2048, 1, 2, 20, "distributed_direct", 2),
+        (1024, 2048, 1, 2, 24, "distributed_direct", 2),
+        (1024, 2048, 1, 4, 1, "distributed_direct", 1),
+        (1024, 2048, 1, 4, 10, "distributed_direct", 1),
+        (1024, 2048, 1, 4, 12, "distributed_direct", 1),
+        (1024, 2048, 1, 4, 20, "distributed_direct", 1),
+        (1024, 2048, 1, 4, 24, "distributed_direct", 1),
+        (1024, 4096, 0, 2, 12, "distributed_exchange", 2),
+        (1024, 4096, 0, 4, 12, "distributed_exchange", 1),
+        (1024, 4096, 1, 2, 12, "distributed_direct", 4),
+        (1024, 4096, 1, 2, 24, "distributed_direct", 2),
+        (1024, 4096, 1, 4, 12, "distributed_direct", 2),
+        (1024, 4096, 1, 4, 24, "distributed_direct", 1),
+        (2048, 4096, 0, 2, 12, "distributed_exchange", 2),
+        (2048, 4096, 0, 4, 12, "distributed_exchange", 1),
+        (2048, 4096, 1, 2, 12, "duplicated", 2),
+        (2048, 4096, 1, 4, 12, "distributed_direct", 1),
+    )
+
+    assert sum(sample_count for *_features, sample_count in accepted) == 63
+    for short, long, orientation, tp_size, population, expected, _sample_count in accepted:
+        decision = select_muon_execution(
+            requested_mode="distributed",
+            canonical_tp_dim=orientation,
+            logical_shape=(short, long),
+            tp_size=tp_size,
+            cohort_size=population,
+        )
+        assert decision.execution == expected
 
 
 def test_constant_schedule_supports_warmup() -> None:
@@ -415,12 +589,13 @@ def test_distributed_muon_policy_truthfully_records_numerical_mode() -> None:
     assert policy["muon"]["tp_mode"] == "distributed"
     assert policy["dist_muon"] == {
         "requested_mode": "distributed",
-        "distributed_policy": "sharded_gram_collectives",
+        "distributed_policy": "hybrid_shape_topology_sharded_gram_collectives",
+        "shape_topology_policy": muon_shape_policy_constants(),
         "exact": False,
         "correctness_status": "local_fake_device_acceptance_passed",
         "approximation": "floating_point_reduction_order",
-        "execution": "distributed",
-        "performance": "one_norm_plus_five_gram_reductions_with_optional_exchange",
+        "execution": "host_static_per_cohort",
+        "performance": "duplicated_or_one_norm_plus_five_gram_reductions_with_optional_exchange",
         "numerical_contract": "deterministic_close_not_bitwise",
         "newton_schulz_precision": "bfloat16",
         "replicated_model_axis_reduction": "pmean",
@@ -521,6 +696,14 @@ def test_distributed_muon_binds_role_specific_static_execution_plans(mode: str) 
         set(entry["roles"]) == {"parameter", "gradient", "momentum", "update"}
         for entry in policy["dist_muon"]["leaf_execution_plans"]
     )
+    assert {
+        entry["selection"]["policy_version"]
+        for entry in policy["dist_muon"]["leaf_execution_plans"]
+    } == {MUON_SHAPE_POLICY_VERSION}
+    assert {
+        entry["selection"]["selected_execution"]
+        for entry in policy["dist_muon"]["leaf_execution_plans"]
+    } == {"duplicated"}
 
 
 @pytest.mark.parametrize(
@@ -643,20 +826,26 @@ def test_duplicated_muon_lowers_one_bfloat16_logical_matrix_gather() -> None:
         pytest.param(
             (8, 32),
             jax.sharding.PartitionSpec("tp", None),
-            "distributed_exchange",
-            id="wide-row-exchange",
+            "distributed_large_gram",
+            id="wide-row-large-gram",
         ),
         pytest.param(
             (32, 8),
             jax.sharding.PartitionSpec(None, "tp"),
-            "distributed_exchange",
-            id="tall-column-exchange",
+            "distributed_large_gram",
+            id="tall-column-large-gram",
         ),
         pytest.param(
             (8, 8),
             jax.sharding.PartitionSpec("tp", None),
+            "distributed_large_gram",
+            id="square-row-large-gram",
+        ),
+        pytest.param(
+            (64, 1024),
+            jax.sharding.PartitionSpec("tp", None),
             "distributed_exchange",
-            id="square-row-exchange",
+            id="wide-row-exchange",
         ),
     ],
 )
@@ -689,7 +878,7 @@ def test_distributed_muon_mode_plans_matrix_orientation(
     assert plan.fallback_reason is None
 
 
-def test_distributed_muon_mode_truthfully_falls_back_for_nondivisible_exchange() -> None:
+def test_distributed_muon_mode_uses_large_gram_for_nondivisible_exchange() -> None:
     require_fake_devices()
     shape = (8, 17)
     mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
@@ -711,8 +900,49 @@ def test_distributed_muon_mode_truthfully_falls_back_for_nondivisible_exchange()
 
     plan = optimizer.muon_execution_plans[0]
     assert plan.requested_mode == "distributed"
-    assert plan.execution == "duplicated"
-    assert plan.fallback_reason == "exchange_long_dimension_not_divisible_by_tp"
+    assert plan.execution == "distributed_large_gram"
+    assert plan.fallback_reason is None
+    assert plan.selection_reason == "exchange_ineligible_long_dimension_not_divisible"
+
+
+def test_distributed_muon_mode_uses_compatible_cohort_population() -> None:
+    require_fake_devices()
+    shape = (1024, 2048)
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object).reshape(2, 2), ("data", "tp"))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "tp"))
+
+    def build(names: tuple[str, ...]):
+        params = {
+            name: jax.device_put(jnp.ones(shape, dtype=jnp.float32), sharding)
+            for name in names
+        }
+        metadata = tuple(
+            ParamMetadata(
+                path=(name,),
+                shape=shape,
+                dtype="float32",
+                count=math.prod(shape),
+                tag="attention_q",
+            )
+            for name in names
+        )
+        return build_optimizer(
+            OptimizerSpec(
+                name="muon",
+                schedule=ScheduleSpec(peak_lr=1e-3),
+                muon_tp_mode="distributed",
+            ),
+            params,
+            metadata,
+        )
+
+    singleton = build(("a",)).muon_execution_plans
+    bucket = build(("a", "b")).muon_execution_plans
+
+    assert {plan.execution for plan in singleton} == {"duplicated"}
+    assert {plan.cohort_size for plan in singleton} == {1}
+    assert {plan.execution for plan in bucket} == {"distributed_direct"}
+    assert {plan.cohort_size for plan in bucket} == {2}
 
 
 @pytest.mark.parametrize(
@@ -725,7 +955,7 @@ def test_distributed_muon_mode_truthfully_falls_back_for_nondivisible_exchange()
             id="direct",
         ),
         pytest.param(
-            (8, 32),
+            (64, 1024),
             jax.sharding.PartitionSpec("tp", None),
             2,
             id="exchange",
@@ -1008,6 +1238,45 @@ def test_distributed_muon_mode_respects_static_gram_bucket_cap(
     assert plans[("z",)].bucket_id == 1
 
 
+def test_distributed_muon_large_gram_bucket_cap_uses_long_dimension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    require_fake_devices()
+    shape = (8, 32)
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("tp", None))
+    params = {
+        name: jax.device_put(jnp.ones(shape, dtype=jnp.float32), sharding)
+        for name in ("z", "a")
+    }
+    metadata = tuple(
+        ParamMetadata(
+            path=(name,),
+            shape=shape,
+            dtype="float32",
+            count=math.prod(shape),
+            tag="attention_q",
+        )
+        for name in params
+    )
+    monkeypatch.setattr("jaxtitan.optim.build._MUON_GRAM_BUCKET_MAX_BYTES", 2048)
+
+    optimizer = build_optimizer(
+        OptimizerSpec(
+            name="muon",
+            schedule=ScheduleSpec(peak_lr=1e-3),
+            muon_tp_mode="distributed",
+        ),
+        params,
+        metadata,
+    )
+
+    plans = {plan.path: plan for plan in optimizer.muon_execution_plans}
+    assert {plan.execution for plan in plans.values()} == {"distributed_large_gram"}
+    assert plans[("a",)].bucket_id == 0
+    assert plans[("z",)].bucket_id == 1
+
+
 @pytest.mark.parametrize(
     "partition_spec",
     [
@@ -1055,9 +1324,10 @@ def test_distributed_muon_mode_handles_zero_and_near_zero_inputs(
         pytest.param((8, 32), jax.sharding.PartitionSpec(None, "tp"), id="direct-wide"),
         pytest.param((32, 8), jax.sharding.PartitionSpec("tp", None), id="direct-tall"),
         pytest.param((8, 8), jax.sharding.PartitionSpec(None, "tp"), id="direct-square"),
-        pytest.param((8, 32), jax.sharding.PartitionSpec("tp", None), id="exchange-wide"),
-        pytest.param((32, 8), jax.sharding.PartitionSpec(None, "tp"), id="exchange-tall"),
-        pytest.param((8, 8), jax.sharding.PartitionSpec("tp", None), id="exchange-square"),
+        pytest.param((8, 32), jax.sharding.PartitionSpec("tp", None), id="large-gram-wide"),
+        pytest.param((32, 8), jax.sharding.PartitionSpec(None, "tp"), id="large-gram-tall"),
+        pytest.param((8, 8), jax.sharding.PartitionSpec("tp", None), id="large-gram-square"),
+        pytest.param((64, 1024), jax.sharding.PartitionSpec("tp", None), id="exchange-wide"),
     ],
 )
 def test_distributed_muon_mode_stays_within_calibrated_multistep_envelope(
@@ -1162,18 +1432,19 @@ def test_distributed_muon_mode_stays_within_calibrated_multistep_envelope(
 
 @pytest.mark.parametrize("replica_axis", ["fsdp", "ep"])
 @pytest.mark.parametrize(
-    "partition_spec",
+    ("shape", "partition_spec"),
     [
-        pytest.param(jax.sharding.PartitionSpec(None, "tp"), id="direct"),
-        pytest.param(jax.sharding.PartitionSpec("tp", None), id="exchange"),
+        pytest.param((8, 16), jax.sharding.PartitionSpec(None, "tp"), id="direct"),
+        pytest.param((8, 16), jax.sharding.PartitionSpec("tp", None), id="large-gram"),
+        pytest.param((64, 1024), jax.sharding.PartitionSpec("tp", None), id="exchange"),
     ],
 )
 def test_distributed_muon_mode_synchronizes_adversarial_model_replicas(
     replica_axis: str,
+    shape: tuple[int, int],
     partition_spec: jax.sharding.PartitionSpec,
 ) -> None:
     require_fake_devices()
-    shape = (8, 16)
     mesh = jax.sharding.Mesh(
         np.asarray(jax.devices()[:4], dtype=object).reshape(2, 2),
         (replica_axis, "tp"),
