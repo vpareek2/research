@@ -3,6 +3,101 @@
 Purpose: track what must be validated on cloud GPUs and what local work must
 finish before spending cloud time.
 
+## 2026-07-24 [codex] Distributed Muon leaf benchmark queue is ready
+
+Context:
+
+- The matched eight-run M2 capture proved that the current global distributed
+  route beats duplicated execution in every tested layout. The next cloud task
+  is a synthetic leaf/bucket selector, not another training matrix.
+- Prepared a four-GPU benchmark for duplicated, direct small-Gram,
+  partition-aligned large-Gram, and exchange-plus-small-Gram Muon execution.
+- Expanded it to 76 fixed cases / 185 candidate programs so Q, attention gate,
+  dense/shared MLP, three width scales, three aspect ratios, three bucket
+  populations, and both canonical TP orientations are represented before
+  production policy selection.
+- Canonical selection timing is unprofiled. `--with-trace` performs a separate
+  short trace pass and never supplies selection timings.
+- No cloud command was run in this step.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+bash -n scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh
+uv run pytest -q \
+  tests/jaxtitan/test_profile_bench.py \
+  tests/jaxtitan/test_dist_muon_leaf_bench_analysis.py \
+  tests/jaxtitan/test_optim.py
+uv run pytest -q tests/jaxtitan
+```
+
+Cloud launch:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+git fetch origin
+git switch codex/distributed-muon-leaf-bench
+git pull --ff-only
+tmux new -s dist-muon-leaf-bench
+scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh
+```
+
+Artifacts:
+
+- Runner: `scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh`.
+- Expected bundle:
+  `cloud_results/dist_muon_leaf_bench_YYYYMMDDTHHMMSSZ.tgz`.
+- The bundle contains hardware/topology/JAX provenance, canonical benchmark
+  JSON, conservative selection JSON/text, raw optimized HLO, and checksums.
+- Completed bundle:
+  `cloud_results/dist_muon_leaf_bench_20260724T211855Z.tgz`.
+- SHA-256:
+  `f8311c431dbb518ddadf943b5cec6c2f96c335a9dd6e1b0f88068d5cc970d0b0`.
+- Commit: `e96010d8eaf0afad073a62ae0d78707c52d159e9`.
+- Expanded bundle:
+  `cloud_results/dist_muon_leaf_bench_20260724T215030Z.tgz`.
+- Expanded SHA-256:
+  `27fddd04d51cdb9f3262a3a074a2f319e8bf0f880ba80851d3a546a5bef6b1e6`.
+- Expanded commit: `dcb00b40a216f3a75382c8856b1fa78217613ff3`.
+
+Result:
+
+- Local targeted suite: `106 passed`; complete Jaxtitan suite:
+  `701 passed, 1 skipped`.
+- Expanded selector optimizer/benchmark/analyzer gate: `85 passed`.
+- Production routing and resume fingerprints are unchanged.
+- The first H100 invocation exposed an LR-unit bug in the benchmark gate: it
+  applied the absolute envelope calibrated at LR `0.001` to production LR
+  `0.02`. All candidates were finite, deterministic, replica-equal, and had
+  exact momentum, but the selector correctly refused to emit winners. The gate
+  now scales that same numerical envelope linearly with LR.
+- The clean rerun on four H100 80GB HBM3 GPUs passed all required correctness
+  gates and produced a checksum-verified local bundle.
+- Bucket recommendations:
+  - K/V: exchange, `1.73x` over duplicated on TP4 and `2.28-2.30x` on
+    FSDP2xTP2/TP2xEP2.
+  - O: large/right-Gram, `1.75x` over duplicated on TP4 and `2.17x` on the
+    composed layouts; `1.16x` over the current exchange route.
+- No trace pass was run. The timing evidence is canonical and unprofiled.
+- The completed 19-case artifact remains the accepted K/V/O result. The new
+  76-case shape/topology calibration also completed with
+  `overall_gate=True`, 185/185 uniquely named candidate HLO files, and a
+  checksum-verified local bundle.
+- The clean expanded result selects direct for all production-sized aligned
+  buckets, right-Gram for square row-sharded buckets, and exchange for the
+  medium/large aspect-2/4 row-sharded buckets. Small-width and singleton cases
+  identify the portable cost crossovers.
+- The earlier expanded timing capture at `20260724T213504Z` is superseded
+  because singleton and production-bucket HLO filenames collided. The final
+  capture fixes the names and verifies artifact completeness.
+
+Next:
+
+- GPU calibration is complete. Implement the portable shape/topology policy
+  locally, then use the existing four-layout 64-step matrix as its production
+  acceptance gate.
+
 ## 2026-07-24 [codex] M2 distributed Muon four-GPU queue is ready
 
 Context:

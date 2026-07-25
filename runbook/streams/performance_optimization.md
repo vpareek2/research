@@ -3,6 +3,117 @@
 Purpose: turn measured Jaxtitan profiles into an ordered optimization program
 without weakening correctness or adding speculative kernel surfaces.
 
+## 2026-07-24 [codex] Distributed Muon leaf selector implemented
+
+Context:
+
+- Added a correctness-checked extension of the existing
+  `jaxtitan profile bench muon` surface. It benchmarks duplicated, direct
+  small-Gram, partition-aligned large/right-Gram, and exchange-plus-small-Gram
+  execution without changing production routing or adding a TOML option.
+- The fixed matrix covers all seven rank-2 Muon leaf classes in the current
+  dense/Trinity profiles on TP4, plus K/V, O, and dense MLP confirmation on
+  FSDP2xTP2 and TP2xEP2.
+- Added production-sized 24-leaf K/V and 12-leaf O bucket cases. Candidate
+  timings use rotating order and canonical unprofiled measurements; an
+  explicitly non-canonical traced pass is optional.
+- Expanded the calibration matrix before freezing a production policy:
+  all seven current rank-2 role shapes now have production-sized buckets, and
+  a one-factor lattice covers hidden widths `256/1024/2048`, aspect ratios
+  `1/2/4`, leaf counts `1/12/24`, both canonical TP orientations, TP2/TP4,
+  and TP/FSDP+TP/TP+EP topologies. The resulting fixed matrix has 76 cases and
+  185 candidate programs.
+- Selector output now carries architecture-independent policy features:
+  short/long dimensions, aspect ratio, canonical TP dimension, TP size,
+  leaf count, and aggregate matrix elements.
+- The large-Gram path is benchmark-only. Its distinct BF16 multiplication
+  order must clear the existing five-step numerical envelope before the
+  selector can recommend it.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+bash -n scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh
+uv run python -m py_compile \
+  src/jaxtitan/runtime/muon_bench.py \
+  scripts/jaxtitan/analyze_dist_muon_leaf_bench.py
+uv run pytest -q \
+  tests/jaxtitan/test_profile_bench.py \
+  tests/jaxtitan/test_dist_muon_leaf_bench_analysis.py \
+  tests/jaxtitan/test_optim.py
+uv run pytest -q tests/jaxtitan
+git diff --check
+
+cd "$(git rev-parse --show-toplevel)"
+scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh
+```
+
+Artifacts:
+
+- Branch: `codex/distributed-muon-leaf-bench`, stacked on distributed-mode
+  commit `4904e0d`.
+- Benchmark command: `uv run jaxtitan profile bench muon`.
+- Cloud runner: `scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh`.
+- Selector: `scripts/jaxtitan/analyze_dist_muon_leaf_bench.py`.
+- Expected cloud artifact:
+  `cloud_results/dist_muon_leaf_bench_YYYYMMDDTHHMMSSZ.tgz` plus `.sha256`.
+- H100 artifact:
+  `cloud_results/dist_muon_leaf_bench_20260724T211855Z.tgz`.
+- Artifact SHA-256:
+  `f8311c431dbb518ddadf943b5cec6c2f96c335a9dd6e1b0f88068d5cc970d0b0`.
+- Cloud commit: `e96010d8eaf0afad073a62ae0d78707c52d159e9`.
+- Expanded calibration artifact:
+  `cloud_results/dist_muon_leaf_bench_20260724T215030Z.tgz`.
+- Expanded artifact SHA-256:
+  `27fddd04d51cdb9f3262a3a074a2f319e8bf0f880ba80851d3a546a5bef6b1e6`.
+- Expanded cloud commit: `dcb00b40a216f3a75382c8856b1fa78217613ff3`.
+
+Result:
+
+- Targeted optimizer/benchmark/analyzer suite: `106 passed`.
+- Expanded selector optimizer/benchmark/analyzer gate: `85 passed`.
+- Complete Jaxtitan suite: `701 passed, 1 skipped`.
+- Large/right-Gram HLO has one norm reduction and five right-Gram reductions,
+  with no logical-matrix all-gather or all-to-all.
+- The selector requires finite deterministic execution, exact momentum,
+  physical replica equality, stable timing, and a minimum `1.05x` speedup.
+  Its five-step absolute-error envelope is scaled linearly from the existing
+  LR `0.001` calibration (`6e-4` update, `1.25e-3` parameter) to the production
+  benchmark LR `0.02` (`1.2e-2` update, `2.5e-2` parameter).
+- Four H100 80GB HBM3 GPUs with NV18 links completed all 19 cases and
+  50 candidate programs; `overall_gate=True`. Every candidate was finite,
+  deterministic, physically replica-equal, correctly sharded, and had exact
+  momentum.
+- Production-shaped K/V buckets selected `distributed_exchange`: `1.73x`
+  versus duplicated on TP4 and `2.28-2.30x` on FSDP2xTP2/TP2xEP2.
+- Production-shaped O buckets selected `distributed_large_gram`: `1.75x`
+  versus duplicated on TP4 and `2.17x` on both composed layouts. This was
+  `1.16x` faster than the current exchange execution.
+- TP4 shared-MLP gate/up selected the current direct route at `1.06x`.
+  Other unbucketed MLP/Q/down cases and composed dense MLP gate/up did not
+  clear the `1.05x` gate and selected duplicated execution.
+- No profiler trace was captured; canonical timing was unprofiled as required.
+- The 19-case artifact remains valid for K/V and O. The expanded 76-case
+  calibration completed with `overall_gate=True`, 76 cases, 185 candidates,
+  and exactly 185 uniquely named optimized HLO files.
+- Every production-sized aligned bucket selected direct execution. Square
+  row-sharded buckets selected right-Gram; medium/large aspect-2/4 row-sharded
+  buckets selected exchange. Small-width and singleton crossover cases provide
+  the bucket-population and collective-latency breakpoints.
+- A preceding successful timing capture at `20260724T213504Z` was superseded
+  because 32 singleton/bucket HLO filenames collided. Its timing JSON was
+  intact, but it is not the canonical artifact. The benchmark now fails if
+  candidate names are non-unique or any expected HLO file is absent.
+
+Next:
+
+- Implement the zero-role-input shape/topology cost rule derived from the clean
+  bucket evidence, then confirm it with the matched 64-step matrix.
+- Confirm that policy with the existing matched 64-step training matrix before
+  making any production throughput claim.
+
 ## 2026-07-24 [codex] M2 distributed Muon local acceptance
 
 Context:

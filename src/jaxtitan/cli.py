@@ -95,6 +95,15 @@ def build_parser() -> argparse.ArgumentParser:
     profile_bench_parser.add_argument("component", choices=["moe", "muon"], help="Component to benchmark.")
     profile_bench_parser.add_argument("--warmup", type=int, default=3, help="Warmup executions per case.")
     profile_bench_parser.add_argument("--iters", type=int, default=10, help="Measured executions per case.")
+    profile_bench_parser.add_argument(
+        "--artifact-dir",
+        help="Optional Muon benchmark directory for canonical JSON, optimized HLO, and profiler artifacts.",
+    )
+    profile_bench_parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="Capture a profiler trace while timing; requires --artifact-dir and is not for canonical selection timing.",
+    )
     profile_bench_parser.add_argument("--json", action="store_true", help="Print stable benchmark JSON.")
 
     run_parser = commands.add_parser("run", help="Create and inspect local run artifacts.")
@@ -270,7 +279,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "profile" and args.profile_command == "bench":
             from jaxtitan.runtime.profile_bench import benchmark_component, benchmark_to_json, format_benchmark
 
-            payload = benchmark_component(args.component, warmup=args.warmup, iters=args.iters)
+            payload = benchmark_component(
+                args.component,
+                warmup=args.warmup,
+                iters=args.iters,
+                artifact_dir=args.artifact_dir,
+                trace=args.trace,
+            )
             if args.json:
                 print(benchmark_to_json(payload))
             else:

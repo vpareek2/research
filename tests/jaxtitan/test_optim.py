@@ -23,6 +23,7 @@ from jaxtitan.optim import (
     zeropower_via_newton_schulz,
 )
 from jaxtitan.optim.dion2 import dion2_policy_constants, dion2_transform, polar_express, select_dion2_slices
+from jaxtitan.optim.muon import MuonLeafExecutionPlan, distributed_muon_transform
 from jaxtitan.specs.mesh import MeshSpec
 from jaxtitan.specs.model import ModelSpec, TrinitySpec
 from jaxtitan.specs.optimizer import OptimizerSpec, ParamRouteRule, ScheduleSpec
@@ -771,6 +772,111 @@ def test_distributed_muon_mode_lowers_expected_collectives(
     assert not [line for line in collective_lines if " all-gather(" in line]
     assert len([line for line in collective_lines if " all-reduce(" in line]) == 6
     assert len([line for line in collective_lines if " all-to-all(" in line]) == expected_all_to_all
+
+
+def test_partition_aligned_large_gram_is_numerically_close_without_reorientation() -> None:
+    require_fake_devices()
+    shape = (8, 32)
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("tp", None))
+    base_param = jax.random.normal(jax.random.key(7), shape)
+    base_grad = jax.random.normal(jax.random.key(8), shape)
+    initial_params = {"w": jax.device_put(base_param, sharding)}
+    initial_grads = {"w": jax.device_put(base_grad, sharding)}
+
+    def plan(execution: str) -> MuonLeafExecutionPlan:
+        return MuonLeafExecutionPlan(
+            path=("w",),
+            logical_shape=shape,
+            parameter_sharding=sharding,
+            gradient_sharding=sharding,
+            momentum_sharding=sharding,
+            update_sharding=sharding,
+            parameter_replica_axes=(),
+            gradient_replica_axes=(),
+            momentum_replica_axes=(),
+            update_replica_axes=(),
+            tp_partition_dim=0,
+            transpose_for_shape=False,
+            canonical_tp_dim=0,
+            requested_mode="benchmark",
+            execution=execution,
+            fallback_reason=None,
+            bucket_id=-1 if execution == "duplicated" else 0,
+            weight_decay=True,
+        )
+
+    transforms = {
+        execution: distributed_muon_transform(
+            lambda _count: jnp.asarray(0.02, dtype=jnp.float32),
+            weight_decay=0.1,
+            execution_plans={"w": plan(execution)},
+        )
+        for execution in ("duplicated", "distributed_large_gram")
+    }
+
+    def compiled_step(transform):
+        def step(params, grads, state):
+            updates, next_state = transform.update(grads, state, params=params)
+            next_params = jax.tree.map(lambda param, update: param + update, params, updates)
+            return next_params, updates, next_state
+
+        return jax.jit(step)
+
+    steps = {execution: compiled_step(transform) for execution, transform in transforms.items()}
+    params = {execution: initial_params for execution in transforms}
+    states = {execution: transform.init(initial_params) for execution, transform in transforms.items()}
+    max_update_difference = 0.0
+    max_parameter_difference = 0.0
+    for step_index in range(5):
+        grads = jax.tree.map(
+            lambda value: value + jnp.sin(value * (step_index + 1)) * jnp.float32(0.03 * step_index),
+            initial_grads,
+        )
+        outputs = {}
+        for execution in transforms:
+            next_params, updates, next_state = steps[execution](
+                params[execution],
+                grads,
+                states[execution],
+            )
+            outputs[execution] = updates
+            params[execution] = next_params
+            states[execution] = next_state
+            assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in jax.tree.leaves((next_params, updates, next_state)))
+        max_update_difference = max(
+            max_update_difference,
+            float(jnp.max(jnp.abs(outputs["distributed_large_gram"]["w"] - outputs["duplicated"]["w"]))),
+        )
+        max_parameter_difference = max(
+            max_parameter_difference,
+            float(jnp.max(jnp.abs(params["distributed_large_gram"]["w"] - params["duplicated"]["w"]))),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(jax.device_get(states["distributed_large_gram"].momentum["w"])),
+            np.asarray(jax.device_get(states["duplicated"].momentum["w"])),
+        )
+
+    assert max_update_difference <= 1e-3
+    # The right-Gram polynomial has a distinct BF16 multiplication order. The
+    # cloud selector applies the stricter calibrated production envelope and
+    # will reject this candidate for any real shape that exceeds it.
+    assert max_parameter_difference <= 2.5e-3
+
+    optimized_hlo = steps["distributed_large_gram"].lower(
+        initial_params,
+        initial_grads,
+        transforms["distributed_large_gram"].init(initial_params),
+    ).compile().as_text()
+    collective_lines = [
+        line.strip()
+        for line in optimized_hlo.splitlines()
+        if " all-gather(" in line or " all-reduce(" in line or " all-to-all(" in line
+    ]
+    assert not [line for line in collective_lines if " all-gather(" in line]
+    assert not [line for line in collective_lines if " all-to-all(" in line]
+    assert len([line for line in collective_lines if " all-reduce(" in line]) == 6
+    assert sum('muon_gram_side="right"' in line for line in collective_lines) == 5
 
 
 def test_distributed_muon_mode_buckets_norm_and_gram_reductions() -> None:
