@@ -67,7 +67,7 @@ def build_resume_compat(spec: RunSpec) -> ResumeCompatibility:
                     "mode": "exact_vocab_parallel" if spec.parallelism.tensor_parallel else None,
                 },
                 "routed_experts": "not_tensor_parallel_sharded",
-                "optimizer": "muon_routes_to_dist_muon_exact" if spec.parallelism.tensor_parallel else None,
+                "optimizer": "muon_routes_to_dist_muon" if spec.parallelism.tensor_parallel else None,
                 "moe": moe_tensor_parallel_policy_payload(
                     tensor_parallel=spec.parallelism.tensor_parallel,
                     has_moe=spec.model.trinity is not None and spec.model.trinity.moe is not None,

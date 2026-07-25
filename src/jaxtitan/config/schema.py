@@ -80,6 +80,7 @@ class TomlOptimizerSection:
     weight_decay: float = 0.0
     grad_clip_norm: float | None = None
     adamw_fallback_schedule: TomlScheduleSection | None = None
+    muon_tp_mode: str = "duplicated"
 
 
 @dataclass(frozen=True, slots=True)

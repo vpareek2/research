@@ -1,3 +1,5 @@
+import math
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -262,13 +264,14 @@ def test_optimizer_policy_summary_records_distributed_safety() -> None:
     }
     assert adamw_policy["adamw"]["distributed_policy"] == "elementwise_shard_safe"
     assert muon_policy["distributed_policy"] == {
-        "optimizer_state": "replicated_or_expert_axis_muon_sharded_dion2_or_dist_muon_exact",
-        "gradient_update": "muon_when_complete_matrix_dion2_for_fsdp_dist_muon_exact_for_tp",
+        "optimizer_state": "replicated_or_expert_axis_muon_sharded_dion2_or_dist_muon",
+        "gradient_update": "muon_when_complete_matrix_dion2_for_fsdp_dist_muon_for_tp",
         "zero2_fsdp": "auto_dion2",
     }
     assert muon_policy["muon"]["newton_schulz_precision"] == "bfloat16"
     assert muon_policy["muon"]["distributed_policy"] == "replicated_or_auto_dion2_when_sharded"
-    assert muon_policy["muon"]["distributed_matrix_update"] == "auto_dion2_or_dist_muon_exact"
+    assert muon_policy["muon"]["distributed_matrix_update"] == "auto_dion2_or_dist_muon"
+    assert muon_policy["muon"]["tp_mode"] == "duplicated"
     assert muon_policy["muon"]["rank3_expert_policy"] == "per_expert_full_matrix_when_complete_local"
     assert muon_policy["dion2"]["fraction"] == 0.25
     assert muon_policy["auto_routing"]["active"] is False
@@ -344,7 +347,7 @@ def test_sharded_muon_routes_auto_resolve_to_dion2() -> None:
     assert policy["route_counts"] == {"adamw": 7, "dion2": 7}
     assert policy["auto_routing"]["active"] is True
     assert policy["auto_routing"]["muon_sharded_matrix_backend"] == "dion2"
-    assert policy["auto_routing"]["muon_tp_sharded_matrix_backend"] == "dist_muon_exact"
+    assert policy["auto_routing"]["muon_tp_sharded_matrix_backend"] == "dist_muon"
     dion2_routes = [assignment for assignment in built.route_assignments if assignment.backend == "dion2"]
     assert {assignment.requested_backend for assignment in dion2_routes} == {"muon"}
     assert {assignment.resolution_reason for assignment in dion2_routes} == {"fsdp_sharded_optimizer_state"}
@@ -352,7 +355,7 @@ def test_sharded_muon_routes_auto_resolve_to_dion2() -> None:
     assert {assignment.matrix_axis for assignment in dion2_routes} == {0, 1}
 
 
-def test_tensor_parallel_muon_routes_to_exact_distributed_muon() -> None:
+def test_tensor_parallel_muon_routes_to_duplicated_distributed_muon() -> None:
     require_fake_devices()
     result = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
     context = build_mesh_context(MeshSpec(axis_names=("data", "tp"), axis_sizes=(1, 4)))
@@ -373,20 +376,22 @@ def test_tensor_parallel_muon_routes_to_exact_distributed_muon() -> None:
         built.route_assignments,
     )
 
-    assert {assignment.backend for assignment in built.route_assignments} == {"adamw", "dist_muon_exact"}
-    exact_routes = [assignment for assignment in built.route_assignments if assignment.backend == "dist_muon_exact"]
+    assert {assignment.backend for assignment in built.route_assignments} == {"adamw", "dist_muon"}
+    exact_routes = [assignment for assignment in built.route_assignments if assignment.backend == "dist_muon"]
     assert {assignment.requested_backend for assignment in exact_routes} == {"muon"}
-    assert {assignment.resolution_reason for assignment in exact_routes} == {"tp_sharded_matrix_exact_muon"}
+    assert {assignment.resolution_reason for assignment in exact_routes} == {"tp_sharded_matrix_muon"}
     assert all(assignment.auto_resolved for assignment in exact_routes)
     assert {assignment.matrix_axis for assignment in exact_routes} == {0, 1}
-    assert policy["route_counts"] == {"adamw": 7, "dist_muon_exact": 7}
-    assert policy["dist_muon_exact"] == {
-        "distributed_policy": "reference_logical_matrix_exact",
+    assert policy["route_counts"] == {"adamw": 7, "dist_muon": 7}
+    assert policy["dist_muon"] == {
+        "requested_mode": "duplicated",
+        "distributed_policy": "duplicated_full_logical_matrix",
         "exact": True,
         "correctness_status": "four_h100_acceptance_passed",
         "approximation": "none",
-        "execution": "reference_once",
+        "execution": "duplicated",
         "performance": "single_bf16_logical_matrix_gather",
+        "numerical_contract": "accepted_bfloat16_reference",
         "newton_schulz_precision": "bfloat16",
         "replicated_model_axis_reduction": "pmean",
         "auto_selected_for": "tp_sharded_muon_matrix_routes",
@@ -395,6 +400,31 @@ def test_tensor_parallel_muon_routes_to_exact_distributed_muon() -> None:
     assert {assignment.sharded_model_axes for assignment in exact_routes} == {("tp",)}
     assert {assignment.replicated_model_axes for assignment in exact_routes} == {()}
     assert all(assignment.partition_spec is not None for assignment in exact_routes)
+
+
+def test_distributed_muon_policy_truthfully_records_numerical_mode() -> None:
+    policy = optimizer_policy_summary(
+        OptimizerSpec(
+            name="muon",
+            schedule=ScheduleSpec(peak_lr=1e-3),
+            muon_tp_mode="distributed",
+        )
+    )
+
+    assert policy["muon"]["tp_mode"] == "distributed"
+    assert policy["dist_muon"] == {
+        "requested_mode": "distributed",
+        "distributed_policy": "sharded_gram_collectives",
+        "exact": False,
+        "correctness_status": "local_fake_device_acceptance_passed",
+        "approximation": "floating_point_reduction_order",
+        "execution": "distributed",
+        "performance": "one_norm_plus_five_gram_reductions_with_optional_exchange",
+        "numerical_contract": "deterministic_close_not_bitwise",
+        "newton_schulz_precision": "bfloat16",
+        "replicated_model_axis_reduction": "pmean",
+        "auto_selected_for": "tp_sharded_muon_matrix_routes",
+    }
 
 
 @pytest.mark.parametrize("mode", ["fsdp", "zero2"])
@@ -422,11 +452,11 @@ def test_tensor_parallel_muon_takes_precedence_over_fsdp_dion2_route(mode: str) 
         tp_axis_size=2,
     )
 
-    assert {assignment.backend for assignment in built.route_assignments} == {"adamw", "dist_muon_exact"}
-    assert policy["route_counts"] == {"adamw": 7, "dist_muon_exact": 7}
+    assert {assignment.backend for assignment in built.route_assignments} == {"adamw", "dist_muon"}
+    assert policy["route_counts"] == {"adamw": 7, "dist_muon": 7}
     assert policy["auto_routing"]["active"] is True
-    exact_routes = [assignment for assignment in built.route_assignments if assignment.backend == "dist_muon_exact"]
-    assert {assignment.resolution_reason for assignment in exact_routes} == {"tp_sharded_matrix_exact_muon"}
+    exact_routes = [assignment for assignment in built.route_assignments if assignment.backend == "dist_muon"]
+    assert {assignment.resolution_reason for assignment in exact_routes} == {"tp_sharded_matrix_muon"}
     assert {assignment.matrix_axis for assignment in exact_routes} == {0, 1}
     assert {assignment.sharded_model_axes for assignment in exact_routes}
     assert any(assignment.replicated_model_axes == ("fsdp",) for assignment in exact_routes)
@@ -461,11 +491,13 @@ def test_distributed_muon_binds_role_specific_static_execution_plans(mode: str) 
         execution_plans=plans,
     )
     assert len(plans) == 7
-    assert {plan.execution for plan in plans} == {"reference_once"}
+    assert {plan.execution for plan in plans} == {"duplicated"}
+    assert {plan.requested_mode for plan in plans} == {"duplicated"}
+    assert {plan.fallback_reason for plan in plans} == {None}
     assert {plan.path for plan in plans} == {
         assignment.path
         for assignment in built.route_assignments
-        if assignment.backend == "dist_muon_exact"
+        if assignment.backend == "dist_muon"
     }
     for plan in plans:
         assert plan.logical_shape
@@ -479,14 +511,14 @@ def test_distributed_muon_binds_role_specific_static_execution_plans(mode: str) 
         assert plan.tp_partition_dim in {0, 1}
         expected_canonical_dim = 1 - plan.tp_partition_dim if plan.transpose_for_shape else plan.tp_partition_dim
         assert plan.canonical_tp_dim == expected_canonical_dim
-    assert len(policy["dist_muon_exact"]["leaf_execution_plans"]) == 7
+    assert len(policy["dist_muon"]["leaf_execution_plans"]) == 7
     assert {
         entry["execution"]
-        for entry in policy["dist_muon_exact"]["leaf_execution_plans"]
-    } == {"reference_once"}
+        for entry in policy["dist_muon"]["leaf_execution_plans"]
+    } == {"duplicated"}
     assert all(
         set(entry["roles"]) == {"parameter", "gradient", "momentum", "update"}
-        for entry in policy["dist_muon_exact"]["leaf_execution_plans"]
+        for entry in policy["dist_muon"]["leaf_execution_plans"]
     )
 
 
@@ -528,7 +560,7 @@ def test_exact_distributed_muon_update_matches_replicated_muon_for_tp_shards(
     distributed_params = sharded_params
     distributed_state = distributed.transform.init(distributed_params)
 
-    assert distributed.route_assignments[0].backend == "dist_muon_exact"
+    assert distributed.route_assignments[0].backend == "dist_muon"
     for _ in range(5):
         replicated_updates, replicated_state = replicated.transform.update(
             full_grads,
@@ -554,7 +586,7 @@ def test_exact_distributed_muon_update_matches_replicated_muon_for_tp_shards(
         _assert_physical_replicas_equal(distributed_params)
 
 
-def test_reference_once_lowers_one_bfloat16_logical_matrix_gather() -> None:
+def test_duplicated_muon_lowers_one_bfloat16_logical_matrix_gather() -> None:
     require_fake_devices()
     mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
     sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "tp"))
@@ -584,6 +616,516 @@ def test_reference_once_lowers_one_bfloat16_logical_matrix_gather() -> None:
     assert len(gather_lines) == 1
     assert "u16[8,16]" in gather_lines[0]
     assert "f32[8,16]" not in gather_lines[0]
+
+
+@pytest.mark.parametrize(
+    ("shape", "partition_spec", "expected_execution"),
+    [
+        pytest.param(
+            (8, 32),
+            jax.sharding.PartitionSpec(None, "tp"),
+            "distributed_direct",
+            id="wide-column-direct",
+        ),
+        pytest.param(
+            (32, 8),
+            jax.sharding.PartitionSpec("tp", None),
+            "distributed_direct",
+            id="tall-row-direct",
+        ),
+        pytest.param(
+            (8, 8),
+            jax.sharding.PartitionSpec(None, "tp"),
+            "distributed_direct",
+            id="square-column-direct",
+        ),
+        pytest.param(
+            (8, 32),
+            jax.sharding.PartitionSpec("tp", None),
+            "distributed_exchange",
+            id="wide-row-exchange",
+        ),
+        pytest.param(
+            (32, 8),
+            jax.sharding.PartitionSpec(None, "tp"),
+            "distributed_exchange",
+            id="tall-column-exchange",
+        ),
+        pytest.param(
+            (8, 8),
+            jax.sharding.PartitionSpec("tp", None),
+            "distributed_exchange",
+            id="square-row-exchange",
+        ),
+    ],
+)
+def test_distributed_muon_mode_plans_matrix_orientation(
+    shape: tuple[int, int],
+    partition_spec: jax.sharding.PartitionSpec,
+    expected_execution: str,
+) -> None:
+    require_fake_devices()
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
+    sharding = jax.sharding.NamedSharding(mesh, partition_spec)
+    params = {"w": jax.device_put(jnp.ones(shape, dtype=jnp.float32), sharding)}
+    metadata = (
+        ParamMetadata(path=("w",), shape=shape, dtype="float32", count=math.prod(shape), tag="attention_q"),
+    )
+
+    optimizer = build_optimizer(
+        OptimizerSpec(
+            name="muon",
+            schedule=ScheduleSpec(peak_lr=1e-3),
+            muon_tp_mode="distributed",
+        ),
+        params,
+        metadata,
+    )
+
+    plan = optimizer.muon_execution_plans[0]
+    assert plan.requested_mode == "distributed"
+    assert plan.execution == expected_execution
+    assert plan.fallback_reason is None
+
+
+def test_distributed_muon_mode_truthfully_falls_back_for_nondivisible_exchange() -> None:
+    require_fake_devices()
+    shape = (8, 17)
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("tp", None))
+    params = {"w": jax.device_put(jnp.ones(shape, dtype=jnp.float32), sharding)}
+    metadata = (
+        ParamMetadata(path=("w",), shape=shape, dtype="float32", count=math.prod(shape), tag="attention_q"),
+    )
+
+    optimizer = build_optimizer(
+        OptimizerSpec(
+            name="muon",
+            schedule=ScheduleSpec(peak_lr=1e-3),
+            muon_tp_mode="distributed",
+        ),
+        params,
+        metadata,
+    )
+
+    plan = optimizer.muon_execution_plans[0]
+    assert plan.requested_mode == "distributed"
+    assert plan.execution == "duplicated"
+    assert plan.fallback_reason == "exchange_long_dimension_not_divisible_by_tp"
+
+
+@pytest.mark.parametrize(
+    ("shape", "partition_spec", "expected_all_to_all"),
+    [
+        pytest.param(
+            (8, 32),
+            jax.sharding.PartitionSpec(None, "tp"),
+            0,
+            id="direct",
+        ),
+        pytest.param(
+            (8, 32),
+            jax.sharding.PartitionSpec("tp", None),
+            2,
+            id="exchange",
+        ),
+    ],
+)
+def test_distributed_muon_mode_lowers_expected_collectives(
+    shape: tuple[int, int],
+    partition_spec: jax.sharding.PartitionSpec,
+    expected_all_to_all: int,
+) -> None:
+    require_fake_devices()
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
+    sharding = jax.sharding.NamedSharding(mesh, partition_spec)
+    params = {"w": jax.device_put(jnp.arange(math.prod(shape), dtype=jnp.float32).reshape(shape), sharding)}
+    grads = {"w": jax.device_put(jnp.flip(params["w"], axis=-1), sharding)}
+    metadata = (
+        ParamMetadata(path=("w",), shape=shape, dtype="float32", count=math.prod(shape), tag="attention_q"),
+    )
+    optimizer = build_optimizer(
+        OptimizerSpec(
+            name="muon",
+            schedule=ScheduleSpec(peak_lr=1e-3),
+            muon_tp_mode="distributed",
+        ),
+        params,
+        metadata,
+    )
+    state = optimizer.transform.init(params)
+
+    optimized_hlo = jax.jit(
+        lambda current_grads, current_state, current_params: optimizer.transform.update(
+            current_grads,
+            current_state,
+            params=current_params,
+        )
+    ).lower(grads, state, params).compile().as_text()
+    collective_lines = [
+        line.strip()
+        for line in optimized_hlo.splitlines()
+        if " all-gather(" in line or " all-reduce(" in line or " all-to-all(" in line
+    ]
+
+    assert not [line for line in collective_lines if " all-gather(" in line]
+    assert len([line for line in collective_lines if " all-reduce(" in line]) == 6
+    assert len([line for line in collective_lines if " all-to-all(" in line]) == expected_all_to_all
+
+
+def test_distributed_muon_mode_buckets_norm_and_gram_reductions() -> None:
+    require_fake_devices()
+    shape = (8, 32)
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "tp"))
+    params = {
+        name: jax.device_put(
+            jnp.arange(math.prod(shape), dtype=jnp.float32).reshape(shape) + offset,
+            sharding,
+        )
+        for name, offset in (("a", 0.0), ("b", 1.0))
+    }
+    grads = jax.tree.map(lambda value: jnp.flip(value, axis=-1), params)
+    metadata = tuple(
+        ParamMetadata(path=(name,), shape=shape, dtype="float32", count=math.prod(shape), tag="attention_q")
+        for name in params
+    )
+    optimizer = build_optimizer(
+        OptimizerSpec(
+            name="muon",
+            schedule=ScheduleSpec(peak_lr=1e-3),
+            muon_tp_mode="distributed",
+        ),
+        params,
+        metadata,
+    )
+    state = optimizer.transform.init(params)
+
+    assert {plan.bucket_id for plan in optimizer.muon_execution_plans} == {0}
+    optimized_hlo = jax.jit(
+        lambda current_grads, current_state, current_params: optimizer.transform.update(
+            current_grads,
+            current_state,
+            params=current_params,
+        )
+    ).lower(grads, state, params).compile().as_text()
+    collective_lines = [
+        line.strip()
+        for line in optimized_hlo.splitlines()
+        if " all-gather(" in line or " all-reduce(" in line or " all-to-all(" in line
+    ]
+
+    assert not [line for line in collective_lines if " all-gather(" in line]
+    assert len([line for line in collective_lines if " all-reduce(" in line]) == 6
+    assert not [line for line in collective_lines if " all-to-all(" in line]
+
+
+def test_distributed_muon_mode_buckets_unequal_gram_shapes() -> None:
+    require_fake_devices()
+    shapes = {"a": (8, 32), "b": (4, 16)}
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "tp"))
+    params = {
+        name: jax.device_put(
+            jnp.arange(math.prod(shape), dtype=jnp.float32).reshape(shape),
+            sharding,
+        )
+        for name, shape in shapes.items()
+    }
+    grads = jax.tree.map(lambda value: jnp.flip(value, axis=-1), params)
+    metadata = tuple(
+        ParamMetadata(path=(name,), shape=shape, dtype="float32", count=math.prod(shape), tag="attention_q")
+        for name, shape in shapes.items()
+    )
+    optimizer = build_optimizer(
+        OptimizerSpec(
+            name="muon",
+            schedule=ScheduleSpec(peak_lr=1e-3),
+            muon_tp_mode="distributed",
+        ),
+        params,
+        metadata,
+    )
+    state = optimizer.transform.init(params)
+
+    assert {plan.bucket_id for plan in optimizer.muon_execution_plans} == {0}
+    optimized_hlo = jax.jit(
+        lambda current_grads, current_state, current_params: optimizer.transform.update(
+            current_grads,
+            current_state,
+            params=current_params,
+        )
+    ).lower(grads, state, params).compile().as_text()
+    collective_lines = [
+        line.strip()
+        for line in optimized_hlo.splitlines()
+        if " all-gather(" in line or " all-reduce(" in line or " all-to-all(" in line
+    ]
+
+    assert not [line for line in collective_lines if " all-gather(" in line]
+    assert len([line for line in collective_lines if " all-reduce(" in line]) == 6
+    assert sum('frontend_attributes={muon_bucket="0",muon_op="norm"}' in line for line in collective_lines) == 1
+    assert sum('frontend_attributes={muon_bucket="0",muon_op="gram"}' in line for line in collective_lines) == 5
+    assert sum("f32[80]" in line for line in collective_lines) == 5
+    assert not [line for line in collective_lines if " all-to-all(" in line]
+
+
+def test_distributed_muon_mode_respects_static_gram_bucket_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    require_fake_devices()
+    shape = (8, 32)
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "tp"))
+    params = {
+        name: jax.device_put(jnp.ones(shape, dtype=jnp.float32), sharding)
+        for name in ("z", "a")
+    }
+    metadata = tuple(
+        ParamMetadata(path=(name,), shape=shape, dtype="float32", count=math.prod(shape), tag="attention_q")
+        for name in ("z", "a")
+    )
+    monkeypatch.setattr("jaxtitan.optim.build._MUON_GRAM_BUCKET_MAX_BYTES", 128)
+
+    optimizer = build_optimizer(
+        OptimizerSpec(
+            name="muon",
+            schedule=ScheduleSpec(peak_lr=1e-3),
+            muon_tp_mode="distributed",
+        ),
+        params,
+        metadata,
+    )
+
+    plans = {plan.path: plan for plan in optimizer.muon_execution_plans}
+    assert plans[("a",)].bucket_id == 0
+    assert plans[("z",)].bucket_id == 1
+
+
+@pytest.mark.parametrize(
+    "partition_spec",
+    [
+        pytest.param(jax.sharding.PartitionSpec(None, "tp"), id="direct"),
+        pytest.param(jax.sharding.PartitionSpec("tp", None), id="exchange"),
+    ],
+)
+@pytest.mark.parametrize("scale", [0.0, 1e-12], ids=["zero", "near-zero"])
+def test_distributed_muon_mode_handles_zero_and_near_zero_inputs(
+    partition_spec: jax.sharding.PartitionSpec,
+    scale: float,
+) -> None:
+    require_fake_devices()
+    shape = (8, 32)
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
+    sharding = jax.sharding.NamedSharding(mesh, partition_spec)
+    params = {"w": jax.device_put(jnp.zeros(shape, dtype=jnp.float32), sharding)}
+    grads = {"w": jax.device_put(jnp.arange(math.prod(shape), dtype=jnp.float32).reshape(shape) * scale, sharding)}
+    metadata = (
+        ParamMetadata(path=("w",), shape=shape, dtype="float32", count=math.prod(shape), tag="attention_q"),
+    )
+    optimizer = build_optimizer(
+        OptimizerSpec(
+            name="muon",
+            schedule=ScheduleSpec(peak_lr=1e-3),
+            weight_decay=0.0,
+            muon_tp_mode="distributed",
+        ),
+        params,
+        metadata,
+    )
+    state = optimizer.transform.init(params)
+
+    updates, next_state = optimizer.transform.update(grads, state, params=params)
+
+    assert all(np.isfinite(np.asarray(jax.device_get(leaf))).all() for leaf in jax.tree.leaves(updates))
+    assert all(np.isfinite(np.asarray(jax.device_get(leaf))).all() for leaf in jax.tree.leaves(next_state))
+    if scale == 0.0:
+        assert np.array_equal(np.asarray(jax.device_get(updates["w"])), np.zeros(shape, dtype=np.float32))
+
+
+@pytest.mark.parametrize(
+    ("shape", "partition_spec"),
+    [
+        pytest.param((8, 32), jax.sharding.PartitionSpec(None, "tp"), id="direct-wide"),
+        pytest.param((32, 8), jax.sharding.PartitionSpec("tp", None), id="direct-tall"),
+        pytest.param((8, 8), jax.sharding.PartitionSpec(None, "tp"), id="direct-square"),
+        pytest.param((8, 32), jax.sharding.PartitionSpec("tp", None), id="exchange-wide"),
+        pytest.param((32, 8), jax.sharding.PartitionSpec(None, "tp"), id="exchange-tall"),
+        pytest.param((8, 8), jax.sharding.PartitionSpec("tp", None), id="exchange-square"),
+    ],
+)
+def test_distributed_muon_mode_stays_within_calibrated_multistep_envelope(
+    shape: tuple[int, int],
+    partition_spec: jax.sharding.PartitionSpec,
+) -> None:
+    require_fake_devices()
+    element_count = math.prod(shape)
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
+    sharding = jax.sharding.NamedSharding(mesh, partition_spec)
+    base_param = jax.random.normal(jax.random.key(element_count + 99), shape)
+    base_grad = jnp.arange(element_count, dtype=jnp.float32).reshape(shape) / 200.0
+    params = {"w": jax.device_put(base_param, sharding)}
+    metadata = (
+        ParamMetadata(path=("w",), shape=shape, dtype="float32", count=element_count, tag="attention_q"),
+    )
+    optimizers = {
+        mode: build_optimizer(
+            OptimizerSpec(
+                name="muon",
+                schedule=ScheduleSpec(peak_lr=1e-3),
+                weight_decay=0.1,
+                muon_tp_mode=mode,
+            ),
+            params,
+            metadata,
+        )
+        for mode in ("duplicated", "distributed")
+    }
+
+    def compile_step(optimizer):
+        def step(current_params, current_grads, current_state):
+            updates, next_state = optimizer.transform.update(
+                current_grads,
+                current_state,
+                params=current_params,
+            )
+            next_params = jax.tree.map(
+                lambda param, update: param + update,
+                current_params,
+                updates,
+            )
+            return next_params, updates, next_state
+
+        return jax.jit(step)
+
+    steps = {mode: compile_step(optimizer) for mode, optimizer in optimizers.items()}
+    states = {mode: optimizer.transform.init(params) for mode, optimizer in optimizers.items()}
+    current_params = {mode: params for mode in optimizers}
+    distributed_grad = jax.device_put(base_grad, sharding)
+
+    first_grad = {"w": distributed_grad}
+    repeated_a = steps["distributed"](
+        current_params["distributed"],
+        first_grad,
+        states["distributed"],
+    )
+    repeated_b = steps["distributed"](
+        current_params["distributed"],
+        first_grad,
+        states["distributed"],
+    )
+    np.testing.assert_array_equal(
+        np.asarray(jax.device_get(repeated_a[1]["w"])),
+        np.asarray(jax.device_get(repeated_b[1]["w"])),
+    )
+
+    for step_index in range(5):
+        changed_grad = distributed_grad + jnp.sin(distributed_grad * (step_index + 1)) * jnp.float32(
+            0.03 * step_index
+        )
+        grads = {"w": changed_grad}
+        outputs = {}
+        for mode in optimizers:
+            next_params, updates, next_state = steps[mode](
+                current_params[mode],
+                grads,
+                states[mode],
+            )
+            outputs[mode] = updates
+            current_params[mode] = next_params
+            states[mode] = next_state
+            assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in jax.tree.leaves((next_params, updates, next_state)))
+            _assert_physical_replicas_equal((next_params, updates, next_state))
+
+        update_difference = jnp.max(
+            jnp.abs(outputs["distributed"]["w"] - outputs["duplicated"]["w"])
+        )
+        parameter_difference = jnp.max(
+            jnp.abs(
+                current_params["distributed"]["w"]
+                - current_params["duplicated"]["w"]
+            )
+        )
+        assert float(update_difference) <= 6e-4
+        assert float(parameter_difference) <= 1.25e-3
+        np.testing.assert_array_equal(
+            np.asarray(jax.device_get(jax.tree.leaves(states["distributed"])[-1])),
+            np.asarray(jax.device_get(jax.tree.leaves(states["duplicated"])[-1])),
+        )
+
+
+@pytest.mark.parametrize("replica_axis", ["fsdp", "ep"])
+@pytest.mark.parametrize(
+    "partition_spec",
+    [
+        pytest.param(jax.sharding.PartitionSpec(None, "tp"), id="direct"),
+        pytest.param(jax.sharding.PartitionSpec("tp", None), id="exchange"),
+    ],
+)
+def test_distributed_muon_mode_synchronizes_adversarial_model_replicas(
+    replica_axis: str,
+    partition_spec: jax.sharding.PartitionSpec,
+) -> None:
+    require_fake_devices()
+    shape = (8, 16)
+    mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()[:4], dtype=object).reshape(2, 2),
+        (replica_axis, "tp"),
+    )
+    sharding = jax.sharding.NamedSharding(mesh, partition_spec)
+    params = {"w": jax.device_put(jnp.arange(math.prod(shape), dtype=jnp.float32).reshape(shape) / 100.0, sharding)}
+    base_grad = jax.device_put(
+        jnp.arange(math.prod(shape), dtype=jnp.float32).reshape(shape) / 200.0,
+        sharding,
+    )
+    metadata = (
+        ParamMetadata(path=("w",), shape=shape, dtype="float32", count=math.prod(shape), tag="attention_q"),
+    )
+    optimizers = {
+        mode: build_optimizer(
+            OptimizerSpec(
+                name="muon",
+                schedule=ScheduleSpec(peak_lr=1e-3),
+                muon_tp_mode=mode,
+            ),
+            params,
+            metadata,
+        )
+        for mode in ("duplicated", "distributed")
+    }
+
+    def perturb_replicas(value, scale):
+        return jax.shard_map(
+            lambda local: local + jax.lax.axis_index(replica_axis).astype(local.dtype) * scale,
+            mesh=mesh,
+            in_specs=partition_spec,
+            out_specs=partition_spec,
+            check_vma=False,
+        )(value)
+
+    adversarial_grad = {"w": perturb_replicas(base_grad, jnp.float32(0.25))}
+    states = {}
+    for mode, optimizer in optimizers.items():
+        state = optimizer.transform.init(params)
+        states[mode] = jax.tree.map(
+            lambda leaf: perturb_replicas(leaf, jnp.float32(0.5))
+            if getattr(leaf, "shape", None) == shape
+            else leaf,
+            state,
+        )
+
+    outputs = {}
+    for mode, optimizer in optimizers.items():
+        outputs[mode], states[mode] = jax.jit(
+            lambda grads, state: optimizer.transform.update(grads, state, params=params)
+        )(adversarial_grad, states[mode])
+        _assert_physical_replicas_equal((outputs[mode], states[mode]))
+
+    assert float(jnp.max(jnp.abs(outputs["distributed"]["w"] - outputs["duplicated"]["w"]))) <= 6e-4
+    np.testing.assert_array_equal(
+        np.asarray(jax.device_get(jax.tree.leaves(states["distributed"])[-1])),
+        np.asarray(jax.device_get(jax.tree.leaves(states["duplicated"])[-1])),
+    )
 
 
 def test_muon_build_init_and_update_accept_nnx_model_state() -> None:
@@ -790,7 +1332,20 @@ def test_describe_optimizer_includes_muon_policy_constants() -> None:
     assert "muon_momentum=0.95" in description
     assert "muon_ns_steps=5" in description
     assert "muon_scale_mode=match_rms_adamw" in description
+    assert "muon_tp_mode=duplicated" in description
     assert "adamw_fallback=true" in description
+
+
+def test_describe_optimizer_includes_distributed_muon_tp_mode() -> None:
+    description = describe_optimizer(
+        OptimizerSpec(
+            name="muon",
+            schedule=ScheduleSpec(peak_lr=0.02),
+            muon_tp_mode="distributed",
+        )
+    )
+
+    assert "muon_tp_mode=distributed" in description
 
 
 def _tiny_spec(**overrides) -> ModelSpec:

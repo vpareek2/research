@@ -1,11 +1,11 @@
 [run]
-id = "cloud_4gpu_profile64_dense_zero2_tp_muon"
+id = "cloud_4gpu_profile64_trinity_moe_tp_ep_muon_distributed"
 seed = 123
 output_dir = "runs"
 
 [model]
-name = "decoder"
-variant = "cloud-4gpu-profile64-dense-zero2-tp-muon"
+name = "trinity"
+variant = "cloud-4gpu-profile64-trinity-moe-tp-ep-muon"
 vocab_size = 50304
 hidden_size = 1024
 intermediate_size = 4096
@@ -20,9 +20,29 @@ param_dtype = "float32"
 compute_dtype = "bfloat16"
 remat = "block"
 
+[model.trinity]
+initial_dense_layers = 2
+local_window = 1024
+local_layers_per_global = 3
+norm_policy = "afmoe_dual"
+
+[model.trinity.moe]
+num_experts = 8
+top_k = 2
+expert_intermediate_size = 2048
+num_shared_experts = 1
+route_scale = 1.0
+
+[model.trinity.moe.balance]
+name = "smebu"
+load_lr = 0.0005
+momentum = 0.5
+clamp = 2.0
+sequence_aux_loss_weight = 0.0001
+
 [optimizer]
 name = "muon"
-muon_tp_mode = "duplicated"
+muon_tp_mode = "distributed"
 weight_decay = 0.1
 grad_clip_norm = 1.0
 
@@ -60,13 +80,17 @@ precision = "bf16"
 log_every_steps = 1
 checkpoint_every_steps = 64
 
+[training.loss]
+z_loss_weight = 0.000001
+
 [mesh]
-axis_names = ["data", "fsdp", "tp"]
+axis_names = ["data", "tp", "ep"]
 axis_sizes = [1, 2, 2]
 
 [parallelism]
-mode = "zero2"
+mode = "ddp"
 tensor_parallel = true
+expert_parallel = true
 
 [profiling]
 enabled = true

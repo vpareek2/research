@@ -1,5 +1,5 @@
 [run]
-id = "cloud_4gpu_profile64_dense_zero2_tp_muon"
+id = "cloud_4gpu_profile64_dense_zero2_tp_muon_distributed"
 seed = 123
 output_dir = "runs"
 
@@ -22,7 +22,7 @@ remat = "block"
 
 [optimizer]
 name = "muon"
-muon_tp_mode = "duplicated"
+muon_tp_mode = "distributed"
 weight_decay = 0.1
 grad_clip_norm = 1.0
 

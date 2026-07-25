@@ -366,6 +366,56 @@ peak_lr = 0.0006
     assert spec.optimizer.adamw_fallback_schedule.peak_lr == 0.0006
 
 
+def test_load_config_defaults_muon_tp_mode_to_duplicated(tmp_path: Path) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(MINIMAL_CONFIG.replace('name = "adamw"', 'name = "muon"', 1))
+
+    spec = load_config(config_path)
+
+    assert spec.optimizer.muon_tp_mode == "duplicated"
+
+
+def test_load_config_accepts_distributed_muon_tp_mode(tmp_path: Path) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace(
+            'name = "adamw"\nweight_decay = 0.1',
+            'name = "muon"\nweight_decay = 0.1\nmuon_tp_mode = "distributed"',
+            1,
+        )
+    )
+
+    spec = load_config(config_path)
+
+    assert spec.optimizer.muon_tp_mode == "distributed"
+
+
+@pytest.mark.parametrize(
+    ("optimizer_name", "mode", "message"),
+    [
+        pytest.param("muon", "approximate", "muon_tp_mode", id="unknown-mode"),
+        pytest.param("adamw", "distributed", "only supported", id="non-muon"),
+    ],
+)
+def test_load_config_rejects_invalid_muon_tp_mode(
+    tmp_path: Path,
+    optimizer_name: str,
+    mode: str,
+    message: str,
+) -> None:
+    config_path = tmp_path / "jaxtitan.toml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace(
+            'name = "adamw"\nweight_decay = 0.1',
+            f'name = "{optimizer_name}"\nweight_decay = 0.1\nmuon_tp_mode = "{mode}"',
+            1,
+        )
+    )
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(config_path)
+
+
 def test_load_config_accepts_wandb_artifacts_section(tmp_path: Path) -> None:
     config_path = tmp_path / "jaxtitan.toml"
     config_path.write_text(
