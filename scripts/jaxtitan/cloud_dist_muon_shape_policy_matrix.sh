@@ -3,18 +3,40 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh [--overwrite]
+Usage:
+  scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh --phase smoke [--overwrite]
+  scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh --phase profile \
+    --smoke-gate <smoke-comparison.json> [--overwrite]
 
-Run the four 64-step shape/topology Muon acceptance layouts on one four-H100
-node. The script verifies hardware and data, dumps HLO, runs inspect/eval/
-sample, validates the archived performance gates, and packages lightweight
-evidence. Full profiler trees remain under runs/.
+Smoke runs four inexpensive eight-step correctness layouts. Profile runs the
+four 64-step acceptance layouts only after verifying a passing smoke comparison
+from the current commit. There is intentionally no implicit or combined phase.
 EOF
 }
 
 overwrite_flag=()
+phase=""
+smoke_gate=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --phase)
+      if [[ $# -lt 2 ]]; then
+        echo "--phase requires smoke or profile" >&2
+        usage >&2
+        exit 2
+      fi
+      phase="$2"
+      shift 2
+      ;;
+    --smoke-gate)
+      if [[ $# -lt 2 ]]; then
+        echo "--smoke-gate requires a comparison JSON path" >&2
+        usage >&2
+        exit 2
+      fi
+      smoke_gate="$2"
+      shift 2
+      ;;
     --overwrite)
       overwrite_flag=(--overwrite)
       shift
@@ -31,22 +53,53 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "$phase" != "smoke" && "$phase" != "profile" ]]; then
+  echo "--phase must be explicitly set to smoke or profile" >&2
+  usage >&2
+  exit 2
+fi
+if [[ "$phase" == "smoke" && -n "$smoke_gate" ]]; then
+  echo "--smoke-gate is only valid with --phase profile" >&2
+  usage >&2
+  exit 2
+fi
+if [[ "$phase" == "profile" && -z "$smoke_gate" ]]; then
+  echo "--phase profile requires --smoke-gate" >&2
+  usage >&2
+  exit 2
+fi
+
 cd "$(git rev-parse --show-toplevel)"
 
+if [[ "$phase" == "profile" ]]; then
+  uv run python scripts/jaxtitan/analyze_dist_muon_shape_policy_results.py \
+    --verify-smoke-gate "$smoke_gate" \
+    --current-commit "$(git rev-parse HEAD)"
+fi
+
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-capture_name="dist_muon_shape_policy_${timestamp}"
+capture_name="dist_muon_shape_policy_${phase}_${timestamp}"
 capture_dir="cloud_results/${capture_name}"
 hlo_root="${capture_dir}/hlo"
 log_dir="${capture_dir}/logs"
 evidence_root="${capture_dir}/runs"
 mkdir -p "$hlo_root" "$log_dir" "$evidence_root"
 
-configs=(
-  configs/jaxtitan/cloud_4gpu_profile64_dense_tp_muon_shape_policy.toml
-  configs/jaxtitan/cloud_4gpu_profile64_dense_fsdp_tp_muon_shape_policy.toml
-  configs/jaxtitan/cloud_4gpu_profile64_dense_zero2_tp_muon_shape_policy.toml
-  configs/jaxtitan/cloud_4gpu_profile64_trinity_moe_tp_ep_muon_shape_policy.toml
-)
+if [[ "$phase" == "smoke" ]]; then
+  configs=(
+    configs/jaxtitan/cloud_4gpu_smoke8_dense_tp_muon_shape_policy.toml
+    configs/jaxtitan/cloud_4gpu_smoke8_dense_fsdp_tp_muon_shape_policy.toml
+    configs/jaxtitan/cloud_4gpu_smoke8_dense_zero2_tp_muon_shape_policy.toml
+    configs/jaxtitan/cloud_4gpu_smoke8_trinity_moe_tp_ep_muon_shape_policy.toml
+  )
+else
+  configs=(
+    configs/jaxtitan/cloud_4gpu_profile64_dense_tp_muon_shape_policy.toml
+    configs/jaxtitan/cloud_4gpu_profile64_dense_fsdp_tp_muon_shape_policy.toml
+    configs/jaxtitan/cloud_4gpu_profile64_dense_zero2_tp_muon_shape_policy.toml
+    configs/jaxtitan/cloud_4gpu_profile64_trinity_moe_tp_ep_muon_shape_policy.toml
+  )
+fi
 
 marker() {
   echo
@@ -98,6 +151,10 @@ capture_run_evidence() {
   local source="runs/${run_id}"
   local destination="${evidence_root}/${run_id}"
   mkdir -p "$destination"
+  if [[ ! -d "$source" ]]; then
+    echo "missing_run_dir=${source}" > "${log_dir}/missing_run_${run_id}.txt"
+    return 0
+  fi
   for path in config.resolved.toml config diagnostics events.jsonl metrics summaries; do
     if [[ -e "${source}/${path}" ]]; then
       cp -a "${source}/${path}" "$destination/"
@@ -115,59 +172,107 @@ capture_run_evidence() {
 run_one() {
   local cfg="$1"
   local run_id
-  run_id="$(run_id_for_config "$cfg")"
+  if ! run_id="$(run_id_for_config "$cfg")"; then
+    run_id="${cfg##*/}"
+    run_id="${run_id%.toml}"
+    echo "CONFIG_ID_FAILED ${cfg}" \
+      > "${log_dir}/config_id_${run_id}.log"
+    marker "FAILED ${phase^^} ${run_id}"
+    return 1
+  fi
+  local run_status=0
 
-  marker "BEGIN PROFILE64 ${run_id}"
+  marker "BEGIN ${phase^^} ${run_id}"
   echo "CONFIG ${cfg}"
-  uv run jaxtitan config check "$cfg"
-  uv run jaxtitan run preflight "$cfg"
+  if ! uv run jaxtitan config check "$cfg"; then
+    run_status=1
+  fi
+  if [[ "$run_status" -eq 0 ]] && ! uv run jaxtitan run preflight "$cfg"; then
+    run_status=1
+  fi
 
   local run_hlo_dir="${hlo_root}/${run_id}"
   mkdir -p "$run_hlo_dir"
   local train_xla_flags="${XLA_FLAGS:-} --xla_dump_to=${run_hlo_dir} --xla_dump_hlo_as_text"
-  XLA_FLAGS="$train_xla_flags" uv run jaxtitan run train "${overwrite_flag[@]}" "$cfg" \
-    2>&1 | tee "${log_dir}/train_${run_id}.log"
-  local train_status="${PIPESTATUS[0]}"
-  if [[ "$train_status" -ne 0 ]]; then
-    marker "FAILED PROFILE64 ${run_id}"
-    exit "$train_status"
+  if [[ "$run_status" -eq 0 ]]; then
+    if XLA_FLAGS="$train_xla_flags" \
+      uv run jaxtitan run train "${overwrite_flag[@]}" "$cfg" \
+      2>&1 | tee "${log_dir}/train_${run_id}.log"; then
+      :
+    else
+      run_status="${PIPESTATUS[0]}"
+    fi
   fi
 
-  uv run jaxtitan run inspect "runs/${run_id}" \
-    2>&1 | tee "${log_dir}/inspect_${run_id}.log"
-  uv run jaxtitan eval checkpoint "runs/${run_id}" --checkpoint latest --json \
-    > "${capture_dir}/eval_${run_id}.json"
-  uv run jaxtitan sample checkpoint "runs/${run_id}" --checkpoint latest \
-    --prompt-ids "15496,11" --max-new-tokens 8 --top-k 1 --json \
-    > "${capture_dir}/sample_${run_id}.json"
-  local audit_status=0
-  if ! uv run python scripts/jaxtitan/audit_dist_muon_checkpoint.py \
-    "runs/${run_id}" --checkpoint latest \
-    --json-out "${capture_dir}/replica_audit_${run_id}.json" \
-    > "${log_dir}/replica_audit_${run_id}.log"; then
-    audit_status=1
+  if [[ "$run_status" -eq 0 ]]; then
+    if ! uv run jaxtitan run inspect "runs/${run_id}" \
+      2>&1 | tee "${log_dir}/inspect_${run_id}.log"; then
+      run_status=1
+    fi
+    if ! uv run jaxtitan eval checkpoint "runs/${run_id}" --checkpoint latest --json \
+      > "${capture_dir}/eval_${run_id}.json"; then
+      run_status=1
+    fi
+    if ! uv run jaxtitan sample checkpoint "runs/${run_id}" --checkpoint latest \
+      --prompt-ids "15496,11" --max-new-tokens 8 --top-k 1 --json \
+      > "${capture_dir}/sample_${run_id}.json"; then
+      run_status=1
+    fi
+    local audit_status=0
+    if ! uv run python scripts/jaxtitan/audit_dist_muon_checkpoint.py \
+      "runs/${run_id}" --checkpoint latest \
+      --json-out "${capture_dir}/replica_audit_${run_id}.json" \
+      > "${log_dir}/replica_audit_${run_id}.log"; then
+      audit_status=1
+      run_status=1
+    fi
+    echo "REPLICA_AUDIT_EXIT=${audit_status} ${run_id}" \
+      | tee -a "${log_dir}/replica_audit_${run_id}.log"
   fi
-  echo "REPLICA_AUDIT_EXIT=${audit_status} ${run_id}" \
-    | tee -a "${log_dir}/replica_audit_${run_id}.log"
   capture_run_evidence "$run_id"
-  marker "END PROFILE64 ${run_id}"
+  if [[ "$run_status" -eq 0 ]]; then
+    marker "END ${phase^^} ${run_id}"
+  else
+    marker "FAILED ${phase^^} ${run_id}"
+  fi
+  return "$run_status"
 }
 
 package_results() {
+  local matrix_status="$1"
   marker "ANALYZE_AND_PACKAGE"
-  uv run jaxtitan profile analyze runs --json > "${capture_dir}/profile_analysis.json"
-  uv run jaxtitan profile analyze runs > "${capture_dir}/profile_analysis.txt"
-  local analysis_status=0
-  if ! uv run python scripts/jaxtitan/analyze_dist_muon_shape_policy_results.py \
-    "${capture_dir}" --json-out "${capture_dir}/comparison.json" \
-    | tee "${capture_dir}/comparison.txt"; then
-    analysis_status=1
+  local analysis_status="$matrix_status"
+  if [[ "$phase" == "profile" && "$matrix_status" -eq 0 ]]; then
+    if ! uv run jaxtitan profile analyze runs --json \
+      > "${capture_dir}/profile_analysis.json"; then
+      analysis_status=1
+    fi
+    if ! uv run jaxtitan profile analyze runs \
+      > "${capture_dir}/profile_analysis.txt"; then
+      analysis_status=1
+    fi
+  fi
+  if [[ "$matrix_status" -eq 0 ]]; then
+    if ! uv run python scripts/jaxtitan/analyze_dist_muon_shape_policy_results.py \
+      "${capture_dir}" --phase "$phase" \
+      --json-out "${capture_dir}/comparison.json" \
+      | tee "${capture_dir}/comparison.txt"; then
+      analysis_status=1
+    fi
+  else
+    {
+      echo "phase=${phase}"
+      echo "matrix_status=${matrix_status}"
+      echo "comparison_not_run=one_or_more_runs_failed"
+    } > "${capture_dir}/matrix_failure.txt"
   fi
   {
     echo "capture=${capture_name}"
+    echo "phase=${phase}"
     echo "commit=$(git rev-parse HEAD)"
     echo "branch=$(git branch --show-current)"
     echo "created_utc=${timestamp}"
+    echo "smoke_gate=${smoke_gate}"
     echo "baseline_artifact_sha256=65fb879f2636778aa5a25d6566b1538a9ea533cfceb1439428bcdbd433d2db72"
   } > "${capture_dir}/provenance.txt"
 
@@ -183,7 +288,13 @@ marker "SETUP"
 uv sync
 capture_hardware
 prepare_data
+matrix_status=0
 for cfg in "${configs[@]}"; do
-  run_one "$cfg"
+  if ! run_one "$cfg"; then
+    matrix_status=1
+    if [[ "$phase" == "profile" ]]; then
+      break
+    fi
+  fi
 done
-package_results
+package_results "$matrix_status"

@@ -3,6 +3,95 @@
 Purpose: turn measured Jaxtitan profiles into an ordered optimization program
 without weakening correctness or adding speculative kernel surfaces.
 
+## 2026-07-24 [codex] H100 policy replay is now a local merge gate
+
+Context:
+
+- Added a tracked, sanitized replay fixture extracted from the
+  checksum-verified 76-case H100 selector artifact. It contains the 63
+  production/calibration samples, portable shape/topology inputs, accepted
+  executions, candidate timing summaries, correctness/stability gates, and
+  collective operand models.
+- Added a local replay command that invokes the real `shape_topology_v1`
+  selector. It rejects provenance drift, decision mismatches, missing or
+  nonfinite candidates, correctness/stability failures, speed/MAD failures,
+  invalid duplicated fallback, and selections outside the original 3%
+  simplicity tie band.
+- The replay output explicitly records `performance_claim=false`. Its aggregate
+  summaries are regression evidence from the archived microbenchmark, not
+  predictions of training-step latency.
+- Split the cloud workflow into an explicit eight-step smoke phase and a
+  separately authorized 64-step profile phase. No selector, Muon numerics,
+  optimizer state, or training hot path changed.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+uv run python scripts/jaxtitan/replay_dist_muon_shape_policy.py \
+  --json-out /tmp/dist_muon_shape_policy_replay.json
+
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_dist_muon_shape_policy_replay.py \
+  tests/jaxtitan/test_dist_muon_shape_policy_staging.py \
+  tests/jaxtitan/test_dist_muon_shape_policy_analysis.py
+
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_dist_muon_shape_policy_replay.py \
+  tests/jaxtitan/test_dist_muon_shape_policy_staging.py \
+  tests/jaxtitan/test_dist_muon_shape_policy_analysis.py \
+  tests/jaxtitan/test_dist_muon_checkpoint_audit.py \
+  tests/jaxtitan/test_config.py \
+  tests/jaxtitan/test_checkpoints.py \
+  tests/jaxtitan/test_checkpoint_eval.py \
+  tests/jaxtitan/test_checkpoint_sample.py \
+  tests/jaxtitan/test_resume_compat.py \
+  tests/jaxtitan/test_optim.py
+
+uv run pytest -q tests/jaxtitan
+uv run python -m py_compile \
+  scripts/jaxtitan/replay_dist_muon_shape_policy.py \
+  scripts/jaxtitan/analyze_dist_muon_shape_policy_results.py \
+  scripts/jaxtitan/audit_dist_muon_checkpoint.py
+bash -n scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh
+git diff --check
+```
+
+Artifacts:
+
+- Replay fixture:
+  `scripts/jaxtitan/dist_muon_shape_policy_h100_v1.json`.
+- Replay command:
+  `scripts/jaxtitan/replay_dist_muon_shape_policy.py`.
+- Source artifact:
+  `cloud_results/dist_muon_leaf_bench_20260724T215030Z.tgz`.
+- Source SHA-256:
+  `27fddd04d51cdb9f3262a3a074a2f319e8bf0f880ba80851d3a546a5bef6b1e6`.
+- Local replay output:
+  `/tmp/dist_muon_shape_policy_replay.json`.
+
+Result:
+
+- Replay gate: `63/63` decisions matched, `overall_gate=True`.
+- Informational archived-calibration summaries: `1.444x` geometric mean versus
+  duplicated, `1.009x` versus the previous execution, and `1.041x` worst
+  measured regret. These are not end-to-end performance claims.
+- Final replay/staging/analyzer tests: `61 passed`.
+- Broader optimizer/config/checkpoint/resume gate: `323 passed`.
+- Full Jaxtitan suite: `791 passed, 1 skipped`.
+- Fixture regeneration is byte-identical, all eight smoke/profile configs
+  validate, Python compilation, shell syntax, and `git diff --check` pass.
+- No cloud command was run and no new GPU throughput claim exists.
+
+Next:
+
+- Run only the smoke phase first. Launch the 64-step profiles only when the
+  smoke comparison passes and matches the exact current commit. PR #21 remains
+  draft until the H100 profile acceptance gates pass.
+
 ## 2026-07-24 [codex] Shape-policy acceptance harness hardened
 
 Context:

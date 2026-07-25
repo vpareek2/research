@@ -73,7 +73,9 @@ def _plans(*, replicas: bool) -> list[dict[str, object]]:
     ]
 
 
-def _diagnostics() -> dict[str, dict[str, object]]:
+def _diagnostics(
+    run_specs=MODULE.RUNS,
+) -> dict[str, dict[str, object]]:
     return {
         run_id: {
             "optimizer": {
@@ -84,7 +86,7 @@ def _diagnostics() -> dict[str, dict[str, object]]:
                 }
             }
         }
-        for layout, run_id, _current, _duplicated in MODULE.RUNS
+        for layout, run_id, _current, _duplicated in run_specs
     }
 
 
@@ -128,8 +130,13 @@ def _write_json(path: Path, payload: object) -> None:
 def _write_capture(
     root: Path,
     diagnostics: dict[str, dict[str, object]],
+    *,
+    run_specs=MODULE.RUNS,
+    train_steps: tuple[int, ...] = (65,),
+    checkpoint_step: int = 65,
 ) -> None:
-    for layout, run_id, _current, _duplicated in MODULE.RUNS:
+    checkpoint_path = f"checkpoints/{checkpoint_step:06d}"
+    for layout, run_id, _current, _duplicated in run_specs:
         run_root = root / "runs" / run_id
         _write_json(
             run_root / "summaries" / "final.json",
@@ -143,23 +150,24 @@ def _write_capture(
         )
         metrics = run_root / "metrics" / "train.jsonl"
         metrics.parent.mkdir(parents=True, exist_ok=True)
-        metrics.write_text(json.dumps(_train_row()) + "\n", encoding="utf-8")
+        metrics.write_text(
+            "".join(
+                json.dumps({**_train_row(), "step": step}) + "\n"
+                for step in train_steps
+            ),
+            encoding="utf-8",
+        )
         _write_json(
             run_root / "checkpoints" / "index.json",
             {
                 "schema_version": 1,
-                "latest_step": 65,
-                "latest_checkpoint_path": "checkpoints/000065",
+                "latest_step": checkpoint_step,
+                "latest_checkpoint_path": checkpoint_path,
                 "records": [
                     {
-                        "step": 64,
+                        "step": checkpoint_step,
                         "retained": True,
-                        "checkpoint_path": "checkpoints/000064",
-                    },
-                    {
-                        "step": 65,
-                        "retained": True,
-                        "checkpoint_path": "checkpoints/000065",
+                        "checkpoint_path": checkpoint_path,
                     },
                 ],
             },
@@ -170,8 +178,8 @@ def _write_capture(
                 "run_id": run_id,
                 "status": "completed",
                 "checkpoint": {
-                    "step": 65,
-                    "path": "checkpoints/000065",
+                    "step": checkpoint_step,
+                    "path": checkpoint_path,
                     "runtime_fingerprint": "fingerprint",
                 },
                 "eval": {"loss": 4.1, "token_count": 4096},
@@ -183,8 +191,8 @@ def _write_capture(
                 "run_id": run_id,
                 "status": "completed",
                 "checkpoint": {
-                    "step": 65,
-                    "path": "checkpoints/000065",
+                    "step": checkpoint_step,
+                    "path": checkpoint_path,
                     "runtime_fingerprint": "fingerprint",
                     "selector": "latest",
                 },
@@ -201,8 +209,8 @@ def _write_capture(
                 "schema_version": 1,
                 "run_id": run_id,
                 "checkpoint": {
-                    "step": 65,
-                    "path": "checkpoints/000065",
+                    "step": checkpoint_step,
+                    "path": checkpoint_path,
                     "runtime_fingerprint": "fingerprint",
                 },
                 "sections": {
@@ -276,10 +284,18 @@ def _collective(
 def _artifact_results(
     capture: Path,
     diagnostics: dict[str, dict[str, object]],
+    *,
+    run_specs=MODULE.RUNS,
+    minimum_train_rows: int | None = None,
 ) -> dict[str, dict[str, object]]:
     return {
-        run_id: MODULE.analyze_run_artifacts(capture, run_id, diagnostics[run_id])
-        for _layout, run_id, _current, _duplicated in MODULE.RUNS
+        run_id: MODULE.analyze_run_artifacts(
+            capture,
+            run_id,
+            diagnostics[run_id],
+            minimum_train_rows=minimum_train_rows,
+        )
+        for _layout, run_id, _current, _duplicated in run_specs
     }
 
 
@@ -297,6 +313,141 @@ def test_shape_policy_analysis_accepts_complete_capture(tmp_path: Path) -> None:
     assert payload["overall_gate"] is True
     assert payload["geomean_speedup_vs_current"] == pytest.approx(1.0 / 0.95)
     assert all(row["gate"] for row in payload["layouts"])
+
+
+def test_shape_policy_smoke_accepts_eight_step_four_layout_capture(
+    tmp_path: Path,
+) -> None:
+    run_specs = MODULE._phase_run_specs("smoke")
+    diagnostics = _diagnostics(run_specs)
+    _write_capture(
+        tmp_path,
+        diagnostics,
+        run_specs=run_specs,
+        train_steps=tuple(range(1, 9)),
+        checkpoint_step=8,
+    )
+
+    payload = MODULE.compare_shape_policy_results(
+        {"runs": []},
+        diagnostics=diagnostics,
+        artifact_gate=_artifact_results(
+            tmp_path,
+            diagnostics,
+            run_specs=run_specs,
+            minimum_train_rows=8,
+        ),
+        phase="smoke",
+        source_commit="a" * 40,
+    )
+
+    assert payload["phase"] == "smoke"
+    assert payload["source_commit"] == "a" * 40
+    assert payload["commit_gate"] is True
+    assert payload["geomean_speedup_vs_current"] is None
+    assert payload["geomean_gate"] is None
+    assert payload["overall_gate"] is True
+    assert all(row["performance_gate"] is None for row in payload["layouts"])
+
+
+def test_shape_policy_smoke_rejects_short_training_capture(tmp_path: Path) -> None:
+    run_specs = MODULE._phase_run_specs("smoke")
+    diagnostics = _diagnostics(run_specs)
+    _write_capture(
+        tmp_path,
+        diagnostics,
+        run_specs=run_specs,
+        train_steps=tuple(range(1, 8)),
+        checkpoint_step=7,
+    )
+
+    artifacts = _artifact_results(
+        tmp_path,
+        diagnostics,
+        run_specs=run_specs,
+        minimum_train_rows=8,
+    )
+    payload = MODULE.compare_shape_policy_results(
+        {"runs": []},
+        diagnostics=diagnostics,
+        artifact_gate=artifacts,
+        phase="smoke",
+        source_commit="a" * 40,
+    )
+
+    assert payload["overall_gate"] is False
+    assert all(row["artifact_gate"] is False for row in payload["layouts"])
+    assert all(
+        "require at least 8" in " ".join(row["failures"])
+        for row in payload["layouts"]
+    )
+
+
+def test_shape_policy_smoke_rejects_missing_source_commit(tmp_path: Path) -> None:
+    run_specs = MODULE._phase_run_specs("smoke")
+    diagnostics = _diagnostics(run_specs)
+    _write_capture(
+        tmp_path,
+        diagnostics,
+        run_specs=run_specs,
+        train_steps=tuple(range(1, 9)),
+        checkpoint_step=8,
+    )
+
+    payload = MODULE.compare_shape_policy_results(
+        {"runs": []},
+        diagnostics=diagnostics,
+        artifact_gate=_artifact_results(
+            tmp_path,
+            diagnostics,
+            run_specs=run_specs,
+            minimum_train_rows=8,
+        ),
+        phase="smoke",
+    )
+
+    assert payload["commit_gate"] is False
+    assert payload["overall_gate"] is False
+
+
+@pytest.mark.parametrize("corruption", ("missing_replica_audit", "missing_hlo"))
+def test_shape_policy_smoke_rejects_artifact_or_hlo_failure(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    run_specs = MODULE._phase_run_specs("smoke")
+    diagnostics = _diagnostics(run_specs)
+    _write_capture(
+        tmp_path,
+        diagnostics,
+        run_specs=run_specs,
+        train_steps=tuple(range(1, 9)),
+        checkpoint_step=8,
+    )
+    _layout, run_id, _current, _duplicated = run_specs[1]
+    if corruption == "missing_replica_audit":
+        (tmp_path / f"replica_audit_{run_id}.json").unlink()
+    else:
+        for path in (tmp_path / "hlo" / run_id).iterdir():
+            path.unlink()
+
+    payload = MODULE.compare_shape_policy_results(
+        {"runs": []},
+        diagnostics=diagnostics,
+        artifact_gate=_artifact_results(
+            tmp_path,
+            diagnostics,
+            run_specs=run_specs,
+            minimum_train_rows=8,
+        ),
+        phase="smoke",
+        source_commit="a" * 40,
+    )
+
+    assert payload["overall_gate"] is False
+    failed = next(row for row in payload["layouts"] if row["run_id"] == run_id)
+    assert failed["artifact_gate"] is False
+    assert failed["failures"]
 
 
 def test_shape_policy_analysis_rejects_one_current_regression(tmp_path: Path) -> None:

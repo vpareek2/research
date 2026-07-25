@@ -3,6 +3,82 @@
 Purpose: track what must be validated on cloud GPUs and what local work must
 finish before spending cloud time.
 
+## 2026-07-24 [codex] Shape-policy H100 spend is gated by local replay and smoke
+
+Context:
+
+- Added a free local replay gate over 63 checksum-derived H100
+  shape/topology samples. It runs the production selector without timing fake
+  CPU devices and makes no end-to-end performance claim.
+- Added four matched eight-step smoke configs for dense TP, FSDP+TP, ZeRO2+TP,
+  and Trinity TP+EP. They differ from the profile configs only in run ID,
+  schedule/token budget, checkpoint/eval cadence, and disabled profiling.
+- The cloud runner now requires `--phase smoke` or `--phase profile`; there is
+  no combined phase. Profile mode refuses to start unless supplied a passing
+  four-layout smoke comparison whose full Git SHA equals current `HEAD`.
+- Smoke reuses the complete metrics, optimizer-group, HLO, checkpoint,
+  eval/sample, and exact replica-audit gates. It applies no performance
+  threshold. No cloud command was run in this entry.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+uv run python scripts/jaxtitan/replay_dist_muon_shape_policy.py \
+  --json-out /tmp/dist_muon_shape_policy_replay.json
+
+scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh \
+  --phase smoke \
+  --overwrite
+```
+
+Only after the smoke command reports `overall_gate=True`, run:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh \
+  --phase profile \
+  --smoke-gate \
+  cloud_results/dist_muon_shape_policy_smoke_<timestamp>/comparison.json \
+  --overwrite
+```
+
+Artifacts:
+
+- Local fixture:
+  `scripts/jaxtitan/dist_muon_shape_policy_h100_v1.json`.
+- Source SHA-256:
+  `27fddd04d51cdb9f3262a3a074a2f319e8bf0f880ba80851d3a546a5bef6b1e6`.
+- Smoke capture:
+  `cloud_results/dist_muon_shape_policy_smoke_<timestamp>/`.
+- Smoke bundle:
+  `cloud_results/dist_muon_shape_policy_smoke_<timestamp>_lightweight.tgz`.
+- Required profile authorization:
+  `cloud_results/dist_muon_shape_policy_smoke_<timestamp>/comparison.json`.
+- Profile capture:
+  `cloud_results/dist_muon_shape_policy_profile_<timestamp>/`.
+
+Result:
+
+- Local replay: `63/63`, `overall_gate=True`,
+  `performance_claim=false`.
+- Final replay/staging/analyzer tests: `61 passed`.
+- Broader optimizer/config/checkpoint/resume gate: `323 passed`.
+- Full Jaxtitan suite: `791 passed, 1 skipped`.
+- The runner rejects an omitted phase, a profile phase without a smoke gate,
+  incomplete/failed four-layout evidence, a policy mismatch, and a stale or
+  abbreviated commit SHA.
+- No H100 smoke or profile result exists yet.
+
+Next:
+
+- Rent four H100 80GB GPUs for the smoke phase only. If it fails, bring back
+  the lightweight evidence and stop the instance; do not launch profiles.
+- If smoke passes, the same-commit profile command may run. The existing
+  per-layout and geometric-mean H100 thresholds remain the final PR gate.
+
 ## 2026-07-24 [codex] Shape-policy cloud gate now audits restored state
 
 Context:

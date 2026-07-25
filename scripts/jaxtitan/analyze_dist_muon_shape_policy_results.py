@@ -40,6 +40,14 @@ RUNS = (
         0.2657243455000753,
     ),
 )
+SMOKE_RUNS = (
+    ("dense_tp", "cloud_4gpu_smoke8_dense_tp_muon_shape_policy"),
+    ("dense_fsdp_tp", "cloud_4gpu_smoke8_dense_fsdp_tp_muon_shape_policy"),
+    ("dense_zero2_tp", "cloud_4gpu_smoke8_dense_zero2_tp_muon_shape_policy"),
+    ("trinity_tp_ep", "cloud_4gpu_smoke8_trinity_moe_tp_ep_muon_shape_policy"),
+)
+COMPARISON_SCHEMA_VERSION = 2
+SMOKE_MINIMUM_TRAIN_ROWS = 8
 MAX_CURRENT_REGRESSION = 1.01
 MIN_DUPLICATED_SPEEDUP = 1.05
 MIN_GEOMEAN_CURRENT_SPEEDUP = 1.02
@@ -78,44 +86,104 @@ _OP_PATTERN = re.compile(r'muon_op="([^"]+)"')
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("capture", help="Capture directory produced by the shape-policy cloud runner.")
+    parser.add_argument(
+        "capture",
+        nargs="?",
+        help="Capture directory produced by the shape-policy cloud runner.",
+    )
+    parser.add_argument("--phase", choices=("smoke", "profile"))
     parser.add_argument("--json-out", help="Optional machine-readable output path.")
+    parser.add_argument(
+        "--verify-smoke-gate",
+        help="Validate a smoke comparison before launching profile work.",
+    )
+    parser.add_argument(
+        "--current-commit",
+        help="Current 40-character Git commit for smoke-gate verification.",
+    )
     args = parser.parse_args()
 
+    if args.verify_smoke_gate:
+        if args.capture or args.phase or args.json_out:
+            parser.error(
+                "--verify-smoke-gate cannot be combined with capture, --phase, or --json-out"
+            )
+        if not args.current_commit:
+            parser.error("--verify-smoke-gate requires --current-commit")
+        gate = verify_smoke_gate(
+            _load_json(Path(args.verify_smoke_gate)),
+            current_commit=args.current_commit,
+        )
+        for failure in gate["failures"]:
+            print(f"- {failure}")
+        print(f"smoke_gate={gate['gate']}")
+        return 0 if gate["gate"] else 1
+    if not args.capture or not args.phase:
+        parser.error("capture and --phase are required for capture analysis")
+
     capture = Path(args.capture)
-    analysis = _load_json(capture / "profile_analysis.json")
+    run_specs = _phase_run_specs(args.phase)
+    analysis = (
+        _load_json(capture / "profile_analysis.json")
+        if args.phase == "profile"
+        else {"runs": []}
+    )
     diagnostics = {
         run_id: _load_json(
             capture / "runs" / run_id / "diagnostics" / "runtime.json"
         )
-        for _layout, run_id, _current, _duplicated in RUNS
+        for _layout, run_id, _current, _duplicated in run_specs
     }
     artifact_gate = {
-        run_id: analyze_run_artifacts(capture, run_id, diagnostics[run_id])
-        for _layout, run_id, _current, _duplicated in RUNS
+        run_id: analyze_run_artifacts(
+            capture,
+            run_id,
+            diagnostics[run_id],
+            minimum_train_rows=(
+                SMOKE_MINIMUM_TRAIN_ROWS if args.phase == "smoke" else None
+            ),
+        )
+        for _layout, run_id, _current, _duplicated in run_specs
     }
     payload = compare_shape_policy_results(
         analysis,
         diagnostics=diagnostics,
         artifact_gate=artifact_gate,
+        phase=args.phase,
+        source_commit=_read_source_commit(capture),
     )
     if args.json_out:
         output = Path(args.json_out)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
-    print("layout              candidate ms  vs current  vs duplicated  gate")
-    for row in payload["layouts"]:
+    if args.phase == "profile":
+        print("layout              candidate ms  vs current  vs duplicated  gate")
+        for row in payload["layouts"]:
+            print(
+                f"{row['layout']:<20} "
+                f"{row['candidate_train_step_sec'] * 1000.0:>12.1f} "
+                f"{row['speedup_vs_current']:>10.3f}x "
+                f"{row['speedup_vs_duplicated']:>13.3f}x "
+                f"{str(row['gate']):<5}"
+            )
+            for failure in row["failures"]:
+                print(f"  - {failure}")
         print(
-            f"{row['layout']:<20} "
-            f"{row['candidate_train_step_sec'] * 1000.0:>12.1f} "
-            f"{row['speedup_vs_current']:>10.3f}x "
-            f"{row['speedup_vs_duplicated']:>13.3f}x "
-            f"{str(row['gate']):<5}"
+            "geomean_speedup_vs_current="
+            f"{payload['geomean_speedup_vs_current']:.3f}x"
         )
-        for failure in row["failures"]:
-            print(f"  - {failure}")
-    print(f"geomean_speedup_vs_current={payload['geomean_speedup_vs_current']:.3f}x")
+    else:
+        print("layout              policy  artifacts  gate")
+        for row in payload["layouts"]:
+            print(
+                f"{row['layout']:<20} "
+                f"{str(row['policy_gate']):<7} "
+                f"{str(row['artifact_gate']):<10} "
+                f"{str(row['gate']):<5}"
+            )
+            for failure in row["failures"]:
+                print(f"  - {failure}")
     print(f"overall_gate={payload['overall_gate']}")
     return 0 if payload["overall_gate"] else 1
 
@@ -125,75 +193,174 @@ def compare_shape_policy_results(
     *,
     diagnostics: Mapping[str, dict[str, Any]],
     artifact_gate: Mapping[str, Mapping[str, Any]],
+    phase: str = "profile",
+    source_commit: str | None = None,
 ) -> dict[str, Any]:
+    if phase not in {"smoke", "profile"}:
+        raise ValueError(f"unsupported shape-policy acceptance phase {phase!r}")
+    run_specs = _phase_run_specs(phase)
     runs = {run["run_id"]: run for run in analysis["runs"]}
     rows = []
-    for layout, run_id, current_sec, duplicated_sec in RUNS:
-        run = _required_run(runs, run_id)
-        candidate_sec = _steady_train_step(run)
-        speedup_vs_current = current_sec / candidate_sec
-        speedup_vs_duplicated = duplicated_sec / candidate_sec
-        profile_gate = (
-            run.get("status") == "completed"
-            and run["steady"].get("start_step") == 16
-            and run["steady"].get("end_step") == 63
-            and run["steady"].get("row_count") == 48
-        )
+    for layout, run_id, current_sec, duplicated_sec in run_specs:
         policy = analyze_policy_metadata(diagnostics[run_id])
         artifacts = dict(artifact_gate[run_id])
-        layout_gate = (
-            candidate_sec <= current_sec * MAX_CURRENT_REGRESSION
-            and speedup_vs_duplicated >= MIN_DUPLICATED_SPEEDUP
-        )
         failures = []
-        if not profile_gate:
-            failures.append("steady profile must contain completed steps 16-63 (48 rows)")
         failures.extend(policy["failures"])
         failures.extend(artifacts["failures"])
-        if candidate_sec > current_sec * MAX_CURRENT_REGRESSION:
-            failures.append("candidate is more than 1% slower than current distributed")
-        if speedup_vs_duplicated < MIN_DUPLICATED_SPEEDUP:
-            failures.append("candidate is less than 5% faster than duplicated")
-        row_gate = profile_gate and policy["gate"] and artifacts["gate"] and layout_gate
-        rows.append(
-            {
-                "layout": layout,
-                "run_id": run_id,
-                "candidate_train_step_sec": candidate_sec,
-                "current_distributed_train_step_sec": current_sec,
-                "duplicated_train_step_sec": duplicated_sec,
-                "speedup_vs_current": speedup_vs_current,
-                "speedup_vs_duplicated": speedup_vs_duplicated,
-                "profile_gate": profile_gate,
-                "policy_gate": policy["gate"],
-                "artifact_gate": artifacts["gate"],
-                "performance_gate": layout_gate,
-                "policy": policy,
-                "artifacts": artifacts,
-                "failures": failures,
-                "gate": row_gate,
-            }
+        row = {
+            "layout": layout,
+            "run_id": run_id,
+            "policy_gate": policy["gate"],
+            "artifact_gate": artifacts["gate"],
+            "policy": policy,
+            "artifacts": artifacts,
+        }
+        if phase == "profile":
+            assert current_sec is not None and duplicated_sec is not None
+            run = _required_run(runs, run_id)
+            candidate_sec = _steady_train_step(run)
+            speedup_vs_current = current_sec / candidate_sec
+            speedup_vs_duplicated = duplicated_sec / candidate_sec
+            profile_gate = (
+                run.get("status") == "completed"
+                and run["steady"].get("start_step") == 16
+                and run["steady"].get("end_step") == 63
+                and run["steady"].get("row_count") == 48
+            )
+            performance_gate = (
+                candidate_sec <= current_sec * MAX_CURRENT_REGRESSION
+                and speedup_vs_duplicated >= MIN_DUPLICATED_SPEEDUP
+            )
+            if not profile_gate:
+                failures.append(
+                    "steady profile must contain completed steps 16-63 (48 rows)"
+                )
+            if candidate_sec > current_sec * MAX_CURRENT_REGRESSION:
+                failures.append(
+                    "candidate is more than 1% slower than current distributed"
+                )
+            if speedup_vs_duplicated < MIN_DUPLICATED_SPEEDUP:
+                failures.append("candidate is less than 5% faster than duplicated")
+            row.update(
+                {
+                    "candidate_train_step_sec": candidate_sec,
+                    "current_distributed_train_step_sec": current_sec,
+                    "duplicated_train_step_sec": duplicated_sec,
+                    "speedup_vs_current": speedup_vs_current,
+                    "speedup_vs_duplicated": speedup_vs_duplicated,
+                    "profile_gate": profile_gate,
+                    "performance_gate": performance_gate,
+                }
+            )
+            row_gate = (
+                profile_gate
+                and policy["gate"]
+                and artifacts["gate"]
+                and performance_gate
+            )
+        else:
+            row["performance_gate"] = None
+            row_gate = policy["gate"] and artifacts["gate"]
+        row["failures"] = failures
+        row["gate"] = row_gate
+        rows.append(row)
+    if phase == "profile":
+        geomean = math.exp(
+            sum(math.log(row["speedup_vs_current"]) for row in rows) / len(rows)
         )
-    geomean = math.exp(
-        sum(math.log(row["speedup_vs_current"]) for row in rows) / len(rows)
+        geomean_gate = geomean >= MIN_GEOMEAN_CURRENT_SPEEDUP
+    else:
+        geomean = None
+        geomean_gate = None
+    commit_gate = (
+        phase != "smoke"
+        or (
+            isinstance(source_commit, str)
+            and re.fullmatch(r"[0-9a-f]{40}", source_commit) is not None
+        )
     )
-    geomean_gate = geomean >= MIN_GEOMEAN_CURRENT_SPEEDUP
     return {
-        "schema_version": 2,
+        "schema_version": COMPARISON_SCHEMA_VERSION,
+        "phase": phase,
         "policy_version": POLICY_VERSION,
+        "source_commit": source_commit,
         "baseline_artifact_sha256": BASELINE_ARTIFACT_SHA256,
         "gate_contract": {
             "maximum_current_regression": MAX_CURRENT_REGRESSION,
             "minimum_duplicated_speedup": MIN_DUPLICATED_SPEEDUP,
             "minimum_geomean_current_speedup": MIN_GEOMEAN_CURRENT_SPEEDUP,
             "steady_steps": [16, 63],
+            "smoke_minimum_train_rows": SMOKE_MINIMUM_TRAIN_ROWS,
             "persistent_replica_max_abs_diff": 0.0,
         },
         "layouts": rows,
         "geomean_speedup_vs_current": geomean,
         "geomean_gate": geomean_gate,
-        "overall_gate": geomean_gate and all(row["gate"] for row in rows),
+        "commit_gate": commit_gate,
+        "overall_gate": (
+            commit_gate
+            and all(row["gate"] for row in rows)
+            and (geomean_gate is not False)
+        ),
     }
+
+
+def verify_smoke_gate(
+    payload: Mapping[str, Any],
+    *,
+    current_commit: str,
+) -> dict[str, Any]:
+    failures = []
+    if re.fullmatch(r"[0-9a-f]{40}", current_commit) is None:
+        failures.append("current commit is not a 40-character lowercase Git SHA")
+    if payload.get("schema_version") != COMPARISON_SCHEMA_VERSION:
+        failures.append(
+            f"smoke comparison schema must equal {COMPARISON_SCHEMA_VERSION}"
+        )
+    if payload.get("phase") != "smoke":
+        failures.append("comparison phase is not smoke")
+    if payload.get("policy_version") != POLICY_VERSION:
+        failures.append(f"smoke policy version is not {POLICY_VERSION}")
+    if (
+        not isinstance(payload.get("source_commit"), str)
+        or re.fullmatch(r"[0-9a-f]{40}", payload["source_commit"]) is None
+    ):
+        failures.append("smoke comparison source_commit is not a full Git SHA")
+    elif payload.get("source_commit") != current_commit:
+        failures.append("smoke comparison commit does not match current HEAD")
+    if payload.get("overall_gate") is not True:
+        failures.append("smoke comparison overall_gate is not true")
+    layouts = payload.get("layouts")
+    expected_layouts = {layout for layout, _run_id in SMOKE_RUNS}
+    if not isinstance(layouts, list):
+        failures.append("smoke comparison layouts must be a list")
+    else:
+        observed_layouts = {
+            row.get("layout")
+            for row in layouts
+            if isinstance(row, Mapping)
+        }
+        if observed_layouts != expected_layouts or len(layouts) != len(SMOKE_RUNS):
+            failures.append("smoke comparison does not contain exactly all four layouts")
+        if any(
+            not isinstance(row, Mapping) or row.get("gate") is not True
+            for row in layouts
+        ):
+            failures.append("one or more smoke layouts did not pass")
+    return _gate_payload(failures)
+
+
+def _phase_run_specs(
+    phase: str,
+) -> tuple[tuple[str, str, float | None, float | None], ...]:
+    if phase == "profile":
+        return RUNS
+    if phase == "smoke":
+        return tuple(
+            (layout, run_id, None, None)
+            for layout, run_id in SMOKE_RUNS
+        )
+    raise ValueError(f"unsupported shape-policy acceptance phase {phase!r}")
 
 
 def analyze_policy_metadata(diagnostics: dict[str, Any]) -> dict[str, Any]:
@@ -235,10 +402,13 @@ def analyze_run_artifacts(
     capture: Path,
     run_id: str,
     diagnostics: dict[str, Any],
+    *,
+    minimum_train_rows: int | None = None,
 ) -> dict[str, Any]:
     checks: dict[str, dict[str, Any]] = {}
     checks["metrics"] = _metrics_gate(
-        capture / "runs" / run_id / "metrics" / "train.jsonl"
+        capture / "runs" / run_id / "metrics" / "train.jsonl",
+        minimum_rows=minimum_train_rows,
     )
     checks["final"] = _final_gate(
         capture / "runs" / run_id / "summaries" / "final.json",
@@ -268,10 +438,18 @@ def analyze_run_artifacts(
     }
 
 
-def _metrics_gate(path: Path) -> dict[str, Any]:
+def _metrics_gate(
+    path: Path,
+    *,
+    minimum_rows: int | None = None,
+) -> dict[str, Any]:
     rows, failures = _load_jsonl_checked(path, "train metrics")
     if failures:
         return _gate_payload(failures, row_count=0)
+    if minimum_rows is not None and len(rows) < minimum_rows:
+        failures.append(
+            f"training metrics contain {len(rows)} rows, require at least {minimum_rows}"
+        )
     steps = []
     for index, row in enumerate(rows):
         prefix = f"row {index}"
@@ -719,6 +897,14 @@ def _steady_train_step(run: dict[str, Any]) -> float:
             f"run {run.get('run_id')!r} has no positive finite steady train_step_sec"
         )
     return float(value)
+
+
+def _read_source_commit(capture: Path) -> str | None:
+    path = capture / "commit.txt"
+    if not path.is_file():
+        return None
+    value = path.read_text(encoding="utf-8").strip()
+    return value or None
 
 
 def _load_json(path: Path) -> dict[str, Any]:
