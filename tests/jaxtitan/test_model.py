@@ -967,6 +967,33 @@ def test_apply_model_output_uses_tensor_parallel_context() -> None:
     assert getattr(actual.logits, "sharding", None).spec == P("data", None, "tp")
 
 
+@pytest.mark.parametrize("axis_name", ["tp", "cp"])
+def test_distributed_model_preserves_bfloat16_compute_dtype(axis_name: str) -> None:
+    mesh = Mesh(np.asarray(jax.devices()[:2], dtype=object).reshape((1, 2)), ("data", axis_name))
+    result = build_model(_tiny_spec(param_dtype="float32", compute_dtype="bfloat16"), seed=0)
+    input_spec = P("data", axis_name if axis_name == "cp" else None)
+    input_ids = jax.device_put(
+        jnp.arange(16, dtype=jnp.int32).reshape(2, 8),
+        NamedSharding(mesh, input_spec),
+    )
+    expected = apply_model_output(result.graph, result.state, input_ids)
+    execution = (
+        ModelExecutionContext(tensor_parallel_mesh=mesh)
+        if axis_name == "tp"
+        else ModelExecutionContext(context_parallel_mesh=mesh)
+    )
+
+    actual = apply_model_output(
+        result.graph,
+        result.state,
+        input_ids,
+        execution=execution,
+    )
+
+    assert actual.logits.dtype == expected.logits.dtype == jnp.bfloat16
+    assert jnp.allclose(actual.logits, expected.logits, atol=2e-2)
+
+
 def test_apply_model_output_uses_context_parallel_context() -> None:
     mesh = Mesh(np.asarray(jax.devices()[:2], dtype=object).reshape((1, 2)), ("data", "cp"))
     result = build_model(_tiny_spec(compute_dtype="float32"), seed=0)
