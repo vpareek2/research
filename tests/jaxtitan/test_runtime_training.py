@@ -820,10 +820,33 @@ def test_run_training_auto_resolves_sharded_muon_to_dion2(
     assert metadata["compatibility"]["parallelism"]["mode"] == mode
 
 
-def test_run_training_auto_resolves_tensor_parallel_muon_to_exact_distributed_muon(
+@pytest.mark.parametrize(
+    ("muon_tp_mode", "expected_executions", "expected_exact", "expected_status"),
+    [
+        pytest.param(
+            "duplicated",
+            {"duplicated"},
+            True,
+            "four_h100_acceptance_passed",
+            id="duplicated",
+        ),
+        pytest.param(
+            "distributed",
+            {"distributed_direct", "distributed_exchange"},
+            False,
+            "local_fake_device_acceptance_passed",
+            id="distributed",
+        ),
+    ],
+)
+def test_run_training_auto_resolves_tensor_parallel_muon(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     prepared_dataset_factory,
+    muon_tp_mode: str,
+    expected_executions: set[str],
+    expected_exact: bool,
+    expected_status: str,
 ) -> None:
     require_fake_devices()
     monkeypatch.chdir(tmp_path)
@@ -840,6 +863,7 @@ def test_run_training_auto_resolves_tensor_parallel_muon_to_exact_distributed_mu
             log_every_steps=1,
             checkpoint_every_steps=1,
             optimizer_name="muon",
+            muon_tp_mode=muon_tp_mode,
             hidden_size=16,
             intermediate_size=32,
             num_heads=4,
@@ -860,19 +884,22 @@ def test_run_training_auto_resolves_tensor_parallel_muon_to_exact_distributed_mu
     metadata = json.loads((run_dir / "checkpoints" / "000001" / "metadata" / "metadata").read_text())
 
     assert diagnostics["optimizer"]["name"] == "muon"
-    assert diagnostics["optimizer"]["route_counts"] == {"adamw": 7, "dist_muon_exact": 7}
+    assert diagnostics["optimizer"]["route_counts"] == {"adamw": 7, "dist_muon": 7}
     assert diagnostics["optimizer"]["auto_routing"]["active"] is True
-    assert diagnostics["optimizer"]["dist_muon_exact"]["exact"] is True
-    assert diagnostics["optimizer"]["dist_muon_exact"]["correctness_status"] == "four_h100_acceptance_passed"
-    assert row["optimizer_route_backend_counts"] == {"adamw": 7, "dist_muon_exact": 7}
+    assert diagnostics["optimizer"]["dist_muon"]["exact"] is expected_exact
+    assert diagnostics["optimizer"]["dist_muon"]["correctness_status"] == expected_status
+    leaf_plans = diagnostics["optimizer"]["dist_muon"]["leaf_execution_plans"]
+    assert len(leaf_plans) == 7
+    assert {plan["execution"] for plan in leaf_plans} == expected_executions
+    assert row["optimizer_route_backend_counts"] == {"adamw": 7, "dist_muon": 7}
     assert final["final_optimizer_route_backend_counts"] == row["optimizer_route_backend_counts"]
     assert metadata["compatibility"]["optimizer"]["policy"]["auto_routing"] == {
         "active": True,
         "muon_sharded_matrix_backend": "dion2",
-        "muon_tp_sharded_matrix_backend": "dist_muon_exact",
+        "muon_tp_sharded_matrix_backend": "dist_muon",
     }
     assert metadata["compatibility"]["parallelism"]["tensor_parallel"] is True
-    assert metadata["compatibility"]["parallelism"]["tensor_parallel_policy"]["optimizer"] == "muon_routes_to_dist_muon_exact"
+    assert metadata["compatibility"]["parallelism"]["tensor_parallel_policy"]["optimizer"] == "muon_routes_to_dist_muon"
 
 
 def test_run_training_with_gradient_accumulation_records_effective_batch(
@@ -2371,6 +2398,7 @@ def _training_config(
     n_kv_heads: int = 1,
     remat: str = "none",
     optimizer_name: str = "adamw",
+    muon_tp_mode: str = "duplicated",
     weight_decay: float = 0.0,
     schedule_name: str = "constant",
     total_steps: int | None = None,
@@ -2407,6 +2435,7 @@ def _training_config(
     shuffle_seed_line = "" if shuffle_seed is None else f"shuffle_seed = {shuffle_seed}\n"
     document_buffer_size_line = "" if document_buffer_size is None else f"document_buffer_size = {document_buffer_size}\n"
     document_refill_size_line = "" if document_refill_size is None else f"document_refill_size = {document_refill_size}\n"
+    muon_tp_mode_line = f'muon_tp_mode = "{muon_tp_mode}"\n' if optimizer_name == "muon" else ""
     eval_block = ""
     if eval_every_steps is not None:
         eval_block = f"""
@@ -2461,6 +2490,7 @@ remat = "{remat}"
 [optimizer]
 name = "{optimizer_name}"
 weight_decay = {weight_decay}
+{muon_tp_mode_line}
 
 [optimizer.schedule]
 name = "{schedule_name}"

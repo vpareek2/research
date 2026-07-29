@@ -33,12 +33,31 @@ def test_resume_fingerprint_ignores_safe_runtime_controls(tmp_path: Path, prepar
     assert build_resume_compat(first).runtime_fingerprint == build_resume_compat(second).runtime_fingerprint
 
 
+def test_resume_fingerprint_changes_between_muon_tp_modes(tmp_path: Path, prepared_dataset_factory) -> None:
+    manifest = _manifest(prepared_dataset_factory, "muon-tp-mode")
+    duplicated = _runtime_spec(
+        tmp_path,
+        manifest,
+        optimizer_name="muon",
+        muon_tp_mode="duplicated",
+    )
+    distributed = _runtime_spec(
+        tmp_path,
+        manifest,
+        optimizer_name="muon",
+        muon_tp_mode="distributed",
+    )
+
+    assert build_resume_compat(duplicated).runtime_fingerprint != build_resume_compat(distributed).runtime_fingerprint
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
         {"hidden_size": 16},
         {"remat": "block"},
         {"optimizer_name": "muon"},
+        {"optimizer_name": "muon", "muon_tp_mode": "distributed"},
         {"weight_decay": 0.2},
         {"axis_sizes": (2,)},
         {"axis_names": ("data", "fsdp"), "axis_sizes": (1, 4), "parallelism_mode": "fsdp", "hidden_size": 16, "intermediate_size": 32, "num_heads": 4, "n_kv_heads": 4},
@@ -420,7 +439,7 @@ def test_resume_compat_marks_sharded_muon_auto_dion2(tmp_path: Path, prepared_da
     assert compat.payload["optimizer"]["policy"]["auto_routing"] == {
         "active": True,
         "muon_sharded_matrix_backend": "dion2",
-        "muon_tp_sharded_matrix_backend": "dist_muon_exact",
+        "muon_tp_sharded_matrix_backend": "dist_muon",
     }
     assert compat.payload["optimizer"]["policy"]["dion2"]["orthogonalizer"] == "polar_express"
 
@@ -442,16 +461,16 @@ def test_resume_compat_marks_tensor_parallel_muon_exact_route(tmp_path: Path, pr
     )
     compat = build_resume_compat(spec)
 
-    assert compat.payload["optimizer"]["policy"]["dist_muon_exact"]["exact"] is True
-    assert compat.payload["optimizer"]["policy"]["dist_muon_exact"]["correctness_status"] == (
+    assert compat.payload["optimizer"]["policy"]["dist_muon"]["exact"] is True
+    assert compat.payload["optimizer"]["policy"]["dist_muon"]["correctness_status"] == (
         "four_h100_acceptance_passed"
     )
     assert compat.payload["optimizer"]["policy"]["auto_routing"] == {
         "active": True,
         "muon_sharded_matrix_backend": "dion2",
-        "muon_tp_sharded_matrix_backend": "dist_muon_exact",
+        "muon_tp_sharded_matrix_backend": "dist_muon",
     }
-    assert compat.payload["parallelism"]["tensor_parallel_policy"]["optimizer"] == "muon_routes_to_dist_muon_exact"
+    assert compat.payload["parallelism"]["tensor_parallel_policy"]["optimizer"] == "muon_routes_to_dist_muon"
 
 
 def test_resume_metadata_rejects_malformed_version(tmp_path: Path, prepared_dataset_factory) -> None:
@@ -554,6 +573,7 @@ def _config_text(
     remat: str = "none",
     weight_decay: float = 0.0,
     optimizer_name: str = "adamw",
+    muon_tp_mode: str = "duplicated",
     schedule_name: str = "constant",
     total_steps: int | None = None,
     tokenizer_id: str = "toy-tokenizer",
@@ -606,6 +626,7 @@ top_k = 2
 name = "{balance_name}"
 sequence_aux_loss_weight = {sequence_aux_loss_weight}
 """
+    muon_tp_mode_line = f'muon_tp_mode = "{muon_tp_mode}"\n' if optimizer_name == "muon" else ""
     return f"""
 [run]
 id = "smoke"
@@ -629,6 +650,7 @@ remat = "{remat}"
 [optimizer]
 name = "{optimizer_name}"
 weight_decay = {weight_decay}
+{muon_tp_mode_line}
 
 [optimizer.schedule]
 name = "{schedule_name}"

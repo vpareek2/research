@@ -247,6 +247,7 @@ def build_runtime_diagnostics(
         "optimizer": optimizer_policy_summary(
             spec.optimizer,
             None if optimizer is None else optimizer.route_assignments,
+            execution_plans=None if optimizer is None else optimizer.muon_execution_plans,
             parallelism_mode=spec.parallelism.mode,
             fsdp_axis_size=context.fsdp_axis_size,
             tp_axis_size=context.tp_axis_size,
@@ -344,7 +345,7 @@ def parallelism_summary(spec: RunSpec, context: Any) -> dict[str, Any]:
                     "mode": "exact_vocab_parallel" if spec.parallelism.tensor_parallel else None,
                 },
                 "routed_experts": "not_tensor_parallel_sharded",
-                "optimizer": "muon_routes_to_dist_muon_exact" if spec.parallelism.tensor_parallel else None,
+                "optimizer": "muon_routes_to_dist_muon" if spec.parallelism.tensor_parallel else None,
                 "moe": moe_tensor_parallel_policy_payload(
                     tensor_parallel=spec.parallelism.tensor_parallel,
                     has_moe=has_moe,
@@ -493,7 +494,7 @@ def sharding_policy_summary(plan: Any, *, has_moe: bool = False) -> dict[str, An
                         "mode": "exact_vocab_parallel",
                     },
                     "routed_experts": "not_tensor_parallel_sharded",
-                    "optimizer": "muon_routes_to_dist_muon_exact",
+                    "optimizer": "muon_routes_to_dist_muon",
                     "moe": moe_tensor_parallel_policy_payload(
                         tensor_parallel=True,
                         has_moe=has_moe,

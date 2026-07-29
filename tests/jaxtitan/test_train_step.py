@@ -1007,7 +1007,8 @@ def test_tensor_parallel_train_step_matches_replicated_global_batch() -> None:
     assert _trees_close(next_tp.model, next_one.model)
 
 
-def test_tensor_parallel_muon_train_step_matches_replicated_global_batch() -> None:
+@pytest.mark.parametrize("muon_tp_mode", ["duplicated", "distributed"])
+def test_tensor_parallel_muon_train_step_matches_replicated_global_batch(muon_tp_mode: str) -> None:
     require_fake_devices()
     built = build_model(_tiny_spec(hidden_size=16, intermediate_size=32, num_heads=4, n_kv_heads=4), seed=0)
     batch = _batch(batch_size=4, seq_len=4, vocab_size=16)
@@ -1027,12 +1028,18 @@ def test_tensor_parallel_muon_train_step_matches_replicated_global_batch() -> No
         param_layouts=built.param_layouts,
     )
     tp_model = place_model_state(built.state, tp_plan)
-    tp_optimizer = _optimizer(tp_model, built.metadata, optimizer_name="muon")
+    tp_optimizer = _optimizer(
+        tp_model,
+        built.metadata,
+        optimizer_name="muon",
+        muon_tp_mode=muon_tp_mode,
+        runtime_parameter_state=tp_model,
+    )
     tp_state = initialize_train_state(tp_model, tp_optimizer.transform, seed=1)
     tp_step = make_train_step(built.graph, tp_optimizer, sharding=tp_plan, state_template=tp_state)
     next_tp, metrics_tp = tp_step(tp_state, place_batch(batch, tp_plan))
 
-    assert {assignment.backend for assignment in tp_optimizer.route_assignments} == {"adamw", "dist_muon_exact"}
+    assert {assignment.backend for assignment in tp_optimizer.route_assignments} == {"adamw", "dist_muon"}
     assert _scalar_int(metrics_tp.token_count) == _scalar_int(metrics_one.token_count) == 16
     assert np.allclose(
         np.asarray(jax.device_get(metrics_tp.loss_sum)),
@@ -1040,7 +1047,8 @@ def test_tensor_parallel_muon_train_step_matches_replicated_global_batch() -> No
         rtol=1e-5,
         atol=1e-5,
     )
-    assert _trees_close(next_tp.model, next_one.model)
+    tolerance = 1e-5 if muon_tp_mode == "duplicated" else 1.25e-3
+    assert _trees_close(next_tp.model, next_one.model, rtol=tolerance, atol=tolerance)
 
 
 @pytest.mark.parametrize("mode", ["fsdp", "zero2"])
@@ -1075,7 +1083,7 @@ def test_fsdp_tensor_parallel_muon_train_step_matches_replicated_global_batch(mo
     mixed_step = make_train_step(built.graph, mixed_optimizer, sharding=mixed_plan, state_template=mixed_state)
     next_mixed, metrics_mixed = mixed_step(mixed_state, place_batch(batch, mixed_plan))
 
-    assert {assignment.backend for assignment in mixed_optimizer.route_assignments} == {"adamw", "dist_muon_exact"}
+    assert {assignment.backend for assignment in mixed_optimizer.route_assignments} == {"adamw", "dist_muon"}
     assert _scalar_int(metrics_mixed.token_count) == _scalar_int(metrics_one.token_count) == 16
     assert np.allclose(
         np.asarray(jax.device_get(metrics_mixed.loss_sum)),
@@ -1086,8 +1094,12 @@ def test_fsdp_tensor_parallel_muon_train_step_matches_replicated_global_batch(mo
     assert _trees_close(next_mixed.model, next_one.model, rtol=2e-5, atol=2e-5)
 
 
+@pytest.mark.parametrize("muon_tp_mode", ["duplicated", "distributed"])
 @pytest.mark.parametrize("mode", ["fsdp", "zero2"])
-def test_fsdp_tensor_parallel_muon_stays_finite_and_replica_consistent_for_five_steps(mode: str) -> None:
+def test_fsdp_tensor_parallel_muon_stays_finite_and_replica_consistent_for_five_steps(
+    mode: str,
+    muon_tp_mode: str,
+) -> None:
     require_fake_devices()
     built = build_model(
         _tiny_spec(
@@ -1113,6 +1125,9 @@ def test_fsdp_tensor_parallel_muon_stays_finite_and_replica_consistent_for_five_
         built.metadata,
         schedule=ScheduleSpec(peak_lr=0.02),
         optimizer_name="muon",
+        muon_tp_mode=muon_tp_mode,
+        runtime_parameter_state=mixed_model,
+        grad_clip_norm=1.0,
     )
     mixed_state = initialize_train_state(
         mixed_model,
@@ -1141,7 +1156,8 @@ def test_fsdp_tensor_parallel_muon_stays_finite_and_replica_consistent_for_five_
         )
 
 
-def test_moe_tp_ep_muon_stays_finite_and_replica_consistent_for_five_steps() -> None:
+@pytest.mark.parametrize("muon_tp_mode", ["duplicated", "distributed"])
+def test_moe_tp_ep_muon_stays_finite_and_replica_consistent_for_five_steps(muon_tp_mode: str) -> None:
     require_fake_devices()
     built = build_model(
         _tiny_trinity_spec(
@@ -1170,13 +1186,16 @@ def test_moe_tp_ep_muon_stays_finite_and_replica_consistent_for_five_steps() -> 
         built.metadata,
         schedule=ScheduleSpec(peak_lr=0.02),
         optimizer_name="muon",
+        muon_tp_mode=muon_tp_mode,
+        runtime_parameter_state=mixed_model,
+        grad_clip_norm=1.0,
     )
     mixed_state = initialize_train_state(mixed_model, mixed_optimizer.transform, seed=1)
     mixed_step = make_train_step(built.graph, mixed_optimizer, sharding=mixed_plan, state_template=mixed_state)
 
     assert {assignment.backend for assignment in mixed_optimizer.route_assignments} == {
         "adamw",
-        "dist_muon_exact",
+        "dist_muon",
         "muon",
     }
     for offset in range(5):
@@ -1520,13 +1539,29 @@ def test_zero2_train_step_matches_ddp_global_batch_loss() -> None:
     assert _trees_close(next_zero2.model, next_ddp.model, rtol=2e-5, atol=2e-5)
 
 
-def _optimizer(model_state, metadata, *, schedule: ScheduleSpec | None = None, optimizer_name: str = "adamw"):
+def _optimizer(
+    model_state,
+    metadata,
+    *,
+    schedule: ScheduleSpec | None = None,
+    optimizer_name: str = "adamw",
+    muon_tp_mode: str = "duplicated",
+    runtime_parameter_state=None,
+    grad_clip_norm: float | None = None,
+):
     if schedule is None:
         schedule = ScheduleSpec(peak_lr=1e-3)
     return build_optimizer(
-        OptimizerSpec(name=optimizer_name, schedule=schedule, weight_decay=0.01),
+        OptimizerSpec(
+            name=optimizer_name,
+            schedule=schedule,
+            weight_decay=0.01,
+            muon_tp_mode=muon_tp_mode,
+            grad_clip_norm=grad_clip_norm,
+        ),
         model_state,
         metadata,
+        runtime_parameter_state=runtime_parameter_state,
     )
 
 

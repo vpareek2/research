@@ -6,7 +6,7 @@ Optax is the first backend adapter, not the public training abstraction.
 """
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from typing import Any, Protocol
 
@@ -17,7 +17,12 @@ import optax
 from jaxtitan.errors import ContractError
 from jaxtitan.models import ParamMetadata
 from jaxtitan.optim.dion2 import dion2_policy_constants, dion2_transform
-from jaxtitan.optim.muon import distributed_muon_transform, muon_policy_constants, muon_transform
+from jaxtitan.optim.muon import (
+    MuonLeafExecutionPlan,
+    distributed_muon_transform,
+    muon_policy_constants,
+    muon_transform,
+)
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
 
 PyTree = Any
@@ -25,7 +30,8 @@ ADAMW_B1 = 0.9
 ADAMW_B2 = 0.999
 ADAMW_EPS = 1e-8
 _SUPPORTED_RUNTIME_BACKENDS = {"adamw", "muon"}
-_INTERNAL_RUNTIME_BACKENDS = {"dion2", "dist_muon_exact"}
+_INTERNAL_RUNTIME_BACKENDS = {"dion2", "dist_muon"}
+_MUON_GRAM_BUCKET_MAX_BYTES = 32 * 1024 * 1024
 # Next optimizer backends to evaluate after Muon has run artifacts: Aurora, Scion, and SOAP.
 _MUON_MATRIX_TAGS = frozenset(
     {
@@ -97,6 +103,7 @@ class OptimizerBuildResult:
     adamw_fallback_schedule: Callable[[Any], jax.Array] | None
     route_assignments: tuple[RouteAssignment, ...]
     description: str
+    muon_execution_plans: tuple[MuonLeafExecutionPlan, ...] = ()
 
 
 def build_lr_schedule(spec: ScheduleSpec) -> Callable[[Any], jax.Array]:
@@ -136,6 +143,9 @@ def build_optimizer(
     spec: OptimizerSpec,
     model_state: PyTree,
     metadata: Iterable[ParamMetadata],
+    *,
+    runtime_parameter_state: PyTree | None = None,
+    gradient_shardings: PyTree | None = None,
 ) -> OptimizerBuildResult:
     """Build the first Jaxtitan optimizer runtime boundary."""
 
@@ -146,8 +156,20 @@ def build_optimizer(
         )
 
     metadata = tuple(metadata)
+    runtime_parameter_state = model_state if runtime_parameter_state is None else runtime_parameter_state
+    if jax.tree.structure(runtime_parameter_state) != jax.tree.structure(model_state):
+        raise ContractError("runtime parameter state must match optimizer-init model state structure")
+    if gradient_shardings is not None and jax.tree.structure(gradient_shardings) != jax.tree.structure(model_state):
+        raise ContractError("gradient sharding tree must match optimizer-init model state structure")
     params_by_path = _params_by_metadata_path(model_state)
     assignments = _route_assignments(spec, metadata, params_by_path)
+    muon_execution_plans = _build_muon_execution_plans(
+        assignments,
+        optimizer_init_state=model_state,
+        runtime_parameter_state=runtime_parameter_state,
+        gradient_shardings=gradient_shardings,
+        requested_mode=spec.muon_tp_mode,
+    )
     schedule = build_lr_schedule(spec.schedule)
     adamw_fallback_schedule = None
     if spec.adamw_fallback_schedule is not None:
@@ -168,6 +190,7 @@ def build_optimizer(
                 spec,
                 assignments,
                 model_state,
+                muon_execution_plans,
             )
         )
     else:
@@ -182,6 +205,7 @@ def build_optimizer(
         schedule=schedule,
         adamw_fallback_schedule=adamw_fallback_schedule,
         route_assignments=assignments,
+        muon_execution_plans=muon_execution_plans,
         description=describe_optimizer(spec),
     )
 
@@ -208,6 +232,7 @@ def optimizer_policy_summary(
     spec: OptimizerSpec,
     assignments: Iterable[RouteAssignment] | None = None,
     *,
+    execution_plans: Iterable[MuonLeafExecutionPlan] | None = None,
     parallelism_mode: str | None = None,
     fsdp_axis_size: int | None = None,
     tp_axis_size: int | None = None,
@@ -240,8 +265,9 @@ def optimizer_policy_summary(
         },
         "muon": {
             **muon_policy_constants(),
+            "tp_mode": spec.muon_tp_mode,
             "distributed_policy": "replicated_or_auto_dion2_when_sharded",
-            "distributed_matrix_update": "auto_dion2_or_dist_muon_exact",
+            "distributed_matrix_update": "auto_dion2_or_dist_muon",
             "rank3_expert_policy": "per_expert_full_matrix_when_complete_local",
             "rank3_split_matrix_policy": "unsupported_until_explicit_distributed_expert_matrix_optimizer",
             "hidden_matrix_tags": sorted(_MUON_MATRIX_TAGS),
@@ -253,19 +279,10 @@ def optimizer_policy_summary(
             "distributed_policy": "fsdp_sharded_matrix",
             "auto_selected_for": "sharded_muon_matrix_routes",
         },
-        "dist_muon_exact": {
-            "distributed_policy": "reference_logical_matrix_exact",
-            "exact": True,
-            "correctness_status": "four_h100_acceptance_passed",
-            "approximation": "none",
-            "performance": "replicate_logical_matrix_reference",
-            "newton_schulz_precision": muon_policy_constants()["newton_schulz_precision"],
-            "replicated_model_axis_reduction": "pmean",
-            "auto_selected_for": "tp_sharded_muon_matrix_routes",
-        },
+        "dist_muon": _dist_muon_policy_payload(spec),
         "auto_routing": {
             "muon_sharded_matrix_backend": "dion2",
-            "muon_tp_sharded_matrix_backend": "dist_muon_exact",
+            "muon_tp_sharded_matrix_backend": "dist_muon",
             "active": auto_routing_active,
         },
         "route_counts": None,
@@ -288,7 +305,10 @@ def optimizer_policy_summary(
                     "requested_backend": assignment.requested_backend,
                     "weight_decay": assignment.weight_decay,
                     "fallback_reason": assignment.fallback_reason,
-                    "distributed_policy": _route_distributed_policy(assignment.backend),
+                    "distributed_policy": _route_distributed_policy(
+                        assignment.backend,
+                        muon_tp_mode=spec.muon_tp_mode,
+                    ),
                     "auto_resolved": assignment.auto_resolved,
                     "resolution_reason": assignment.resolution_reason,
                     "matrix_axis": assignment.matrix_axis,
@@ -301,7 +321,72 @@ def optimizer_policy_summary(
         payload["route_counts"] = dict(sorted(route_counts.items()))
         payload["fallback_counts"] = dict(sorted(fallback_counts.items()))
         payload["routes"] = routes
+    if execution_plans is not None:
+        payload["dist_muon"]["leaf_execution_plans"] = [
+            _execution_plan_payload(plan)
+            for plan in execution_plans
+        ]
     return payload
+
+
+def _dist_muon_policy_payload(spec: OptimizerSpec) -> dict[str, Any]:
+    common = {
+        "requested_mode": spec.muon_tp_mode,
+        "newton_schulz_precision": muon_policy_constants()["newton_schulz_precision"],
+        "replicated_model_axis_reduction": "pmean",
+        "auto_selected_for": "tp_sharded_muon_matrix_routes",
+    }
+    if spec.muon_tp_mode == "duplicated":
+        return {
+            **common,
+            "distributed_policy": "duplicated_full_logical_matrix",
+            "exact": True,
+            "correctness_status": "four_h100_acceptance_passed",
+            "approximation": "none",
+            "execution": "duplicated",
+            "performance": "single_bf16_logical_matrix_gather",
+            "numerical_contract": "accepted_bfloat16_reference",
+        }
+    return {
+        **common,
+        "distributed_policy": "sharded_gram_collectives",
+        "exact": False,
+        "correctness_status": "local_fake_device_acceptance_passed",
+        "approximation": "floating_point_reduction_order",
+        "execution": "distributed",
+        "performance": "one_norm_plus_five_gram_reductions_with_optional_exchange",
+        "numerical_contract": "deterministic_close_not_bitwise",
+    }
+
+
+def _execution_plan_payload(plan: MuonLeafExecutionPlan) -> dict[str, Any]:
+    def role_payload(
+        sharding: jax.sharding.NamedSharding,
+        replica_axes: tuple[str, ...],
+    ) -> dict[str, Any]:
+        return {
+            "partition_spec": repr(sharding.spec),
+            "replica_axes": list(replica_axes),
+        }
+
+    return {
+        "path": list(plan.path),
+        "logical_shape": list(plan.logical_shape),
+        "tp_partition_dim": plan.tp_partition_dim,
+        "transpose_for_shape": plan.transpose_for_shape,
+        "canonical_tp_dim": plan.canonical_tp_dim,
+        "requested_mode": plan.requested_mode,
+        "execution": plan.execution,
+        "fallback_reason": plan.fallback_reason,
+        "bucket_id": plan.bucket_id,
+        "weight_decay": plan.weight_decay,
+        "roles": {
+            "parameter": role_payload(plan.parameter_sharding, plan.parameter_replica_axes),
+            "gradient": role_payload(plan.gradient_sharding, plan.gradient_replica_axes),
+            "momentum": role_payload(plan.momentum_sharding, plan.momentum_replica_axes),
+            "update": role_payload(plan.update_sharding, plan.update_replica_axes),
+        },
+    }
 
 
 def _auto_routing_active(
@@ -369,14 +454,14 @@ def _route_assignments(
                 auto_resolved=backend != requested_backend,
                 resolution_reason=resolution_reason,
                 matrix_axis=matrix_axis,
-                logical_shape=tuple(item.shape) if backend == "dist_muon_exact" else (),
+                logical_shape=tuple(item.shape) if backend == "dist_muon" else (),
                 sharded_model_axes=_route_model_parallel_topology(leaf)[0]
-                if backend == "dist_muon_exact"
+                if backend == "dist_muon"
                 else (),
                 replicated_model_axes=_route_model_parallel_topology(leaf)[1]
-                if backend == "dist_muon_exact"
+                if backend == "dist_muon"
                 else (),
-                partition_spec=_partition_spec_text(leaf) if backend == "dist_muon_exact" else None,
+                partition_spec=_partition_spec_text(leaf) if backend == "dist_muon" else None,
             )
         )
     return tuple(assignments)
@@ -391,8 +476,8 @@ def _distributed_policy_payload(name: str) -> dict[str, str]:
         }
     if name == "muon":
         return {
-            "optimizer_state": "replicated_or_expert_axis_muon_sharded_dion2_or_dist_muon_exact",
-            "gradient_update": "muon_when_complete_matrix_dion2_for_fsdp_dist_muon_exact_for_tp",
+            "optimizer_state": "replicated_or_expert_axis_muon_sharded_dion2_or_dist_muon",
+            "gradient_update": "muon_when_complete_matrix_dion2_for_fsdp_dist_muon_for_tp",
             "zero2_fsdp": "auto_dion2",
         }
     return {
@@ -402,15 +487,19 @@ def _distributed_policy_payload(name: str) -> dict[str, str]:
     }
 
 
-def _route_distributed_policy(backend: str) -> str:
+def _route_distributed_policy(backend: str, *, muon_tp_mode: str) -> str:
     if backend == "adamw":
         return "elementwise_shard_safe"
     if backend == "muon":
         return "complete_matrix_or_per_expert_complete_matrix"
     if backend == "dion2":
         return "fsdp_sharded_matrix"
-    if backend == "dist_muon_exact":
-        return "reference_logical_matrix_exact"
+    if backend == "dist_muon":
+        return (
+            "duplicated_full_logical_matrix"
+            if muon_tp_mode == "duplicated"
+            else "sharded_gram_collectives"
+        )
     return "unknown"
 
 
@@ -436,6 +525,7 @@ def _muon_primary_transforms(
     spec: OptimizerSpec,
     assignments: tuple[RouteAssignment, ...],
     params: PyTree,
+    execution_plans: tuple[MuonLeafExecutionPlan, ...],
 ) -> list[optax.GradientTransformationExtraArgs]:
     transforms = []
     muon_decay_mask = _mask_from_assignments(
@@ -468,15 +558,10 @@ def _muon_primary_transforms(
         assignments,
         lambda assignment: assignment.backend == "dion2" and assignment.matrix_axis == 1 and not assignment.weight_decay,
     )
-    dist_muon_decay_mask = _mask_from_assignments(
+    dist_muon_mask = _mask_from_assignments(
         params,
         assignments,
-        lambda assignment: assignment.backend == "dist_muon_exact" and assignment.weight_decay,
-    )
-    dist_muon_no_decay_mask = _mask_from_assignments(
-        params,
-        assignments,
-        lambda assignment: assignment.backend == "dist_muon_exact" and not assignment.weight_decay,
+        lambda assignment: assignment.backend == "dist_muon",
     )
     adamw_mask = _mask_from_assignments(params, assignments, lambda assignment: assignment.backend == "adamw")
     adamw_decay_mask = _mask_from_assignments(
@@ -542,27 +627,19 @@ def _muon_primary_transforms(
                 mask_compatible_extra_args=True,
             )
         )
-    if _mask_any(dist_muon_decay_mask):
+    if _mask_any(dist_muon_mask):
         transforms.append(
             optax.masked(
                 distributed_muon_transform(
                     schedule,
                     weight_decay=spec.weight_decay,
-                    parameter_shardings=_masked_parameter_shardings(params, dist_muon_decay_mask),
+                    execution_plans=_masked_execution_plans(
+                        params,
+                        dist_muon_mask,
+                        execution_plans,
+                    ),
                 ),
-                dist_muon_decay_mask,
-                mask_compatible_extra_args=True,
-            )
-        )
-    if _mask_any(dist_muon_no_decay_mask):
-        transforms.append(
-            optax.masked(
-                distributed_muon_transform(
-                    schedule,
-                    weight_decay=0.0,
-                    parameter_shardings=_masked_parameter_shardings(params, dist_muon_no_decay_mask),
-                ),
-                dist_muon_no_decay_mask,
+                dist_muon_mask,
                 mask_compatible_extra_args=True,
             )
         )
@@ -601,7 +678,7 @@ def _resolve_backend(requested_backend: str, item: ParamMetadata, leaf: Any) -> 
         return requested_backend, None, None
     tp_matrix_axis = _single_matrix_axis(leaf, "tp", item.path)
     if tp_matrix_axis is not None:
-        return "dist_muon_exact", tp_matrix_axis, "tp_sharded_matrix_exact_muon"
+        return "dist_muon", tp_matrix_axis, "tp_sharded_matrix_muon"
     matrix_axis = _fsdp_matrix_axis(leaf)
     if matrix_axis is None:
         return "muon", None, None
@@ -632,8 +709,8 @@ def _validate_route(item: ParamMetadata, backend: str) -> None:
                 f"expert matrix stack, got shape {item.shape}"
             )
         return
-    if backend in {"muon", "dion2", "dist_muon_exact"} and len(item.shape) != 2:
-        display_backend = {"muon": "Muon", "dion2": "Dion2", "dist_muon_exact": "Distributed Muon"}.get(backend, backend)
+    if backend in {"muon", "dion2", "dist_muon"} and len(item.shape) != 2:
+        display_backend = {"muon": "Muon", "dion2": "Dion2", "dist_muon": "Distributed Muon"}.get(backend, backend)
         raise ContractError(
             f"{display_backend} route for parameter {'.'.join(item.path)!r} requires a rank-2 matrix, "
             f"got shape {item.shape}"
@@ -684,6 +761,183 @@ def _validate_assignment_paths(params: PyTree, assignments: tuple[RouteAssignmen
 
 def _params_by_metadata_path(params: PyTree) -> dict[tuple[str, ...], Any]:
     return {_metadata_path_from_jax_path(path): value for path, value in jax.tree_util.tree_flatten_with_path(params)[0]}
+
+
+def _build_muon_execution_plans(
+    assignments: tuple[RouteAssignment, ...],
+    *,
+    optimizer_init_state: PyTree,
+    runtime_parameter_state: PyTree,
+    gradient_shardings: PyTree | None,
+    requested_mode: str,
+) -> tuple[MuonLeafExecutionPlan, ...]:
+    optimizer_by_path = _params_by_metadata_path(optimizer_init_state)
+    runtime_by_path = _params_by_metadata_path(runtime_parameter_state)
+    gradient_by_path = (
+        None
+        if gradient_shardings is None
+        else {
+            _metadata_path_from_jax_path(path): value
+            for path, value in jax.tree_util.tree_flatten_with_path(gradient_shardings)[0]
+        }
+    )
+    plans = []
+    for assignment in assignments:
+        if assignment.backend != "dist_muon":
+            continue
+        parameter_sharding = _require_named_sharding(runtime_by_path[assignment.path], assignment.path, "parameter")
+        momentum_sharding = _require_named_sharding(optimizer_by_path[assignment.path], assignment.path, "momentum")
+        gradient_sharding = (
+            parameter_sharding
+            if gradient_by_path is None
+            else _require_named_sharding_value(gradient_by_path[assignment.path], assignment.path, "gradient")
+        )
+        update_sharding = gradient_sharding
+        tp_partition_dim = _single_named_sharding_axis(momentum_sharding, "tp", assignment.path)
+        if tp_partition_dim is None:
+            raise ContractError(
+                f"distributed Muon execution plan for {'.'.join(assignment.path)!r} requires a TP-sharded momentum"
+            )
+        rows, columns = assignment.logical_shape
+        transpose_for_shape = rows > columns
+        canonical_tp_dim = 1 - tp_partition_dim if transpose_for_shape else tp_partition_dim
+        execution, fallback_reason = _resolve_muon_tp_execution(
+            requested_mode=requested_mode,
+            canonical_tp_dim=canonical_tp_dim,
+            logical_shape=(rows, columns),
+            tp_size=int(momentum_sharding.mesh.shape["tp"]),
+        )
+        plans.append(
+            MuonLeafExecutionPlan(
+                path=assignment.path,
+                logical_shape=(rows, columns),
+                parameter_sharding=parameter_sharding,
+                gradient_sharding=gradient_sharding,
+                momentum_sharding=momentum_sharding,
+                update_sharding=update_sharding,
+                parameter_replica_axes=_replica_axes_for_sharding(parameter_sharding),
+                gradient_replica_axes=_replica_axes_for_sharding(gradient_sharding),
+                momentum_replica_axes=_replica_axes_for_sharding(momentum_sharding),
+                update_replica_axes=_replica_axes_for_sharding(update_sharding),
+                tp_partition_dim=tp_partition_dim,
+                transpose_for_shape=transpose_for_shape,
+                canonical_tp_dim=canonical_tp_dim,
+                requested_mode=requested_mode,
+                execution=execution,
+                fallback_reason=fallback_reason,
+                bucket_id=-1,
+                weight_decay=assignment.weight_decay,
+            )
+        )
+    return _assign_muon_bucket_ids(tuple(plans))
+
+
+def _assign_muon_bucket_ids(
+    plans: tuple[MuonLeafExecutionPlan, ...],
+) -> tuple[MuonLeafExecutionPlan, ...]:
+    """Greedily assign deterministic bounded buckets to compatible leaves."""
+
+    bucket_states: dict[tuple[Any, ...], tuple[int, int]] = {}
+    next_bucket_id = 0
+    assigned_by_path: dict[tuple[str, ...], MuonLeafExecutionPlan] = {}
+    for plan in sorted(plans, key=lambda item: item.path):
+        if plan.execution == "duplicated":
+            assigned_by_path[plan.path] = plan
+            continue
+        key = (
+            plan.execution,
+            tuple(plan.gradient_sharding.mesh.axis_names),
+            tuple(plan.gradient_sharding.mesh.shape.items()),
+            repr(plan.gradient_sharding.spec),
+            repr(plan.parameter_sharding.spec),
+            repr(plan.momentum_sharding.spec),
+            repr(plan.update_sharding.spec),
+            plan.parameter_replica_axes,
+            plan.gradient_replica_axes,
+            plan.momentum_replica_axes,
+            plan.update_replica_axes,
+            plan.transpose_for_shape,
+            plan.canonical_tp_dim,
+            "bfloat16",
+            "float32",
+        )
+        gram_dimension = min(plan.logical_shape)
+        payload_bytes = gram_dimension * gram_dimension * jnp.dtype(jnp.bfloat16).itemsize
+        bucket_id, bucket_bytes = bucket_states.get(key, (-1, 0))
+        if bucket_id < 0 or bucket_bytes + payload_bytes > _MUON_GRAM_BUCKET_MAX_BYTES:
+            bucket_id = next_bucket_id
+            next_bucket_id += 1
+            bucket_bytes = 0
+        bucket_states[key] = (bucket_id, bucket_bytes + payload_bytes)
+        assigned_by_path[plan.path] = replace(plan, bucket_id=bucket_id)
+    return tuple(assigned_by_path[plan.path] for plan in plans)
+
+
+def _resolve_muon_tp_execution(
+    *,
+    requested_mode: str,
+    canonical_tp_dim: int,
+    logical_shape: tuple[int, int],
+    tp_size: int,
+) -> tuple[str, str | None]:
+    if requested_mode == "duplicated":
+        return "duplicated", None
+    if requested_mode != "distributed":
+        raise ContractError(f"unsupported Muon TP mode {requested_mode!r}")
+    if canonical_tp_dim == 1:
+        return "distributed_direct", None
+    long_dimension = max(logical_shape)
+    if long_dimension % tp_size:
+        return "duplicated", "exchange_long_dimension_not_divisible_by_tp"
+    return "distributed_exchange", None
+
+
+def _require_named_sharding(value: Any, path: tuple[str, ...], role: str) -> jax.sharding.NamedSharding:
+    return _require_named_sharding_value(getattr(value, "sharding", None), path, role)
+
+
+def _require_named_sharding_value(
+    value: Any,
+    path: tuple[str, ...],
+    role: str,
+) -> jax.sharding.NamedSharding:
+    if not isinstance(value, jax.sharding.NamedSharding):
+        raise ContractError(
+            f"distributed Muon execution plan for {'.'.join(path)!r} requires static NamedSharding for {role}"
+        )
+    return value
+
+
+def _single_named_sharding_axis(
+    sharding: jax.sharding.NamedSharding,
+    axis_name: str,
+    path: tuple[str, ...],
+) -> int | None:
+    axes = [index for index, axis in enumerate(tuple(sharding.spec)) if _axis_contains(axis, axis_name)]
+    if not axes:
+        return None
+    if len(axes) != 1:
+        raise ContractError(
+            f"distributed Muon execution plan for {'.'.join(path)!r} expects one {axis_name} matrix axis, "
+            f"got {sharding.spec}"
+        )
+    return axes[0]
+
+
+def _replica_axes_for_sharding(sharding: jax.sharding.NamedSharding) -> tuple[str, ...]:
+    partitioned_axes = set()
+    for axis in tuple(sharding.spec):
+        if isinstance(axis, str):
+            partitioned_axes.add(axis)
+        elif isinstance(axis, tuple):
+            partitioned_axes.update(str(name) for name in axis)
+    return tuple(
+        str(name)
+        for name, size in sharding.mesh.shape.items()
+        if name in {"fsdp", "tp", "ep", "expert_fsdp"}
+        and int(size) > 1
+        and name not in partitioned_axes
+    )
 
 
 def _fsdp_matrix_axis(leaf: Any) -> int | None:
@@ -790,6 +1044,25 @@ def _masked_parameter_shardings(params: PyTree, mask: PyTree) -> PyTree:
     return jax.tree.map(leaf_sharding, params, mask)
 
 
+def _masked_execution_plans(
+    params: PyTree,
+    mask: PyTree,
+    execution_plans: tuple[MuonLeafExecutionPlan, ...],
+) -> PyTree:
+    plans_by_path = {plan.path: plan for plan in execution_plans}
+
+    def leaf_plan(path, _param: Any, selected: bool) -> Any:
+        if not selected:
+            return optax.MaskedNode()
+        metadata_path = _metadata_path_from_jax_path(path)
+        plan = plans_by_path.get(metadata_path)
+        if plan is None:
+            raise ContractError(f"missing distributed Muon execution plan for {'.'.join(metadata_path)!r}")
+        return plan
+
+    return jax.tree_util.tree_map_with_path(leaf_plan, params, mask)
+
+
 def _replica_aware_muon_transform(
     schedule: Callable[[Any], jax.Array],
     *,
@@ -828,6 +1101,7 @@ def _muon_description_suffix(spec: OptimizerSpec) -> str:
         f"muon_ns_coefficients={constants['newton_schulz_coefficients']} "
         f"muon_scale_mode={constants['scale_mode']} "
         f"muon_rms_match_scale={constants['rms_match_scale']:g} "
+        f"muon_tp_mode={spec.muon_tp_mode} "
         "muon_rank3_expert=per_expert_full_matrix "
         "adamw_fallback=true"
     )

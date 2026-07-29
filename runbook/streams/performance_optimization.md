@@ -3,18 +3,18 @@
 Purpose: turn measured Jaxtitan profiles into an ordered optimization program
 without weakening correctness or adding speculative kernel surfaces.
 
-## 2026-07-23 [codex] Distributed projection compute-dtype contract
+## 2026-07-29 [codex] Distributed projection dtype fix refreshed
 
 Context:
 
-- Fixed the shared TP/CP projection helper, which bypassed NNX dtype promotion
-  and promoted BF16 activations plus FP32 master weights to FP32 outputs.
-- Made KV-cache writes explicitly convert K/V values to the declared cache
-  dtype. This removes the JAX future incompatibility for FP32-to-BF16 scatter
-  updates without adding a new precision abstraction or configuration surface.
-- The distributed helper now reuses each NNX linear's existing
-  `promote_dtype`, `dot_general`, precision, and preferred-element-type
-  contract. FP32 master parameters remain FP32.
+- Refreshed PR `#17` by merging current `master` at `eaa81e8` without
+  rewriting the published branch.
+- The shared TP/CP projection helper had bypassed NNX dtype promotion, causing
+  BF16 activations with FP32 master weights to produce FP32 outputs.
+- The helper now reuses each NNX linear's `promote_dtype`, `dot_general`,
+  precision, and preferred-element-type contract. KV-cache writes explicitly
+  convert K/V values to the declared cache dtype before scatter.
+- No precision abstraction, TOML setting, or GPU performance claim was added.
 
 Commands:
 
@@ -45,27 +45,219 @@ Artifacts:
 - Production paths:
   `src/jaxtitan/models/execution.py` and
   `src/jaxtitan/models/components/attention.py`.
+- Regression paths:
+  `tests/jaxtitan/test_model.py` and `tests/jaxtitan/test_infer.py`.
 - No cloud run or retained performance artifact was produced.
 
 Result:
 
-- The new TP regression failed before the fix because BF16-configured
-  distributed logits were FP32; TP and CP now both return BF16.
-- Treating the incompatible scatter FutureWarning as an error passes for
-  BF16 TP prefill and decode, and the cache remains BF16.
-- StableHLO inspection found eight projection dot-generals with BF16 inputs,
-  weights, and outputs. Intentionally FP32 attention-score dot products remain
-  FP32.
-- Targeted model/inference/train-step/checkpoint-sampling suite:
-  `126 passed`.
-- Complete four-device Jaxtitan suite: `648 passed, 1 skipped`.
-- No performance improvement is claimed without a GPU profile.
+- TP and CP return BF16 logits with FP32 master parameters under BF16 compute.
+- TP prefill/decode completes with the incompatible-scatter FutureWarning
+  promoted to an error; cache keys and values remain BF16.
+- Focused regressions: `3 passed`.
+- Model/inference/train-step/checkpoint-sampling gate: `130 passed`.
+- Complete four-device Jaxtitan suite: `709 passed, 1 skipped`.
 
 Next:
 
-- Merge the correctness-maintenance PR, then continue M2 distributed-Muon
-  design and profiling. A later low-precision project can replace the single
-  distributed projection boundary without changing today's TOML surface.
+- Mark PR `#17` ready for user-owned review and merge. Later FP8/FP4 work can
+  replace the single projection boundary without changing today's TOML
+  surface.
+
+## 2026-07-24 [codex] Distributed Muon leaf selector implemented
+
+Context:
+
+- Added a correctness-checked extension of the existing
+  `jaxtitan profile bench muon` surface. It benchmarks duplicated, direct
+  small-Gram, partition-aligned large/right-Gram, and exchange-plus-small-Gram
+  execution without changing production routing or adding a TOML option.
+- The fixed matrix covers all seven rank-2 Muon leaf classes in the current
+  dense/Trinity profiles on TP4, plus K/V, O, and dense MLP confirmation on
+  FSDP2xTP2 and TP2xEP2.
+- Added production-sized 24-leaf K/V and 12-leaf O bucket cases. Candidate
+  timings use rotating order and canonical unprofiled measurements; an
+  explicitly non-canonical traced pass is optional.
+- Expanded the calibration matrix before freezing a production policy:
+  all seven current rank-2 role shapes now have production-sized buckets, and
+  a one-factor lattice covers hidden widths `256/1024/2048`, aspect ratios
+  `1/2/4`, leaf counts `1/12/24`, both canonical TP orientations, TP2/TP4,
+  and TP/FSDP+TP/TP+EP topologies. The resulting fixed matrix has 76 cases and
+  185 candidate programs.
+- Selector output now carries architecture-independent policy features:
+  short/long dimensions, aspect ratio, canonical TP dimension, TP size,
+  leaf count, and aggregate matrix elements.
+- The large-Gram path is benchmark-only. Its distinct BF16 multiplication
+  order must clear the existing five-step numerical envelope before the
+  selector can recommend it.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+bash -n scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh
+uv run python -m py_compile \
+  src/jaxtitan/runtime/muon_bench.py \
+  scripts/jaxtitan/analyze_dist_muon_leaf_bench.py
+uv run pytest -q \
+  tests/jaxtitan/test_profile_bench.py \
+  tests/jaxtitan/test_dist_muon_leaf_bench_analysis.py \
+  tests/jaxtitan/test_optim.py
+uv run pytest -q tests/jaxtitan
+git diff --check
+
+cd "$(git rev-parse --show-toplevel)"
+scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh
+```
+
+Artifacts:
+
+- Branch: `codex/distributed-muon-leaf-bench`, stacked on distributed-mode
+  commit `4904e0d`.
+- Benchmark command: `uv run jaxtitan profile bench muon`.
+- Cloud runner: `scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh`.
+- Selector: `scripts/jaxtitan/analyze_dist_muon_leaf_bench.py`.
+- Expected cloud artifact:
+  `cloud_results/dist_muon_leaf_bench_YYYYMMDDTHHMMSSZ.tgz` plus `.sha256`.
+- H100 artifact:
+  `cloud_results/dist_muon_leaf_bench_20260724T211855Z.tgz`.
+- Artifact SHA-256:
+  `f8311c431dbb518ddadf943b5cec6c2f96c335a9dd6e1b0f88068d5cc970d0b0`.
+- Cloud commit: `e96010d8eaf0afad073a62ae0d78707c52d159e9`.
+- Expanded calibration artifact:
+  `cloud_results/dist_muon_leaf_bench_20260724T215030Z.tgz`.
+- Expanded artifact SHA-256:
+  `27fddd04d51cdb9f3262a3a074a2f319e8bf0f880ba80851d3a546a5bef6b1e6`.
+- Expanded cloud commit: `dcb00b40a216f3a75382c8856b1fa78217613ff3`.
+
+Result:
+
+- Targeted optimizer/benchmark/analyzer suite: `106 passed`.
+- Expanded selector optimizer/benchmark/analyzer gate: `85 passed`.
+- Complete Jaxtitan suite: `701 passed, 1 skipped`.
+- Large/right-Gram HLO has one norm reduction and five right-Gram reductions,
+  with no logical-matrix all-gather or all-to-all.
+- The selector requires finite deterministic execution, exact momentum,
+  physical replica equality, stable timing, and a minimum `1.05x` speedup.
+  Its five-step absolute-error envelope is scaled linearly from the existing
+  LR `0.001` calibration (`6e-4` update, `1.25e-3` parameter) to the production
+  benchmark LR `0.02` (`1.2e-2` update, `2.5e-2` parameter).
+- Four H100 80GB HBM3 GPUs with NV18 links completed all 19 cases and
+  50 candidate programs; `overall_gate=True`. Every candidate was finite,
+  deterministic, physically replica-equal, correctly sharded, and had exact
+  momentum.
+- Production-shaped K/V buckets selected `distributed_exchange`: `1.73x`
+  versus duplicated on TP4 and `2.28-2.30x` on FSDP2xTP2/TP2xEP2.
+- Production-shaped O buckets selected `distributed_large_gram`: `1.75x`
+  versus duplicated on TP4 and `2.17x` on both composed layouts. This was
+  `1.16x` faster than the current exchange execution.
+- TP4 shared-MLP gate/up selected the current direct route at `1.06x`.
+  Other unbucketed MLP/Q/down cases and composed dense MLP gate/up did not
+  clear the `1.05x` gate and selected duplicated execution.
+- No profiler trace was captured; canonical timing was unprofiled as required.
+- The 19-case artifact remains valid for K/V and O. The expanded 76-case
+  calibration completed with `overall_gate=True`, 76 cases, 185 candidates,
+  and exactly 185 uniquely named optimized HLO files.
+- Every production-sized aligned bucket selected direct execution. Square
+  row-sharded buckets selected right-Gram; medium/large aspect-2/4 row-sharded
+  buckets selected exchange. Small-width and singleton crossover cases provide
+  the bucket-population and collective-latency breakpoints.
+- A preceding successful timing capture at `20260724T213504Z` was superseded
+  because 32 singleton/bucket HLO filenames collided. Its timing JSON was
+  intact, but it is not the canonical artifact. The benchmark now fails if
+  candidate names are non-unique or any expected HLO file is absent.
+
+Next:
+
+- Implement the zero-role-input shape/topology cost rule derived from the clean
+  bucket evidence, then confirm it with the matched 64-step matrix.
+- Confirm that policy with the existing matched 64-step training matrix before
+  making any production throughput claim.
+
+## 2026-07-24 [codex] M2 distributed Muon local acceptance
+
+Context:
+
+- Added an explicit Megatron-style Muon TP contract: `duplicated` preserves the
+  accepted one-BF16-gather path, while `distributed` uses a global FP32 norm,
+  BF16 local Gram construction, five packed TP Gram reductions, and a
+  reversible tiled all-to-all for unfavorable matrix orientations.
+- Consolidated all TP Muon leaves into one transform with per-leaf decay
+  policy. Compatible leaves use deterministic, 32 MiB-capped reduction
+  buckets. Replica synchronization and parameter/gradient/momentum/update
+  shardings remain role-specific.
+- Distributed execution is intentionally marked non-exact: fake-device
+  calibration found bounded absolute differences from duplicated execution due
+  to floating-point reduction order. No GPU performance result is claimed.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+uv run pytest -q tests/jaxtitan/test_optim.py
+uv run pytest -q \
+  tests/jaxtitan/test_config.py \
+  tests/jaxtitan/test_preflight.py \
+  tests/jaxtitan/test_resume_compat.py \
+  tests/jaxtitan/test_checkpoints.py
+uv run pytest -q tests/jaxtitan/test_train_step.py
+uv run pytest -q tests/jaxtitan/test_runtime_training.py -k 'muon'
+uv run pytest -q tests/jaxtitan
+
+bash -n scripts/jaxtitan/cloud_dist_muon_m2_matrix.sh
+uv run python -m py_compile \
+  scripts/jaxtitan/analyze_dist_muon_m2_results.py
+uv run pytest -q tests/jaxtitan/test_dist_muon_m2_analysis.py
+
+for cfg in \
+  configs/jaxtitan/cloud_4gpu_profile64_dense_tp_muon.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_dense_tp_muon_distributed.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_dense_fsdp_tp_muon.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_dense_fsdp_tp_muon_distributed.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_dense_zero2_tp_muon.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_dense_zero2_tp_muon_distributed.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_trinity_moe_tp_ep_muon.toml \
+  configs/jaxtitan/cloud_4gpu_profile64_trinity_moe_tp_ep_muon_distributed.toml
+do
+  uv run jaxtitan config check "$cfg"
+done
+
+git diff --check
+```
+
+Artifacts:
+
+- Branch: `codex/distributed-muon-mode`, stacked on the accepted
+  `reference_once` implementation commit `3f03d7e`.
+- Cloud runner:
+  `scripts/jaxtitan/cloud_dist_muon_m2_matrix.sh`.
+- Cloud comparison:
+  `scripts/jaxtitan/analyze_dist_muon_m2_results.py`.
+- Expected cloud evidence:
+  `cloud_results/dist_muon_m2_YYYYMMDDTHHMMSSZ_lightweight.tgz` and its
+  `.sha256`; full profiler trees remain in the eight `runs/` directories.
+
+Result:
+
+- Optimizer suite: `66 passed`.
+- Config/preflight/resume/checkpoint suite: `197 passed`.
+- Full train-step suite: `51 passed`.
+- Complete fake-device Jaxtitan suite: `691 passed, 1 skipped` in `553.24s`.
+- Direct and exchange HLO contain no logical-matrix all-gather, one named norm
+  reduction and five named packed Gram reductions per bucket. Exchange leaves
+  additionally contain one forward and one reverse all-to-all.
+- Five-step tests cover TP, FSDP+TP, ZeRO2+TP, and TP+EP, adversarial replica
+  disagreement, grad clipping, zero/near-zero inputs, checkpoint continuation,
+  and deterministic repeated execution.
+
+Next:
+
+- Run the eight-config matched matrix on one four-H100 node, preferably
+  SXM/NVLink. Require every run to complete train/checkpoint/eval/sample with
+  finite state and require distributed median step time to beat duplicated for
+  all four layouts before selecting it as the production default.
 
 ## 2026-07-21 [codex] M1 four-A100 acceptance and trace analysis
 
@@ -787,3 +979,80 @@ Next:
   route available in tests, but expose no second user-facing runtime stack.
 - Re-run only the four representative MoE profiles after M1; do not repeat the
   full 15-run matrix until a shared hot path changes.
+
+## 2026-07-23 [codex] M2 Phase 0-2 local numerical gate
+
+Context:
+
+- Bound host-static, role-specific parameter, gradient, momentum, and update
+  shardings for every `dist_muon_exact` leaf.
+- Implemented the Phase 1 `reference_once` traversal: replica synchronization,
+  local momentum/Nesterov, one physical two-byte logical-matrix gather,
+  unchanged BF16 Newton-Schulz, and local momentum/update/decay.
+- Prototyped unbucketed `gram5_direct` and `gram5_exchange`. The direct path
+  failed the unchanged multi-step `rtol=1e-5, atol=1e-5` numerical gate, so the
+  candidate was removed rather than exposed as an exact production execution.
+
+Commands:
+
+```bash
+cd /home/veer/Master/projects/research
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_optim.py::test_distributed_gram_muon_matches_reference_over_multiple_steps \
+  --maxfail=2
+
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_optim.py \
+  -k 'distributed_muon_binds_role_specific or exact_distributed_muon_update or reference_once_lowers' \
+  tests/jaxtitan/test_preflight.py \
+  tests/jaxtitan/test_runtime_training.py
+
+git diff --check
+
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q tests/jaxtitan/test_optim.py tests/jaxtitan/test_preflight.py \
+  -k 'muon or optimizer_policy or preflight_auto_resolves_tensor_parallel_muon'
+
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q tests/jaxtitan/test_runtime_training.py \
+  -k 'muon or optimizer_policy'
+
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q tests/jaxtitan/test_optim.py
+```
+
+Artifacts:
+
+- Branch: `codex/distributed-muon-m2`, base commit `3000985`.
+- No cloud run or W&B artifact was produced.
+
+Result:
+
+- Phase 0-1 focused gate: `9 passed, 145 deselected`.
+- Optimizer/preflight Muon gate: `29 passed, 49 deselected`.
+- Runtime-training Muon gate: `7 passed, 60 deselected`.
+- Complete optimizer module: `38 passed`.
+- `git diff --check` passed.
+- Optimized CPU HLO contains one `u16[8,16]` all-gather for the Phase 1
+  reference leaf and no FP32 full-matrix gather.
+- The Phase 2 matrix `(8, 32)` with `P(None, "tp")` failed after momentum
+  evolution with `assert jnp.allclose(..., rtol=1e-5, atol=1e-5)`.
+- The earliest mismatch is BF16 reduction ordering: the logical reference and
+  sharded partial norm/Gram reductions do not preserve the same accumulation
+  tree. Newton-Schulz amplifies the rounded difference to approximately
+  `1e-4` in an update. FP32 partial accumulators do not restore equivalence
+  because the split GEMM and collective still change the accumulation order.
+- This is not a transpose, exchange, or replica-axis bug. It is an
+  incompatibility between eliminating the full gather and requiring the
+  current BF16 reference result at `1e-5` for arbitrary inputs.
+
+Next:
+
+- Decide whether M2 should preserve exact current BF16 semantics and stop at
+  `reference_once`, or define a new numerically stable distributed Muon
+  reference (for example FP32 norm/Gram semantics) and validate that optimizer
+  change as a scored mechanism before implementing direct/exchange buckets.
+- Do not run four-GPU performance acceptance for `gram5_direct` until that
+  numerical contract is decided.
