@@ -1,4 +1,5 @@
 import math
+from dataclasses import replace
 
 import jax
 import jax.numpy as jnp
@@ -23,7 +24,13 @@ from jaxtitan.optim import (
     zeropower_via_newton_schulz,
 )
 from jaxtitan.optim.dion2 import dion2_policy_constants, dion2_transform, polar_express, select_dion2_slices
-from jaxtitan.optim.muon import MuonLeafExecutionPlan, distributed_muon_transform
+from jaxtitan.optim.build import _assign_muon_bucket_ids
+from jaxtitan.optim.muon import (
+    MUON_GRAM_RESTART_INDICES,
+    MuonLeafExecutionPlan,
+    distributed_muon_transform,
+    zeropower_via_gram_newton_schulz,
+)
 from jaxtitan.optim.muon_policy import (
     MUON_DIRECT_BUCKET_LIMIT_BYTES,
     MUON_DIRECT_SINGLETON_LIMIT_BYTES,
@@ -290,6 +297,63 @@ def test_muon_newton_schulz_is_finite_shape_preserving_and_deterministic() -> No
     assert jnp.all(jnp.isfinite(expert_result))
     assert jnp.all(first == second)
     assert jnp.allclose(expert_result[0], first)
+
+
+@pytest.mark.parametrize(
+    ("shape", "kind"),
+    [
+        ((8, 16), "random"),
+        ((16, 8), "random"),
+        ((8, 8), "random"),
+        ((8, 16), "zero"),
+        ((8, 16), "near_zero"),
+        ((8, 16), "ill_conditioned"),
+    ],
+)
+def test_gram_newton_schulz_matches_standard_float32(
+    shape: tuple[int, int],
+    kind: str,
+) -> None:
+    if kind == "random":
+        value = jax.random.normal(jax.random.key(sum(shape)), shape)
+    elif kind == "zero":
+        value = jnp.zeros(shape, dtype=jnp.float32)
+    elif kind == "near_zero":
+        value = jax.random.normal(jax.random.key(1), shape) * jnp.float32(1e-12)
+    else:
+        diagonal = jnp.logspace(0.0, -6.0, min(shape), dtype=jnp.float32)
+        indices = jnp.arange(min(shape))
+        value = jnp.zeros(shape, dtype=jnp.float32).at[indices, indices].set(diagonal)
+
+    expected = zeropower_via_newton_schulz(value, precision="float32")
+    actual = zeropower_via_gram_newton_schulz(
+        value,
+        precision="float32",
+        restart_indices=MUON_GRAM_RESTART_INDICES,
+    )
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_gram_newton_schulz_bfloat16_is_finite_and_deterministic() -> None:
+    value = jax.random.normal(jax.random.key(77), (16, 32), dtype=jnp.float32)
+
+    first = zeropower_via_gram_newton_schulz(value)
+    second = zeropower_via_gram_newton_schulz(value)
+    diagnostic = zeropower_via_gram_newton_schulz(value, restart_indices=())
+
+    assert bool(jnp.all(jnp.isfinite(first)))
+    assert bool(jnp.all(jnp.isfinite(diagnostic)))
+    np.testing.assert_array_equal(first, second)
+
+
+def test_gram_newton_schulz_rejects_invalid_restart_contracts() -> None:
+    value = jnp.eye(4, dtype=jnp.float32)
+
+    with pytest.raises(ValueError, match="sorted and unique"):
+        zeropower_via_gram_newton_schulz(value, restart_indices=(2, 1))
+    with pytest.raises(ValueError, match="strictly between"):
+        zeropower_via_gram_newton_schulz(value, restart_indices=(0,))
 
 
 def test_dion2_selects_expected_rows_and_columns() -> None:
@@ -1204,6 +1268,48 @@ def test_distributed_muon_mode_buckets_unequal_gram_shapes() -> None:
     assert sum('frontend_attributes={muon_bucket="0",muon_op="gram"}' in line for line in collective_lines) == 5
     assert sum("f32[80]" in line for line in collective_lines) == 5
     assert not [line for line in collective_lines if " all-to-all(" in line]
+
+
+def test_muon_bucket_compatibility_separates_orthogonalization_contracts() -> None:
+    require_fake_devices()
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
+    sharding = jax.sharding.NamedSharding(
+        mesh,
+        jax.sharding.PartitionSpec(None, "tp"),
+    )
+
+    def plan(path: str) -> MuonLeafExecutionPlan:
+        return MuonLeafExecutionPlan(
+            path=(path,),
+            logical_shape=(16, 32),
+            parameter_sharding=sharding,
+            gradient_sharding=sharding,
+            momentum_sharding=sharding,
+            update_sharding=sharding,
+            parameter_replica_axes=(),
+            gradient_replica_axes=(),
+            momentum_replica_axes=(),
+            update_replica_axes=(),
+            tp_partition_dim=1,
+            transpose_for_shape=False,
+            canonical_tp_dim=1,
+            requested_mode="benchmark",
+            execution="distributed_direct",
+            fallback_reason=None,
+            bucket_id=-1,
+            weight_decay=True,
+        )
+
+    standard = plan("a")
+    recurrence = replace(
+        plan("b"),
+        orthogonalization="gram_newton_schulz",
+        restart_indices=(2,),
+        expected_gram_reduction_count=2,
+    )
+    assigned = _assign_muon_bucket_ids((standard, recurrence))
+
+    assert assigned[0].bucket_id != assigned[1].bucket_id
 
 
 def test_distributed_muon_mode_respects_static_gram_bucket_cap(

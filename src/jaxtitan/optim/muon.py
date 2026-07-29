@@ -23,6 +23,9 @@ MUON_NS_COEFFICIENTS = (3.4445, -4.7750, 2.0315)
 MUON_NS_PRECISION = "bfloat16"
 MUON_RMS_MATCH_SCALE = 0.2
 MUON_SCALE_MODE = "match_rms_adamw"
+MUON_STANDARD_ORTHOGONALIZATION = "standard_newton_schulz"
+MUON_GRAM_ORTHOGONALIZATION = "gram_newton_schulz"
+MUON_GRAM_RESTART_INDICES = (2,)
 
 
 class MuonState(NamedTuple):
@@ -69,6 +72,9 @@ class MuonLeafExecutionPlan:
     cohort_size: int | None = None
     gram_side: str | None = None
     modeled_costs: tuple[tuple[str, int], ...] = ()
+    orthogonalization: str = MUON_STANDARD_ORTHOGONALIZATION
+    restart_indices: tuple[int, ...] = ()
+    expected_gram_reduction_count: int = MUON_NS_STEPS
 
 
 def muon_transform(
@@ -338,10 +344,22 @@ def _planned_zeropower(
             value.astype(jnp.bfloat16),
             plan.gradient_sharding,
         )
-        result = zeropower_via_newton_schulz(
-            logical_input,
-            precision=MUON_NS_PRECISION,
-        ).astype(value.dtype)
+        if plan.orthogonalization == MUON_STANDARD_ORTHOGONALIZATION:
+            result = zeropower_via_newton_schulz(
+                logical_input,
+                precision=MUON_NS_PRECISION,
+            )
+        elif plan.orthogonalization == MUON_GRAM_ORTHOGONALIZATION:
+            result = zeropower_via_gram_newton_schulz(
+                logical_input,
+                precision=MUON_NS_PRECISION,
+                restart_indices=plan.restart_indices,
+            )
+        else:
+            raise ValueError(
+                f"unsupported distributed Muon orthogonalization {plan.orthogonalization!r}"
+            )
+        result = result.astype(value.dtype)
         return jax.lax.with_sharding_constraint(result, plan.update_sharding)
     if plan.execution in {
         "distributed_direct",
@@ -371,6 +389,8 @@ def _bucketed_distributed_zeropower(
         raise ValueError("distributed Muon bucket requires equally sized non-empty values and plans")
     mesh = plans[0].gradient_sharding.mesh
     execution = plans[0].execution
+    orthogonalization = plans[0].orthogonalization
+    restart_indices = plans[0].restart_indices
     bucket_id = plans[0].bucket_id
     if execution not in {
         "distributed_direct",
@@ -378,7 +398,26 @@ def _bucketed_distributed_zeropower(
         "distributed_large_gram",
     }:
         raise ValueError(f"unsupported bucketed distributed Muon execution {execution!r}")
-    if any(plan.gradient_sharding.mesh != mesh or plan.execution != execution for plan in plans):
+    if orthogonalization not in {
+        MUON_STANDARD_ORTHOGONALIZATION,
+        MUON_GRAM_ORTHOGONALIZATION,
+    }:
+        raise ValueError(
+            f"unsupported distributed Muon orthogonalization {orthogonalization!r}"
+        )
+    expected_reductions = (
+        MUON_NS_STEPS
+        if orthogonalization == MUON_STANDARD_ORTHOGONALIZATION
+        else 1 + len(restart_indices)
+    )
+    if any(
+        plan.gradient_sharding.mesh != mesh
+        or plan.execution != execution
+        or plan.orthogonalization != orthogonalization
+        or plan.restart_indices != restart_indices
+        or plan.expected_gram_reduction_count != expected_reductions
+        for plan in plans
+    ):
         raise ValueError("distributed Muon bucket contains incompatible execution plans")
     if execution == "distributed_large_gram" and any(plan.canonical_tp_dim != 0 for plan in plans):
         raise ValueError("large-Gram distributed Muon requires the canonical row dimension to be TP-sharded")
@@ -409,13 +448,12 @@ def _bucketed_distributed_zeropower(
                         tiled=True,
                     )
             xs.append(x)
-        a, b, c = MUON_NS_COEFFICIENTS
-        for _ in range(MUON_NS_STEPS):
+        def reduced_grams(current_xs: list[jax.Array]) -> tuple[jax.Array, ...]:
             gram_shapes = tuple(
                 (x.shape[1], x.shape[1])
                 if execution == "distributed_large_gram"
                 else (x.shape[0], x.shape[0])
-                for x in xs
+                for x in current_xs
             )
             gram_sizes = tuple(rows * columns for rows, columns in gram_shapes)
             local_grams = tuple(
@@ -424,30 +462,83 @@ def _bucketed_distributed_zeropower(
                     if execution == "distributed_large_gram"
                     else x @ jnp.swapaxes(x, -1, -2)
                 ).reshape(-1)
-                for x in xs
+                for x in current_xs
             )
             metadata = {"muon_op": "gram", "muon_bucket": str(bucket_id)}
             if execution == "distributed_large_gram":
                 metadata["muon_gram_side"] = "right"
             with set_xla_metadata(**metadata):
-                reduced_grams = jax.lax.psum(jnp.concatenate(local_grams), "tp")
-            next_xs = []
+                packed_grams = jax.lax.psum(jnp.concatenate(local_grams), "tp")
+            grams = []
             offset = 0
-            for x, gram_shape, gram_size in zip(xs, gram_shapes, gram_sizes, strict=True):
-                gram = jax.lax.dynamic_slice_in_dim(
-                    reduced_grams,
-                    offset,
-                    gram_size,
-                ).reshape(gram_shape)
-                gram2 = gram @ gram
-                polynomial = b * gram + c * gram2
-                next_xs.append(
-                    a * x + x @ polynomial
-                    if execution == "distributed_large_gram"
-                    else a * x + polynomial @ x
+            for gram_shape, gram_size in zip(gram_shapes, gram_sizes, strict=True):
+                gram = jax.lax.dynamic_slice_in_dim(packed_grams, offset, gram_size).reshape(
+                    gram_shape
                 )
+                grams.append(gram)
                 offset += gram_size
-            xs = next_xs
+            return tuple(grams)
+
+        def apply_transforms(
+            current_xs: list[jax.Array],
+            transforms: list[jax.Array],
+        ) -> list[jax.Array]:
+            return [
+                x @ transform
+                if execution == "distributed_large_gram"
+                else transform @ x
+                for x, transform in zip(current_xs, transforms, strict=True)
+            ]
+
+        a, b, c = MUON_NS_COEFFICIENTS
+        if orthogonalization == MUON_STANDARD_ORTHOGONALIZATION:
+            for _ in range(MUON_NS_STEPS):
+                grams = reduced_grams(xs)
+                next_xs = []
+                for x, gram in zip(xs, grams, strict=True):
+                    gram2 = gram @ gram
+                    polynomial = b * gram + c * gram2
+                    next_xs.append(
+                        a * x + x @ polynomial
+                        if execution == "distributed_large_gram"
+                        else a * x + polynomial @ x
+                    )
+                xs = next_xs
+        else:
+            grams = list(reduced_grams(xs))
+            transforms: list[jax.Array] | None = None
+            restart_set = frozenset(restart_indices)
+            for iteration in range(MUON_NS_STEPS):
+                if iteration in restart_set:
+                    if transforms is None:
+                        raise ValueError("Gram Newton-Schulz cannot restart before its first iteration")
+                    xs = apply_transforms(xs, transforms)
+                    grams = list(reduced_grams(xs))
+                    transforms = None
+                next_transforms = []
+                next_grams = []
+                for gram_index, gram in enumerate(grams):
+                    gram2 = gram @ gram
+                    z = b * gram + c * gram2
+                    if transforms is None:
+                        identity = jnp.eye(gram.shape[0], dtype=gram.dtype)
+                        transform = z + a * identity
+                    else:
+                        transform = transforms[gram_index] @ z + a * transforms[gram_index]
+                    next_transforms.append(transform)
+                    if (
+                        iteration != MUON_NS_STEPS - 1
+                        and iteration + 1 not in restart_set
+                    ):
+                        rz = gram @ z + a * gram
+                        next_grams.append(z @ rz + a * rz)
+                    else:
+                        next_grams.append(gram)
+                transforms = next_transforms
+                grams = next_grams
+            if transforms is None:
+                raise ValueError("Gram Newton-Schulz produced no accumulated transform")
+            xs = apply_transforms(xs, transforms)
         results = []
         for x, local, plan in zip(xs, locals_, plans, strict=True):
             if execution == "distributed_exchange":
@@ -516,6 +607,61 @@ def zeropower_via_newton_schulz(value: jax.Array, *, precision: str = MUON_NS_PR
     return x.astype(original_dtype)
 
 
+def zeropower_via_gram_newton_schulz(
+    value: jax.Array,
+    *,
+    precision: str = MUON_NS_PRECISION,
+    restart_indices: tuple[int, ...] = MUON_GRAM_RESTART_INDICES,
+) -> jax.Array:
+    """Benchmark-only Gram recurrence equivalent of the five-step Muon map."""
+
+    if len(value.shape) not in {2, 3}:
+        raise ValueError(
+            "Muon Gram Newton-Schulz expects rank-2 or expert-axis rank-3 arrays, "
+            f"got shape {value.shape}"
+        )
+    _validate_newton_schulz_precision(precision)
+    _validate_gram_restart_indices(restart_indices)
+    original_dtype = value.dtype
+    compute_dtype = jnp.bfloat16 if precision == "bfloat16" else jnp.float32
+    x = value.astype(compute_dtype)
+    norm_axes = (-2, -1) if x.ndim == 3 else None
+    x = x / jnp.maximum(
+        jnp.linalg.norm(x, axis=norm_axes, keepdims=norm_axes is not None),
+        jnp.asarray(MUON_NS_EPS, dtype=x.dtype),
+    )
+    transposed = x.shape[-2] > x.shape[-1]
+    if transposed:
+        x = jnp.swapaxes(x, -1, -2)
+
+    gram = x @ jnp.swapaxes(x, -1, -2)
+    transform = None
+    restart_set = frozenset(restart_indices)
+    a, b, c = MUON_NS_COEFFICIENTS
+    for iteration in range(MUON_NS_STEPS):
+        if iteration in restart_set:
+            if transform is None:
+                raise ValueError("Gram Newton-Schulz cannot restart before its first iteration")
+            x = transform @ x
+            gram = x @ jnp.swapaxes(x, -1, -2)
+            transform = None
+        gram2 = gram @ gram
+        z = b * gram + c * gram2
+        if transform is None:
+            transform = z + a * jnp.eye(gram.shape[-1], dtype=gram.dtype)
+        else:
+            transform = transform @ z + a * transform
+        if iteration != MUON_NS_STEPS - 1 and iteration + 1 not in restart_set:
+            rz = gram @ z + a * gram
+            gram = z @ rz + a * rz
+    if transform is None:
+        raise ValueError("Gram Newton-Schulz produced no accumulated transform")
+    x = transform @ x
+    if transposed:
+        x = jnp.swapaxes(x, -1, -2)
+    return x.astype(original_dtype)
+
+
 def muon_policy_constants() -> dict[str, Any]:
     """Return stable Muon constants recorded in artifacts."""
 
@@ -539,6 +685,16 @@ def _rms_match_scale(shape: tuple[int, ...]) -> jax.Array:
 def _validate_newton_schulz_precision(precision: str) -> None:
     if precision not in {"bfloat16", "float32"}:
         raise ValueError(f"unsupported Muon Newton-Schulz precision {precision!r}")
+
+
+def _validate_gram_restart_indices(restart_indices: tuple[int, ...]) -> None:
+    if tuple(sorted(set(restart_indices))) != restart_indices:
+        raise ValueError("Gram Newton-Schulz restart indices must be sorted and unique")
+    if any(index <= 0 or index >= MUON_NS_STEPS for index in restart_indices):
+        raise ValueError(
+            "Gram Newton-Schulz restart indices must fall strictly between the "
+            f"first and last iteration, got {restart_indices}"
+        )
 
 
 def _all_gather_logical_matrix(value: jax.Array, sharding: NamedSharding | None) -> jax.Array:

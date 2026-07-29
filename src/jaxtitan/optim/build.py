@@ -19,6 +19,7 @@ from jaxtitan.errors import ContractError
 from jaxtitan.models import ParamMetadata
 from jaxtitan.optim.dion2 import dion2_policy_constants, dion2_transform
 from jaxtitan.optim.muon import (
+    MUON_NS_STEPS,
     MuonLeafExecutionPlan,
     distributed_muon_transform,
     muon_policy_constants,
@@ -881,6 +882,9 @@ def _select_muon_shape_policy(
                 cohort_size=decision.cohort_size,
                 gram_side=decision.gram_side,
                 modeled_costs=decision.modeled_costs,
+                expected_gram_reduction_count=(
+                    0 if decision.execution == "duplicated" else MUON_NS_STEPS
+                ),
             )
         )
     return tuple(selected)
@@ -922,6 +926,9 @@ def _assign_muon_bucket_ids(
             continue
         key = (
             plan.execution,
+            plan.orthogonalization,
+            plan.restart_indices,
+            plan.expected_gram_reduction_count,
             tuple(plan.gradient_sharding.mesh.axis_names),
             tuple(plan.gradient_sharding.mesh.shape.items()),
             repr(plan.gradient_sharding.spec),

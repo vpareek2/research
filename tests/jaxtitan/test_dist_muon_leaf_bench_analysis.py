@@ -25,8 +25,11 @@ def _candidate(
     median_ms: float,
     correct: bool = True,
     mad_ms: float = 0.01,
+    orthogonalization: str | None = None,
+    restart_indices: tuple[int, ...] = (),
+    hlo_gate: bool = True,
 ) -> dict[str, object]:
-    return {
+    candidate = {
         "execution": execution,
         "correctness_gate": correct,
         "timing_ms": {
@@ -35,6 +38,21 @@ def _candidate(
             "median_abs_deviation": mad_ms,
         },
     }
+    if orthogonalization is not None:
+        suffix = ""
+        if restart_indices:
+            suffix = "_r" + "_".join(str(index) for index in restart_indices)
+        elif orthogonalization == "gram_newton_schulz":
+            suffix = "_no_restart"
+        candidate.update(
+            {
+                "candidate_id": f"{execution}__{orthogonalization}{suffix}",
+                "orthogonalization": orthogonalization,
+                "restart_indices": list(restart_indices),
+                "hlo_contract": {"gate": hlo_gate},
+            }
+        )
+    return candidate
 
 
 def _payload(candidates: list[dict[str, object]]) -> dict[str, object]:
@@ -61,6 +79,20 @@ def _payload(candidates: list[dict[str, object]]) -> dict[str, object]:
             }
         ],
     }
+
+
+def _v2_payload(candidates: list[dict[str, object]]) -> dict[str, object]:
+    payload = _payload(candidates)
+    case = payload["cases"][0]
+    assert isinstance(case, dict)
+    case.update(
+        {
+            "candidate_schema_version": 2,
+            "reference": "duplicated__standard_newton_schulz",
+            "production_candidate_id": "distributed_large_gram__standard_newton_schulz",
+        }
+    )
+    return payload
 
 
 def test_selector_chooses_clear_fastest_correct_candidate() -> None:
@@ -131,3 +163,132 @@ def test_selector_rejects_current_route_correctness_failure() -> None:
     )
 
     assert result["overall_gate"] is False
+
+
+def test_schema_v2_promotes_recurrence_only_against_same_transport() -> None:
+    result = MODULE.analyze_benchmark(
+        _v2_payload(
+            [
+                _candidate(
+                    "duplicated",
+                    median_ms=1.0,
+                    orthogonalization="standard_newton_schulz",
+                ),
+                _candidate(
+                    "duplicated",
+                    median_ms=0.94,
+                    orthogonalization="gram_newton_schulz",
+                    restart_indices=(2,),
+                ),
+                _candidate(
+                    "distributed_large_gram",
+                    median_ms=0.8,
+                    orthogonalization="standard_newton_schulz",
+                ),
+                _candidate(
+                    "distributed_large_gram",
+                    median_ms=0.7,
+                    orthogonalization="gram_newton_schulz",
+                    restart_indices=(2,),
+                ),
+            ]
+        )
+    )
+
+    case = result["cases"][0]
+    assert result["schema_version"] == 2
+    assert result["overall_gate"] is True
+    assert (
+        case["selected_candidate_id"]
+        == "distributed_large_gram__gram_newton_schulz_r2"
+    )
+    selected = next(
+        candidate
+        for candidate in case["candidates"]
+        if candidate["candidate_id"] == case["selected_candidate_id"]
+    )
+    assert selected["promotion_eligible"] is True
+    assert selected["speedup_vs_same_transport_standard"] == pytest.approx(0.8 / 0.7)
+
+
+def test_schema_v2_tie_band_favors_standard_orthogonalization() -> None:
+    result = MODULE.analyze_benchmark(
+        _v2_payload(
+            [
+                _candidate(
+                    "duplicated",
+                    median_ms=1.0,
+                    orthogonalization="standard_newton_schulz",
+                ),
+                _candidate(
+                    "distributed_large_gram",
+                    median_ms=0.7,
+                    orthogonalization="standard_newton_schulz",
+                ),
+                _candidate(
+                    "distributed_large_gram",
+                    median_ms=0.69,
+                    orthogonalization="gram_newton_schulz",
+                    restart_indices=(2,),
+                ),
+            ]
+        )
+    )
+
+    assert (
+        result["cases"][0]["selected_candidate_id"]
+        == "distributed_large_gram__standard_newton_schulz"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("correct", False, "gate"),
+        ("hlo", False, "gate"),
+    ],
+)
+def test_schema_v2_recurrence_failure_blocks_benchmark(
+    field: str,
+    value: bool,
+    message: str,
+) -> None:
+    recurrence = _candidate(
+        "distributed_large_gram",
+        median_ms=0.7,
+        correct=value if field == "correct" else True,
+        orthogonalization="gram_newton_schulz",
+        restart_indices=(2,),
+        hlo_gate=value if field == "hlo" else True,
+    )
+    result = MODULE.analyze_benchmark(
+        _v2_payload(
+            [
+                _candidate(
+                    "duplicated",
+                    median_ms=1.0,
+                    orthogonalization="standard_newton_schulz",
+                ),
+                _candidate(
+                    "distributed_large_gram",
+                    median_ms=0.8,
+                    orthogonalization="standard_newton_schulz",
+                ),
+                recurrence,
+            ]
+        )
+    )
+
+    assert result["overall_gate"] is False, message
+
+
+def test_schema_v2_rejects_inconsistent_candidate_identity() -> None:
+    candidate = _candidate(
+        "duplicated",
+        median_ms=1.0,
+        orthogonalization="standard_newton_schulz",
+    )
+    candidate["candidate_id"] = "wrong"
+
+    with pytest.raises(ValueError, match="does not match"):
+        MODULE.analyze_benchmark(_v2_payload([candidate]))
