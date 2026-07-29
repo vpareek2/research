@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -13,10 +14,13 @@ MIN_SPEEDUP = 1.05
 TIE_FRACTION = 0.03
 MAX_MAD_FRACTION = 0.05
 _SIMPLICITY = {
+    "duplicated": 3,
     "distributed_direct": 0,
     "distributed_large_gram": 1,
     "distributed_exchange": 2,
 }
+STANDARD_ORTHOGONALIZATION = "standard_newton_schulz"
+GRAM_ORTHOGONALIZATION = "gram_newton_schulz"
 
 
 def main() -> int:
@@ -49,7 +53,7 @@ def analyze_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("distributed Muon benchmark contains no cases")
     recommendations = _production_recommendations(rows)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_schema_version": payload.get("schema_version"),
         "hardware": {
             "backend": payload.get("backend"),
@@ -66,71 +70,161 @@ def analyze_benchmark(payload: dict[str, Any]) -> dict[str, Any]:
         "cases": rows,
         "overall_gate": all(row["required_correctness_gate"] for row in rows),
         "selected_execution_counts": _counts(row["selected_execution"] for row in rows),
+        "selected_candidate_counts": _counts(row["selected_candidate_id"] for row in rows),
         "production_recommendations": recommendations,
         "shape_topology_samples": _shape_topology_samples(rows),
     }
 
 
 def _select_case(case: dict[str, Any]) -> dict[str, Any]:
-    candidates = {candidate["execution"]: candidate for candidate in case.get("candidates", ())}
-    duplicated = candidates.get("duplicated")
+    candidate_schema_version = int(case.get("candidate_schema_version", 1))
+    normalized = [
+        _normalize_candidate(candidate, schema_version=candidate_schema_version)
+        for candidate in case.get("candidates", ())
+    ]
+    candidates = {candidate["candidate_id"]: candidate for candidate in normalized}
+    if len(candidates) != len(normalized):
+        raise ValueError(f"Muon benchmark case {case.get('name')!r} has duplicate candidate identities")
+    reference_id = str(
+        case.get(
+            "reference",
+            _candidate_id("duplicated", STANDARD_ORTHOGONALIZATION, ()),
+        )
+    )
+    if reference_id == "duplicated":
+        reference_id = _candidate_id("duplicated", STANDARD_ORTHOGONALIZATION, ())
+    duplicated = candidates.get(reference_id)
     if duplicated is None:
         raise ValueError(f"Muon benchmark case {case.get('name')!r} is missing duplicated reference")
     duplicated_ms = _median_ms(duplicated)
-    current_execution = next(
-        (
-            execution
-            for execution in ("distributed_direct", "distributed_exchange", "duplicated")
-            if execution in candidates
-        ),
-        "duplicated",
+    current_candidate_id = str(
+        case.get(
+            "production_candidate_id",
+            _legacy_current_candidate_id(candidates),
+        )
     )
-    current = candidates.get(current_execution)
+    current = candidates.get(current_candidate_id)
     if current is None:
         raise ValueError(f"Muon benchmark case {case.get('name')!r} is missing current execution")
 
-    eligible = []
+    same_transport_standard = {
+        candidate["execution"]: candidate
+        for candidate in candidates.values()
+        if candidate["orthogonalization"] == STANDARD_ORTHOGONALIZATION
+    }
+    for candidate in candidates.values():
+        if (
+            candidate["orthogonalization"] == GRAM_ORTHOGONALIZATION
+            and candidate["execution"] not in same_transport_standard
+        ):
+            raise ValueError(
+                f"recurrence candidate {candidate['candidate_id']!r} is missing its "
+                "same-transport standard reference"
+            )
+    eligible: list[tuple[str, float]] = []
     candidate_rows = []
-    for execution, candidate in candidates.items():
+    recurrence_correctness = []
+    for candidate_id, candidate in candidates.items():
+        execution = candidate["execution"]
+        orthogonalization = candidate["orthogonalization"]
         timing_ms = _median_ms(candidate)
-        mad_fraction = float(candidate["timing_ms"]["median_abs_deviation"]) / timing_ms
+        p95_ms = float(candidate["timing_ms"]["p95"])
+        mad_ms = float(candidate["timing_ms"]["median_abs_deviation"])
+        if (
+            not math.isfinite(p95_ms)
+            or p95_ms <= 0.0
+            or not math.isfinite(mad_ms)
+            or mad_ms < 0.0
+        ):
+            raise ValueError(f"candidate {candidate_id!r} has nonfinite or invalid timing")
+        mad_fraction = mad_ms / timing_ms
         stable = mad_fraction <= MAX_MAD_FRACTION
         correct = bool(candidate.get("correctness_gate"))
         speedup = duplicated_ms / timing_ms
+        standard = same_transport_standard.get(execution)
+        speedup_vs_same_transport_standard = (
+            None if standard is None else _median_ms(standard) / timing_ms
+        )
+        hlo_gate = (
+            True
+            if candidate_schema_version == 1
+            else bool(candidate.get("hlo_contract", {}).get("gate"))
+        )
+        recurrence = orthogonalization == GRAM_ORTHOGONALIZATION
+        if recurrence:
+            recurrence_correctness.append(correct and hlo_gate)
+        promotion_eligible = bool(
+            recurrence
+            and correct
+            and stable
+            and hlo_gate
+            and speedup_vs_same_transport_standard is not None
+            and speedup_vs_same_transport_standard >= MIN_SPEEDUP
+            and (execution == "duplicated" or speedup >= MIN_SPEEDUP)
+        )
         candidate_rows.append(
             {
+                "candidate_id": candidate_id,
                 "execution": execution,
+                "orthogonalization": orthogonalization,
+                "restart_indices": list(candidate["restart_indices"]),
                 "median_ms": timing_ms,
-                "p95_ms": float(candidate["timing_ms"]["p95"]),
+                "p95_ms": p95_ms,
                 "mad_fraction": mad_fraction,
                 "speedup_vs_duplicated": speedup,
+                "speedup_vs_same_transport_standard": speedup_vs_same_transport_standard,
                 "correctness_gate": correct,
                 "stability_gate": stable,
+                "hlo_gate": hlo_gate,
+                "promotion_eligible": promotion_eligible,
                 "collective_operand_model": candidate.get("collective_operand_model"),
             }
         )
-        if execution != "duplicated" and correct and stable and speedup >= MIN_SPEEDUP:
-            eligible.append((execution, timing_ms))
+        if orthogonalization == STANDARD_ORTHOGONALIZATION:
+            if candidate_id == reference_id or (
+                execution != "duplicated"
+                and correct
+                and stable
+                and hlo_gate
+                and speedup >= MIN_SPEEDUP
+            ):
+                eligible.append((candidate_id, timing_ms))
+        elif promotion_eligible:
+            eligible.append((candidate_id, timing_ms))
 
-    selected_execution = "duplicated"
+    selected_candidate_id = reference_id
     reason = "no_candidate_cleared_speed_and_correctness_gates"
     if eligible:
-        fastest_ms = min(timing for _execution, timing in eligible)
+        fastest_ms = min(timing for _candidate_id_value, timing in eligible)
         tied = [
-            (execution, timing)
-            for execution, timing in eligible
+            (candidate_id, timing)
+            for candidate_id, timing in eligible
             if timing <= fastest_ms * (1.0 + TIE_FRACTION)
         ]
-        selected_execution, _selected_ms = min(
+        selected_candidate_id, _selected_ms = min(
             tied,
-            key=lambda item: (_SIMPLICITY[item[0]], item[1], item[0]),
+            key=lambda item: (
+                _candidate_simplicity(candidates[item[0]]),
+                item[1],
+                item[0],
+            ),
         )
         reason = "fastest_clear_candidate_with_simplicity_tie_break"
 
-    selected_ms = _median_ms(candidates[selected_execution])
+    selected = candidates[selected_candidate_id]
+    selected_execution = selected["execution"]
+    selected_ms = _median_ms(selected)
     required_correctness_gate = bool(
         duplicated.get("correctness_gate")
         and current.get("correctness_gate")
+        and (
+            candidate_schema_version == 1
+            or (
+                duplicated.get("hlo_contract", {}).get("gate")
+                and current.get("hlo_contract", {}).get("gate")
+                and all(recurrence_correctness)
+            )
+        )
     )
     return {
         "name": case["name"],
@@ -147,19 +241,95 @@ def _select_case(case: dict[str, Any]) -> dict[str, Any]:
             "policy_features",
             _policy_features_from_case(case),
         ),
-        "current_execution": current_execution,
+        "candidate_schema_version": candidate_schema_version,
+        "current_candidate_id": current_candidate_id,
+        "current_execution": current["execution"],
+        "selected_candidate_id": selected_candidate_id,
         "selected_execution": selected_execution,
+        "selected_orthogonalization": selected["orthogonalization"],
+        "selected_restart_indices": list(selected["restart_indices"]),
         "selection_reason": reason,
         "selected_speedup_vs_duplicated": duplicated_ms / selected_ms,
         "selected_speedup_vs_current": _median_ms(current) / selected_ms,
         "required_correctness_gate": required_correctness_gate,
-        "candidates": sorted(candidate_rows, key=lambda row: row["execution"]),
+        "candidates": sorted(candidate_rows, key=lambda row: row["candidate_id"]),
     }
+
+
+def _normalize_candidate(
+    candidate: dict[str, Any],
+    *,
+    schema_version: int,
+) -> dict[str, Any]:
+    execution = str(candidate["execution"])
+    orthogonalization = str(
+        candidate.get("orthogonalization", STANDARD_ORTHOGONALIZATION)
+    )
+    restart_indices = tuple(int(value) for value in candidate.get("restart_indices", ()))
+    expected_id = _candidate_id(execution, orthogonalization, restart_indices)
+    candidate_id = str(candidate.get("candidate_id", expected_id))
+    if schema_version >= 2:
+        if candidate_id != expected_id:
+            raise ValueError(
+                f"candidate identity {candidate_id!r} does not match its transport "
+                f"and orthogonalization contract {expected_id!r}"
+            )
+        if orthogonalization not in {
+            STANDARD_ORTHOGONALIZATION,
+            GRAM_ORTHOGONALIZATION,
+        }:
+            raise ValueError(f"unsupported Muon orthogonalization {orthogonalization!r}")
+        if not isinstance(candidate.get("hlo_contract"), dict):
+            raise ValueError(f"candidate {candidate_id!r} is missing its HLO contract")
+    normalized = dict(candidate)
+    normalized.update(
+        {
+            "candidate_id": candidate_id,
+            "execution": execution,
+            "orthogonalization": orthogonalization,
+            "restart_indices": restart_indices,
+        }
+    )
+    return normalized
+
+
+def _candidate_id(
+    execution: str,
+    orthogonalization: str,
+    restart_indices: tuple[int, ...],
+) -> str:
+    suffix = ""
+    if restart_indices:
+        suffix = "_r" + "_".join(str(index) for index in restart_indices)
+    elif orthogonalization == GRAM_ORTHOGONALIZATION:
+        suffix = "_no_restart"
+    return f"{execution}__{orthogonalization}{suffix}"
+
+
+def _legacy_current_candidate_id(candidates: dict[str, dict[str, Any]]) -> str:
+    by_execution = {
+        candidate["execution"]: candidate_id
+        for candidate_id, candidate in candidates.items()
+        if candidate["orthogonalization"] == STANDARD_ORTHOGONALIZATION
+    }
+    for execution in ("distributed_direct", "distributed_exchange", "duplicated"):
+        if execution in by_execution:
+            return by_execution[execution]
+    return _candidate_id("duplicated", STANDARD_ORTHOGONALIZATION, ())
+
+
+def _candidate_simplicity(candidate: dict[str, Any]) -> tuple[int, int]:
+    return (
+        0
+        if candidate["orthogonalization"] == STANDARD_ORTHOGONALIZATION
+        else 1,
+        _SIMPLICITY[candidate["execution"]],
+    )
 
 
 def _median_ms(candidate: dict[str, Any]) -> float:
     value = float(candidate["timing_ms"]["median"])
-    if value <= 0.0:
+    if not math.isfinite(value) or value <= 0.0:
         raise ValueError(f"candidate {candidate.get('execution')!r} has non-positive median")
     return value
 
@@ -181,7 +351,10 @@ def _production_recommendations(rows: list[dict[str, Any]]) -> list[dict[str, An
             "source_case": row["name"],
             "source_kind": row["kind"],
             "policy_features": row["policy_features"],
+            "selected_candidate_id": row["selected_candidate_id"],
             "selected_execution": row["selected_execution"],
+            "selected_orthogonalization": row["selected_orthogonalization"],
+            "selected_restart_indices": row["selected_restart_indices"],
             "speedup_vs_duplicated": row["selected_speedup_vs_duplicated"],
             "speedup_vs_current": row["selected_speedup_vs_current"],
         }
@@ -205,7 +378,9 @@ def _shape_topology_samples(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "source_case": row["name"],
             "source_kind": row["kind"],
             "policy_features": row["policy_features"],
+            "selected_candidate_id": row["selected_candidate_id"],
             "selected_execution": row["selected_execution"],
+            "selected_orthogonalization": row["selected_orthogonalization"],
             "speedup_vs_duplicated": row["selected_speedup_vs_duplicated"],
             "speedup_vs_current": row["selected_speedup_vs_current"],
         }
@@ -240,16 +415,17 @@ def format_selection(selection: dict[str, Any]) -> str:
         selected = next(
             candidate
             for candidate in case["candidates"]
-            if candidate["execution"] == case["selected_execution"]
+            if candidate["candidate_id"] == case["selected_candidate_id"]
         )
         duplicated = next(
             candidate
             for candidate in case["candidates"]
-            if candidate["execution"] == "duplicated"
+            if candidate["candidate_id"]
+            == _candidate_id("duplicated", STANDARD_ORTHOGONALIZATION, ())
         )
         lines.append(
             f"{case['name']:<37} "
-            f"{case['selected_execution']:<27} "
+            f"{case['selected_candidate_id']:<27} "
             f"{duplicated['median_ms']:>7.3f} "
             f"{selected['median_ms']:>12.3f} "
             f"{case['selected_speedup_vs_duplicated']:>7.3f}x"

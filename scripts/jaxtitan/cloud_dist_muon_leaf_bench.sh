@@ -5,9 +5,10 @@ usage() {
   cat <<'EOF'
 Usage: scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh [--with-trace]
 
-Run the correctness-checked distributed-Muon leaf selector on exactly four
-local GPUs. Canonical selection timing is never profiled. --with-trace performs
-a second short, explicitly non-canonical traced pass for kernel inspection.
+Run the correctness-checked distributed-Muon transport × orthogonalization
+benchmark on exactly four local GPUs. Canonical timing is never profiled.
+--with-trace performs a second short, explicitly non-canonical traced pass for
+kernel inspection.
 EOF
 }
 
@@ -33,7 +34,7 @@ done
 cd "$(git rev-parse --show-toplevel)"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-capture_name="dist_muon_leaf_bench_${timestamp}"
+capture_name="dist_muon_gram_recurrence_bench_${timestamp}"
 capture_dir="cloud_results/${capture_name}"
 benchmark_dir="${capture_dir}/benchmark"
 mkdir -p "$benchmark_dir"
@@ -107,4 +108,4 @@ archive="cloud_results/${capture_name}.tgz"
 tar -czf "$archive" "$capture_dir"
 sha256sum "$archive" | tee "${archive}.sha256"
 du -sh "$archive"
-marker "ALL_DIST_MUON_LEAF_BENCHMARKS_COMPLETE ${archive}"
+marker "ALL_DIST_MUON_GRAM_RECURRENCE_BENCHMARKS_COMPLETE ${archive}"

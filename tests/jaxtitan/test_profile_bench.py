@@ -80,6 +80,44 @@ def test_muon_candidate_matrix_only_offers_valid_exact_topologies() -> None:
     ) == ("duplicated", "distributed_large_gram")
 
 
+def test_muon_candidate_schema_crosses_transport_with_recurrence_only_for_nonsquare() -> None:
+    nonsquare = muon_bench._candidate_specs(
+        shape=(16, 32),
+        tp_partition_dim=1,
+        tp_size=4,
+    )
+    square = muon_bench._candidate_specs(
+        shape=(16, 16),
+        tp_partition_dim=1,
+        tp_size=4,
+    )
+    diagnostics = muon_bench._candidate_specs(
+        shape=(16, 32),
+        tp_partition_dim=1,
+        tp_size=4,
+        include_no_restart=True,
+    )
+
+    assert {candidate.orthogonalization for candidate in nonsquare} == {
+        "standard_newton_schulz",
+        "gram_newton_schulz",
+    }
+    assert {candidate.restart_indices for candidate in nonsquare} == {(), (2,)}
+    assert {candidate.orthogonalization for candidate in square} == {
+        "standard_newton_schulz"
+    }
+    assert any(
+        candidate.orthogonalization == "gram_newton_schulz"
+        and candidate.restart_indices == ()
+        for candidate in diagnostics
+    )
+    assert not any(
+        candidate.orthogonalization == "gram_newton_schulz"
+        and candidate.restart_indices == ()
+        for candidate in nonsquare
+    )
+
+
 def test_muon_timing_summary_reports_tail_and_stability() -> None:
     payload = muon_bench._timing_summary([4.0, 1.0, 3.0, 2.0])
 
@@ -210,6 +248,143 @@ def test_muon_leaf_benchmark_executes_all_unfavorable_candidates() -> None:
         for candidate in payload["candidates"]
         if candidate["execution"] == "duplicated"
     )["correctness_gate"] is True
+
+
+def test_muon_recurrence_candidates_pass_numerical_and_hlo_contracts() -> None:
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
+
+    payload = muon_bench._benchmark_leaf(
+        topology=muon_bench._TP4,
+        mesh=mesh,
+        leaf=muon_bench._Leaf("wide", (16, 32), 1),
+        warmup=0,
+        iters=1,
+        artifact_root=None,
+        trace=False,
+    )
+
+    assert payload["candidate_schema_version"] == 2
+    recurrence = [
+        candidate
+        for candidate in payload["candidates"]
+        if candidate["orthogonalization"] == "gram_newton_schulz"
+    ]
+    assert recurrence
+    assert all(candidate["restart_indices"] == [2] for candidate in recurrence)
+    assert all(candidate["correctness_gate"] for candidate in recurrence)
+    assert all(candidate["hlo_contract"]["gate"] for candidate in payload["candidates"])
+    distributed = next(
+        candidate
+        for candidate in recurrence
+        if candidate["execution"] == "distributed_direct"
+    )
+    assert distributed["hlo_contract"]["observed"]["norm_reductions"] == 1
+    assert distributed["hlo_contract"]["observed"]["gram_reductions"] == 2
+    duplicated = next(
+        candidate
+        for candidate in recurrence
+        if candidate["execution"] == "duplicated"
+    )
+    assert duplicated["hlo_contract"]["observed"]["logical_matrix_gathers"] == 1
+    assert duplicated["hlo_contract"]["observed"]["gram_reductions"] == 0
+
+    row_partitioned = muon_bench._benchmark_leaf(
+        topology=muon_bench._TP4,
+        mesh=mesh,
+        leaf=muon_bench._Leaf("tall", (32, 16), 1),
+        warmup=0,
+        iters=1,
+        artifact_root=None,
+        trace=False,
+    )
+    large = next(
+        candidate
+        for candidate in row_partitioned["candidates"]
+        if candidate["execution"] == "distributed_large_gram"
+        and candidate["orthogonalization"] == "gram_newton_schulz"
+    )
+    exchange = next(
+        candidate
+        for candidate in row_partitioned["candidates"]
+        if candidate["execution"] == "distributed_exchange"
+        and candidate["orthogonalization"] == "gram_newton_schulz"
+    )
+    assert large["hlo_contract"]["observed"]["right_gram_reductions"] == 2
+    assert exchange["hlo_contract"]["observed"]["exchange_forward"] == 1
+    assert exchange["hlo_contract"]["observed"]["exchange_reverse"] == 1
+
+
+def test_muon_no_restart_diagnostic_has_one_gram_reduction() -> None:
+    import jax.numpy as jnp
+    from jax.sharding import NamedSharding, PartitionSpec as P
+
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()[:4], dtype=object), ("tp",))
+    leaf = muon_bench._Leaf("wide", (16, 32), 1)
+    sharding = NamedSharding(mesh, P(None, "tp"))
+    params = {"w": jax.device_put(jnp.ones(leaf.shape, dtype=jnp.float32), sharding)}
+    grads = {"w": jax.device_put(jnp.full(leaf.shape, 0.5, dtype=jnp.float32), sharding)}
+    candidate_spec = next(
+        candidate
+        for candidate in muon_bench._candidate_specs(
+            shape=leaf.shape,
+            tp_partition_dim=leaf.tp_partition_dim,
+            tp_size=4,
+            include_no_restart=True,
+        )
+        if candidate.execution == "distributed_direct"
+        and candidate.orthogonalization == "gram_newton_schulz"
+        and candidate.restart_indices == ()
+    )
+
+    candidate = muon_bench._compile_candidate(
+        topology=muon_bench._TP4,
+        leaf=leaf,
+        sharding=sharding,
+        params=params,
+        grads=grads,
+        candidate_spec=candidate_spec,
+        artifact_root=None,
+    )
+
+    assert candidate.hlo_contract["gate"] is True
+    assert candidate.hlo_contract["observed"]["gram_reductions"] == 1
+
+
+@pytest.mark.parametrize(
+    "topology",
+    [
+        muon_bench._TP4,
+        muon_bench._FSDP2_TP2,
+        muon_bench._Topology("zero2_tp2", (2, 2), ("fsdp", "tp")),
+        muon_bench._TP2_EP2,
+    ],
+    ids=("tp4", "fsdp2_tp2", "zero2_tp2", "tp2_ep2"),
+)
+def test_muon_recurrence_five_step_gate_covers_composed_topologies(
+    topology: muon_bench._Topology,
+) -> None:
+    devices = np.asarray(jax.devices()[:4], dtype=object)
+    mesh = jax.sharding.Mesh(devices.reshape(topology.shape), topology.axes)
+
+    payload = muon_bench._benchmark_leaf(
+        topology=topology,
+        mesh=mesh,
+        leaf=muon_bench._Leaf("wide", (16, 32), 1),
+        warmup=0,
+        iters=1,
+        artifact_root=None,
+        trace=False,
+    )
+
+    recurrence = [
+        candidate
+        for candidate in payload["candidates"]
+        if candidate["orthogonalization"] == "gram_newton_schulz"
+    ]
+    assert recurrence
+    assert all(candidate["correctness_gate"] for candidate in recurrence)
+    assert all(candidate["momentum_exact"] for candidate in recurrence)
+    assert all(candidate["replica_max_abs_error"] == 0.0 for candidate in recurrence)
 
 
 def test_muon_bucket_benchmark_packs_multiple_leaves() -> None:

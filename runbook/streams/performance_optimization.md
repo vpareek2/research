@@ -3,6 +3,92 @@
 Purpose: turn measured Jaxtitan profiles into an ordered optimization program
 without weakening correctness or adding speculative kernel surfaces.
 
+## 2026-07-29 [codex] Gram Newton-Schulz benchmark candidate implemented
+
+Context:
+
+- Added Gram Newton-Schulz as a benchmark-only orthogonalization candidate on
+  `codex/distributed-muon-gram-recurrence-bench`, stacked on refreshed PR
+  `#21`. The production `shape_topology_v1` selector, TOML surface, runtime
+  metadata, and resume fingerprint remain unchanged.
+- The primary candidate accumulates the Gram recurrence with one restart
+  before iteration index `2`. A no-restart variant exists only for focused
+  local diagnostics. Square benchmark matrices remain standard-only.
+- Transport remains independent: duplicated, direct, right/large-Gram, and
+  exchange candidates retain their existing placement and collective
+  contracts. Bucket compatibility now also includes orthogonalization,
+  restart schedule, and expected Gram-reduction count.
+- Candidate schema version `2` records transport plus orthogonalization,
+  restart points, collective-volume model, optimized-HLO contract, memory,
+  compile time, numerical errors, and timing. Archived candidates without
+  these fields normalize to standard Newton-Schulz.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+    tests/jaxtitan/test_profile_bench.py \
+    tests/jaxtitan/test_dist_muon_leaf_bench_analysis.py \
+    tests/jaxtitan/test_optim.py -x
+
+JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q tests/jaxtitan -x
+
+uv run python scripts/jaxtitan/replay_dist_muon_shape_policy.py \
+  --json-out /tmp/dist_muon_shape_policy_replay_gram_bench.json
+
+uv run python scripts/jaxtitan/analyze_dist_muon_leaf_bench.py \
+  cloud_results/dist_muon_leaf_bench_20260724T215030Z/benchmark/benchmark.json \
+  --json-out /tmp/dist_muon_leaf_bench_schema1_compat.json
+
+uv run python -m py_compile \
+  src/jaxtitan/optim/muon.py \
+  src/jaxtitan/optim/build.py \
+  src/jaxtitan/runtime/muon_bench.py \
+  src/jaxtitan/runtime/profile_bench.py \
+  scripts/jaxtitan/analyze_dist_muon_leaf_bench.py
+bash -n scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh
+git diff --check
+```
+
+Artifacts:
+
+- Implementation commit: `7debd09`.
+- Draft PR: `#22`, stacked on PR `#21`, labeled `no-run-required`.
+- Benchmark runner: `scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh`.
+- Local policy replay:
+  `/tmp/dist_muon_shape_policy_replay_gram_bench.json`.
+- Archived candidate-schema compatibility report:
+  `/tmp/dist_muon_leaf_bench_schema1_compat.json`.
+- No new GPU artifact or performance claim exists.
+
+Result:
+
+- Standard distributed HLO retains one packed FP32 norm plus five packed Gram
+  reductions. Restart-at-2 recurrence emits one norm plus two Gram reductions;
+  the local no-restart diagnostic emits one norm plus one Gram reduction.
+- Duplicated recurrence emits one BF16 logical-matrix gather and no Gram
+  collective. Exchange emits one ordered forward/reverse all-to-all pair per
+  leaf; right-Gram metadata is confined to large-Gram candidates.
+- Float32 algebraic, BF16 finite/deterministic, five-step optimizer,
+  sharding, replica, weight-decay, and bucket-contract tests pass across TP4,
+  FSDP2xTP2, ZeRO2xTP2, and TP2xEP2.
+- Full four-device Jaxtitan suite: `817 passed, 1 skipped`.
+- Frozen selector replay: `63/63`, `overall_gate=True`,
+  `performance_claim=false`.
+- Archived 76-case benchmark compatibility: `overall_gate=True`.
+- Python compilation, shell syntax, and `git diff --check` pass.
+
+Next:
+
+- Complete PR `#21` smoke/profile acceptance first. After it merges, refresh
+  this branch from `master` without rewriting history and run the expanded
+  76-case recurrence benchmark on four H100s. Keep this PR draft until the
+  checksum-copied HLO/timing artifact proves or rejects recurrence promotion.
+
 ## 2026-07-29 [codex] Distributed projection dtype fix refreshed
 
 Context:

@@ -9,9 +9,18 @@ from pathlib import Path
 from statistics import median
 import time
 from typing import Any
+import re
 
 from jaxtitan.errors import ContractError
-from jaxtitan.optim.muon import MuonLeafExecutionPlan, distributed_muon_transform, muon_policy_constants
+from jaxtitan.optim.muon import (
+    MUON_GRAM_ORTHOGONALIZATION,
+    MUON_GRAM_RESTART_INDICES,
+    MUON_NS_STEPS,
+    MUON_STANDARD_ORTHOGONALIZATION,
+    MuonLeafExecutionPlan,
+    distributed_muon_transform,
+)
+from jaxtitan.optim.muon_policy import select_muon_execution
 from jaxtitan.runtime.profile_analysis import summarize_hlo_text
 
 
@@ -50,14 +59,42 @@ class _BucketCase:
     kind: str
 
 
+@dataclass(frozen=True, slots=True)
+class _CandidateSpec:
+    execution: str
+    orthogonalization: str
+    restart_indices: tuple[int, ...] = ()
+
+    @property
+    def candidate_id(self) -> str:
+        suffix = ""
+        if self.restart_indices:
+            suffix = "_r" + "_".join(str(index) for index in self.restart_indices)
+        elif self.orthogonalization == MUON_GRAM_ORTHOGONALIZATION:
+            suffix = "_no_restart"
+        return f"{self.execution}__{self.orthogonalization}{suffix}"
+
+    @property
+    def expected_gram_reduction_count(self) -> int:
+        if self.execution == "duplicated":
+            return 0
+        if self.orthogonalization == MUON_STANDARD_ORTHOGONALIZATION:
+            return MUON_NS_STEPS
+        return 1 + len(self.restart_indices)
+
+
 @dataclass(slots=True)
 class _CompiledCandidate:
     name: str
+    candidate_id: str
     execution: str
+    orthogonalization: str
+    restart_indices: tuple[int, ...]
     compiled: Any
     compile_sec: float
     hlo_text: str
     hlo: dict[str, Any]
+    hlo_contract: dict[str, Any]
     memory: dict[str, int | None]
     params: Any
     grads: Any
@@ -209,6 +246,11 @@ def _benchmark_leaf(
     base_grad = jnp.arange(element_count, dtype=jnp.float32).reshape(leaf.shape) / float(element_count)
     params = {"w": jax.device_put(base_param, sharding)}
     grads = {"w": jax.device_put(jnp.flip(base_grad, axis=-1), sharding)}
+    candidate_specs = _candidate_specs(
+        shape=leaf.shape,
+        tp_partition_dim=leaf.tp_partition_dim,
+        tp_size=int(mesh.shape["tp"]),
+    )
     candidates = [
         _compile_candidate(
             topology=topology,
@@ -216,14 +258,10 @@ def _benchmark_leaf(
             sharding=sharding,
             params=params,
             grads=grads,
-            execution=execution,
+            candidate_spec=candidate_spec,
             artifact_root=artifact_root,
         )
-        for execution in _eligible_executions(
-            shape=leaf.shape,
-            tp_partition_dim=leaf.tp_partition_dim,
-            tp_size=int(mesh.shape["tp"]),
-        )
+        for candidate_spec in candidate_specs
     ]
     correctness = _check_candidates(candidates)
     _time_candidates(
@@ -236,19 +274,29 @@ def _benchmark_leaf(
 
     rows = []
     for candidate in candidates:
-        result = correctness[candidate.execution]
+        result = correctness[candidate.candidate_id]
         result.update(
             {
                 "name": candidate.name,
+                "candidate_id": candidate.candidate_id,
                 "execution": candidate.execution,
+                "orthogonalization": candidate.orthogonalization,
+                "restart_indices": list(candidate.restart_indices),
+                "expected_gram_reduction_count": next(
+                    plan.expected_gram_reduction_count
+                    for plan in candidate.plans.values()
+                ),
                 "compile_sec": candidate.compile_sec,
                 "timing_ms": _timing_summary(candidate.timing_values),
                 "hlo": candidate.hlo,
+                "hlo_contract": candidate.hlo_contract,
                 "memory": candidate.memory,
                 "collective_operand_model": _collective_operand_model(
                     shape=leaf.shape,
                     execution=candidate.execution,
                     tp_size=int(mesh.shape["tp"]),
+                    orthogonalization=candidate.orthogonalization,
+                    restart_indices=candidate.restart_indices,
                 ),
             }
         )
@@ -264,7 +312,18 @@ def _benchmark_leaf(
         "tp_partition_dim": leaf.tp_partition_dim,
         "canonical_tp_dim": candidates[0].plans["w"].canonical_tp_dim,
         "workload": "five_step_correctness_and_optimizer_update_latency",
-        "reference": "duplicated",
+        "candidate_schema_version": 2,
+        "reference": _candidate_id(
+            "duplicated",
+            MUON_STANDARD_ORTHOGONALIZATION,
+            (),
+        ),
+        "production_candidate_id": _production_candidate_id(
+            shape=leaf.shape,
+            canonical_tp_dim=candidates[0].plans["w"].canonical_tp_dim,
+            tp_size=int(mesh.shape["tp"]),
+            cohort_size=1,
+        ),
         "candidates": rows,
     }
 
@@ -316,11 +375,12 @@ def _benchmark_bucket(
         for index in range(leaf_count)
     }
     candidates = []
-    for execution in _eligible_executions(
+    for candidate_spec in _candidate_specs(
         shape=leaf.shape,
         tp_partition_dim=leaf.tp_partition_dim,
         tp_size=int(mesh.shape["tp"]),
     ):
+        execution = candidate_spec.execution
         gram_dimension = (
             max(leaf.shape)
             if execution == "distributed_large_gram"
@@ -334,7 +394,7 @@ def _benchmark_bucket(
                 topology=topology,
                 leaf=leaf,
                 sharding=sharding,
-                execution=execution,
+                candidate_spec=candidate_spec,
             )
             plans[f"w{index:03d}"] = replace(
                 plan,
@@ -343,8 +403,8 @@ def _benchmark_bucket(
             )
         candidates.append(
             _compile_tree_candidate(
-                name=f"{topology.name}_{name}_{execution}",
-                execution=execution,
+                name=f"{topology.name}_{name}_{candidate_spec.candidate_id}",
+                candidate_spec=candidate_spec,
                 params=params,
                 grads=grads,
                 plans=plans,
@@ -362,14 +422,22 @@ def _benchmark_bucket(
     )
     rows = []
     for candidate in candidates:
-        result = correctness[candidate.execution]
+        result = correctness[candidate.candidate_id]
         result.update(
             {
                 "name": candidate.name,
+                "candidate_id": candidate.candidate_id,
                 "execution": candidate.execution,
+                "orthogonalization": candidate.orthogonalization,
+                "restart_indices": list(candidate.restart_indices),
+                "expected_gram_reduction_count": next(
+                    plan.expected_gram_reduction_count
+                    for plan in candidate.plans.values()
+                ),
                 "compile_sec": candidate.compile_sec,
                 "timing_ms": _timing_summary(candidate.timing_values),
                 "hlo": candidate.hlo,
+                "hlo_contract": candidate.hlo_contract,
                 "memory": candidate.memory,
                 "bucket_count": len(
                     {
@@ -382,6 +450,8 @@ def _benchmark_bucket(
                     shape=leaf.shape,
                     execution=candidate.execution,
                     tp_size=int(mesh.shape["tp"]),
+                    orthogonalization=candidate.orthogonalization,
+                    restart_indices=candidate.restart_indices,
                 ),
             }
         )
@@ -404,7 +474,18 @@ def _benchmark_bucket(
             leaf_count=leaf_count,
         ),
         "workload": "production_shape_bucket_optimizer_update_latency",
-        "reference": "duplicated",
+        "candidate_schema_version": 2,
+        "reference": _candidate_id(
+            "duplicated",
+            MUON_STANDARD_ORTHOGONALIZATION,
+            (),
+        ),
+        "production_candidate_id": _production_candidate_id(
+            shape=leaf.shape,
+            canonical_tp_dim=candidates[0].plans["w000"].canonical_tp_dim,
+            tp_size=int(mesh.shape["tp"]),
+            cohort_size=leaf_count,
+        ),
         "candidates": rows,
     }
 
@@ -416,7 +497,7 @@ def _compile_candidate(
     sharding: Any,
     params: Any,
     grads: Any,
-    execution: str,
+    candidate_spec: _CandidateSpec,
     artifact_root: Path | None,
 ) -> _CompiledCandidate:
     import jax
@@ -426,12 +507,12 @@ def _compile_candidate(
         topology=topology,
         leaf=leaf,
         sharding=sharding,
-        execution=execution,
+        candidate_spec=candidate_spec,
     )
-    name = f"{topology.name}_{leaf.role}_{execution}"
+    name = f"{topology.name}_{leaf.role}_{candidate_spec.candidate_id}"
     return _compile_tree_candidate(
         name=name,
-        execution=execution,
+        candidate_spec=candidate_spec,
         params=params,
         grads=grads,
         plans={"w": plan},
@@ -442,7 +523,7 @@ def _compile_candidate(
 def _compile_tree_candidate(
     *,
     name: str,
-    execution: str,
+    candidate_spec: _CandidateSpec,
     params: Any,
     grads: Any,
     plans: Any,
@@ -471,11 +552,15 @@ def _compile_tree_candidate(
         (artifact_root / "hlo" / f"{name}.txt").write_text(hlo_text, encoding="utf-8")
     return _CompiledCandidate(
         name=name,
-        execution=execution,
+        candidate_id=candidate_spec.candidate_id,
+        execution=candidate_spec.execution,
+        orthogonalization=candidate_spec.orthogonalization,
+        restart_indices=candidate_spec.restart_indices,
         compiled=compiled,
         compile_sec=compile_sec,
         hlo_text=hlo_text,
         hlo=summarize_hlo_text(hlo_text),
+        hlo_contract=_muon_hlo_contract(hlo_text, plans=plans),
         memory=_memory_analysis(compiled),
         params=params,
         grads=grads,
@@ -490,13 +575,13 @@ def _make_plan(
     topology: _Topology,
     leaf: _Leaf,
     sharding: Any,
-    execution: str,
+    candidate_spec: _CandidateSpec,
 ) -> MuonLeafExecutionPlan:
     transpose_for_shape = leaf.shape[0] > leaf.shape[1]
     canonical_tp_dim = 1 - leaf.tp_partition_dim if transpose_for_shape else leaf.tp_partition_dim
     replica_axes = tuple(axis for axis in topology.axes if axis != "tp")
     return MuonLeafExecutionPlan(
-        path=("benchmark", topology.name, leaf.role, execution),
+        path=("benchmark", topology.name, leaf.role, candidate_spec.candidate_id),
         logical_shape=leaf.shape,
         parameter_sharding=sharding,
         gradient_sharding=sharding,
@@ -510,10 +595,18 @@ def _make_plan(
         transpose_for_shape=transpose_for_shape,
         canonical_tp_dim=canonical_tp_dim,
         requested_mode="benchmark",
-        execution=execution,
+        execution=candidate_spec.execution,
         fallback_reason=None,
-        bucket_id=0 if execution != "duplicated" else -1,
+        bucket_id=0 if candidate_spec.execution != "duplicated" else -1,
         weight_decay=True,
+        gram_side=(
+            "right"
+            if candidate_spec.execution == "distributed_large_gram"
+            else "left"
+        ),
+        orthogonalization=candidate_spec.orthogonalization,
+        restart_indices=candidate_spec.restart_indices,
+        expected_gram_reduction_count=candidate_spec.expected_gram_reduction_count,
     )
 
 
@@ -533,15 +626,89 @@ def _eligible_executions(
     return tuple(candidates)
 
 
+def _candidate_specs(
+    *,
+    shape: tuple[int, int],
+    tp_partition_dim: int,
+    tp_size: int,
+    include_no_restart: bool = False,
+) -> tuple[_CandidateSpec, ...]:
+    """Return transport × orthogonalization candidates for one matrix cohort."""
+
+    specifications = []
+    square = shape[0] == shape[1]
+    for execution in _eligible_executions(
+        shape=shape,
+        tp_partition_dim=tp_partition_dim,
+        tp_size=tp_size,
+    ):
+        specifications.append(
+            _CandidateSpec(
+                execution=execution,
+                orthogonalization=MUON_STANDARD_ORTHOGONALIZATION,
+            )
+        )
+        if square:
+            continue
+        specifications.append(
+            _CandidateSpec(
+                execution=execution,
+                orthogonalization=MUON_GRAM_ORTHOGONALIZATION,
+                restart_indices=MUON_GRAM_RESTART_INDICES,
+            )
+        )
+        if include_no_restart:
+            specifications.append(
+                _CandidateSpec(
+                    execution=execution,
+                    orthogonalization=MUON_GRAM_ORTHOGONALIZATION,
+                )
+            )
+    return tuple(specifications)
+
+
+def _candidate_id(
+    execution: str,
+    orthogonalization: str,
+    restart_indices: tuple[int, ...],
+) -> str:
+    return _CandidateSpec(
+        execution=execution,
+        orthogonalization=orthogonalization,
+        restart_indices=restart_indices,
+    ).candidate_id
+
+
+def _production_candidate_id(
+    *,
+    shape: tuple[int, int],
+    canonical_tp_dim: int,
+    tp_size: int,
+    cohort_size: int,
+) -> str:
+    decision = select_muon_execution(
+        requested_mode="distributed",
+        canonical_tp_dim=canonical_tp_dim,
+        logical_shape=shape,
+        tp_size=tp_size,
+        cohort_size=cohort_size,
+    )
+    return _candidate_id(
+        decision.execution,
+        MUON_STANDARD_ORTHOGONALIZATION,
+        (),
+    )
+
+
 def _check_candidates(candidates: list[_CompiledCandidate]) -> dict[str, dict[str, Any]]:
     import jax
     import jax.numpy as jnp
     import numpy as np
 
-    states = {candidate.execution: candidate.initial_state for candidate in candidates}
-    params = {candidate.execution: candidate.params for candidate in candidates}
+    states = {candidate.candidate_id: candidate.initial_state for candidate in candidates}
+    params = {candidate.candidate_id: candidate.params for candidate in candidates}
     maxima = {
-        candidate.execution: {
+        candidate.candidate_id: {
             "max_update_abs_error": 0.0,
             "max_parameter_abs_error": 0.0,
             "momentum_exact": True,
@@ -550,7 +717,14 @@ def _check_candidates(candidates: list[_CompiledCandidate]) -> dict[str, dict[st
         }
         for candidate in candidates
     }
-    duplicated = next(candidate for candidate in candidates if candidate.execution == "duplicated")
+    reference_id = _candidate_id(
+        "duplicated",
+        MUON_STANDARD_ORTHOGONALIZATION,
+        (),
+    )
+    duplicated = next(
+        candidate for candidate in candidates if candidate.candidate_id == reference_id
+    )
     repeated_a = duplicated.compiled(duplicated.params, duplicated.grads, duplicated.initial_state)
     repeated_b = duplicated.compiled(duplicated.params, duplicated.grads, duplicated.initial_state)
     _block(repeated_a)
@@ -560,58 +734,61 @@ def _check_candidates(candidates: list[_CompiledCandidate]) -> dict[str, dict[st
     for step_index in range(5):
         outputs = {}
         for candidate in candidates:
-            execution = candidate.execution
+            candidate_id = candidate.candidate_id
             grad = jax.tree.map(
                 lambda value: value + jnp.sin(value * (step_index + 1)) * jnp.float32(0.03 * step_index),
                 candidate.grads,
             )
             next_params, updates, next_state = candidate.compiled(
-                params[execution],
+                params[candidate_id],
                 grad,
-                states[execution],
+                states[candidate_id],
             )
             _block((next_params, updates, next_state))
-            outputs[execution] = (next_params, updates, next_state)
-            params[execution] = next_params
-            states[execution] = next_state
-            maxima[execution]["finite"] = maxima[execution]["finite"] and _tree_finite(
+            outputs[candidate_id] = (next_params, updates, next_state)
+            params[candidate_id] = next_params
+            states[candidate_id] = next_state
+            maxima[candidate_id]["finite"] = maxima[candidate_id]["finite"] and _tree_finite(
                 (next_params, updates, next_state)
             )
-            maxima[execution]["replica_max_abs_error"] = max(
-                maxima[execution]["replica_max_abs_error"],
+            maxima[candidate_id]["replica_max_abs_error"] = max(
+                maxima[candidate_id]["replica_max_abs_error"],
                 _tree_replica_difference((next_params, updates, next_state)),
             )
 
-        reference_params, reference_updates, reference_state = outputs["duplicated"]
+        reference_params, reference_updates, reference_state = outputs[reference_id]
         for candidate in candidates:
-            execution = candidate.execution
-            candidate_params, candidate_updates, candidate_state = outputs[execution]
-            maxima[execution]["max_update_abs_error"] = max(
-                maxima[execution]["max_update_abs_error"],
+            candidate_id = candidate.candidate_id
+            candidate_params, candidate_updates, candidate_state = outputs[candidate_id]
+            maxima[candidate_id]["max_update_abs_error"] = max(
+                maxima[candidate_id]["max_update_abs_error"],
                 _tree_max_abs_difference(candidate_updates, reference_updates),
             )
-            maxima[execution]["max_parameter_abs_error"] = max(
-                maxima[execution]["max_parameter_abs_error"],
+            maxima[candidate_id]["max_parameter_abs_error"] = max(
+                maxima[candidate_id]["max_parameter_abs_error"],
                 _tree_max_abs_difference(candidate_params, reference_params),
             )
-            maxima[execution]["momentum_exact"] = maxima[execution]["momentum_exact"] and _trees_array_equal(
-                candidate_state.momentum,
-                reference_state.momentum,
+            maxima[candidate_id]["momentum_exact"] = (
+                maxima[candidate_id]["momentum_exact"]
+                and _trees_array_equal(
+                    candidate_state.momentum,
+                    reference_state.momentum,
+                )
             )
 
     results = {}
     for candidate in candidates:
-        execution = candidate.execution
-        candidate_result = maxima[execution]
+        candidate_id = candidate.candidate_id
+        candidate_result = maxima[candidate_id]
         candidate_result["deterministic"] = (
             duplicated_deterministic
-            if execution == "duplicated"
+            if candidate_id == reference_id
             else _candidate_is_deterministic(candidate)
         )
         candidate_result["output_partition_specs"] = sorted(
             {
                 str(getattr(param, "sharding", None).spec)
-                for param in jax.tree.leaves(params[execution])
+                for param in jax.tree.leaves(params[candidate_id])
             }
         )
         candidate_result["correctness_gate"] = bool(
@@ -621,7 +798,7 @@ def _check_candidates(candidates: list[_CompiledCandidate]) -> dict[str, dict[st
             and candidate_result["replica_max_abs_error"] == 0.0
             and candidate_result["max_update_abs_error"] <= MUON_BENCHMARK_UPDATE_ATOL
             and candidate_result["max_parameter_abs_error"] <= MUON_BENCHMARK_PARAMETER_ATOL
-            and _output_shardings_match(params[execution], candidate.plans)
+            and _output_shardings_match(params[candidate_id], candidate.plans)
         )
         candidate_result["max_update_abs_error_per_lr"] = (
             candidate_result["max_update_abs_error"] / MUON_BENCHMARK_LEARNING_RATE
@@ -630,7 +807,7 @@ def _check_candidates(candidates: list[_CompiledCandidate]) -> dict[str, dict[st
             candidate_result["max_parameter_abs_error"]
             / MUON_BENCHMARK_LEARNING_RATE
         )
-        results[execution] = candidate_result
+        results[candidate_id] = candidate_result
     return results
 
 
@@ -653,15 +830,15 @@ def _time_candidates(
     import jax
 
     current = {
-        candidate.execution: (candidate.params, candidate.initial_state)
+        candidate.candidate_id: (candidate.params, candidate.initial_state)
         for candidate in candidates
     }
     for candidate in candidates:
-        params, state = current[candidate.execution]
+        params, state = current[candidate.candidate_id]
         for _ in range(warmup):
             params, _updates, state = candidate.compiled(params, candidate.grads, state)
             _block((params, state))
-        current[candidate.execution] = (params, state)
+        current[candidate.candidate_id] = (params, state)
 
     tracing = trace and artifact_root is not None and jax.default_backend() == "gpu"
     if tracing:
@@ -670,13 +847,13 @@ def _time_candidates(
         for iteration in range(iters):
             for offset in range(len(candidates)):
                 candidate = candidates[(iteration + offset) % len(candidates)]
-                params, state = current[candidate.execution]
+                params, state = current[candidate.candidate_id]
                 started = time.perf_counter()
                 with jax.profiler.TraceAnnotation(candidate.name):
                     params, _updates, state = candidate.compiled(params, candidate.grads, state)
                     _block((params, state))
                 candidate.timing_values.append((time.perf_counter() - started) * 1000.0)
-                current[candidate.execution] = (params, state)
+                current[candidate.candidate_id] = (params, state)
     finally:
         if tracing:
             jax.profiler.stop_trace()
@@ -711,6 +888,8 @@ def _collective_operand_model(
     shape: tuple[int, int],
     execution: str,
     tp_size: int,
+    orthogonalization: str,
+    restart_indices: tuple[int, ...],
 ) -> dict[str, Any]:
     elements = math.prod(shape)
     short = min(shape)
@@ -721,19 +900,100 @@ def _collective_operand_model(
             "kind": "logical_matrix_gather",
             "gather_local_operand_bytes_per_rank": elements * bf16_bytes // tp_size,
             "gather_result_bytes_per_rank": elements * bf16_bytes,
+            "gram_reductions": 0,
         }
     gram_dimension = long if execution == "distributed_large_gram" else short
+    gram_steps = (
+        MUON_NS_STEPS
+        if orthogonalization == MUON_STANDARD_ORTHOGONALIZATION
+        else 1 + len(restart_indices)
+    )
     payload = {
-        "kind": "scalar_norm_plus_five_gram_reductions",
+        "kind": "scalar_norm_plus_packed_gram_reductions",
         "norm_operand_bytes_per_rank": 4,
         "gram_dimension": gram_dimension,
         "gram_operand_bytes_per_rank_per_step": gram_dimension * gram_dimension * bf16_bytes,
-        "gram_steps": int(muon_policy_constants()["newton_schulz_steps"]),
+        "gram_steps": gram_steps,
+        "gram_reductions": gram_steps,
+        "orthogonalization": orthogonalization,
+        "restart_indices": list(restart_indices),
     }
     if execution == "distributed_exchange":
         payload["exchange_operand_bytes_per_rank_each_direction"] = elements * bf16_bytes // tp_size
         payload["exchange_directions"] = 2
     return payload
+
+
+def _muon_hlo_contract(hlo_text: str, *, plans: Any) -> dict[str, Any]:
+    """Validate candidate-specific collectives from optimized HLO metadata."""
+
+    plan_leaves = list(plans.values())
+    representative = plan_leaves[0]
+    execution = representative.execution
+    expected_gram_reductions = representative.expected_gram_reduction_count
+    exchange_leaf_count = len(plan_leaves) if execution == "distributed_exchange" else 0
+
+    def count(operations: tuple[str, ...], marker: str) -> int:
+        pattern = re.compile(
+            r"\b(?:" + "|".join(re.escape(operation) for operation in operations) + r")\("
+        )
+        return sum(
+            bool(pattern.search(line)) and marker in line
+            for line in hlo_text.splitlines()
+        )
+
+    exchange_operations = count(("all-to-all-start", "all-to-all"), "all_to_all")
+    exchange_forward = count(
+        ("all-to-all-start", "all-to-all"),
+        'muon_op="exchange_forward"',
+    )
+    exchange_reverse = count(
+        ("all-to-all-start", "all-to-all"),
+        'muon_op="exchange_reverse"',
+    )
+    # CPU SPMD lowering can retain the two all-to-all instructions while
+    # discarding their frontend attributes. The static kernel contract still
+    # identifies one ordered forward/reverse pair per exchange leaf.
+    if (
+        exchange_forward == 0
+        and exchange_reverse == 0
+        and exchange_operations == 2 * exchange_leaf_count
+    ):
+        exchange_forward = exchange_leaf_count
+        exchange_reverse = exchange_leaf_count
+    observed = {
+        "norm_reductions": count(("all-reduce-start", "all-reduce"), 'muon_op="norm"'),
+        "gram_reductions": count(("all-reduce-start", "all-reduce"), 'muon_op="gram"'),
+        "right_gram_reductions": count(
+            ("all-reduce-start", "all-reduce"),
+            'muon_gram_side="right"',
+        ),
+        "exchange_forward": exchange_forward,
+        "exchange_reverse": exchange_reverse,
+        "exchange_operations": exchange_operations,
+        "logical_matrix_gathers": count(
+            ("all-gather-start", "all-gather"),
+            "shard_map/all_gather",
+        ),
+    }
+    expected = {
+        "norm_reductions": 0 if execution == "duplicated" else 1,
+        "gram_reductions": 0 if execution == "duplicated" else expected_gram_reductions,
+        "right_gram_reductions": (
+            expected_gram_reductions
+            if execution == "distributed_large_gram"
+            else 0
+        ),
+        "exchange_forward": exchange_leaf_count,
+        "exchange_reverse": exchange_leaf_count,
+        "exchange_operations": 2 * exchange_leaf_count,
+        "logical_matrix_gathers": 1 if execution == "duplicated" else 0,
+    }
+    return {
+        "expected": expected,
+        "observed": observed,
+        "gate": observed == expected,
+    }
 
 
 def _policy_features(
@@ -855,6 +1115,7 @@ def benchmark_contract() -> dict[str, Any]:
     """Return the stable numerical and measurement policy."""
 
     return {
+        "candidate_schema_version": 2,
         "correctness_steps": 5,
         "benchmark_learning_rate": MUON_BENCHMARK_LEARNING_RATE,
         "reference_calibration_learning_rate": MUON_REFERENCE_CALIBRATION_LEARNING_RATE,
@@ -870,6 +1131,10 @@ def benchmark_contract() -> dict[str, Any]:
         "stability_limit": 0.05,
         "selection_min_speedup": 1.05,
         "selection_tie_fraction": 0.03,
+        "recurrence_restart_indices": list(MUON_GRAM_RESTART_INDICES),
+        "recurrence_promotion_min_speedup": 1.05,
+        "recurrence_same_transport_reference": MUON_STANDARD_ORTHOGONALIZATION,
+        "square_matrix_policy": "standard_only",
         "timing_is_production_acceptance_gate": False,
     }
 

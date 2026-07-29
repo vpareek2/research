@@ -110,10 +110,11 @@ def format_benchmark(payload: Mapping[str, Any]) -> str:
         if "candidates" in case:
             lines.append(
                 f"  {case['name']}: shape={case['shape']} placement={case['partition_spec']}"
-            )
+                )
             for candidate in case["candidates"]:
                 lines.append(
-                    f"    {candidate['execution']}: compile={candidate['compile_sec']:.3f}s "
+                    f"    {candidate.get('candidate_id', candidate['execution'])}: "
+                    f"compile={candidate['compile_sec']:.3f}s "
                     f"median={candidate['timing_ms']['median']:.3f}ms "
                     f"p95={candidate['timing_ms']['p95']:.3f}ms "
                     f"correct={str(candidate['correctness_gate']).lower()}"
