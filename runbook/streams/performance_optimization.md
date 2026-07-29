@@ -57,6 +57,7 @@ git diff --check
 Artifacts:
 
 - Implementation commit: `7debd09`.
+- Draft PR: `#22`, stacked on PR `#21`, labeled `no-run-required`.
 - Benchmark runner: `scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh`.
 - Local policy replay:
   `/tmp/dist_muon_shape_policy_replay_gram_bench.json`.

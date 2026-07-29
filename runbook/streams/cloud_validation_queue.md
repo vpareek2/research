@@ -44,6 +44,7 @@ scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh --with-trace
 Artifacts:
 
 - Implementation commit: `7debd09`.
+- Draft PR: `#22`, stacked on PR `#21`, labeled `no-run-required`.
 - Expected capture:
   `cloud_results/dist_muon_gram_recurrence_bench_<timestamp>/`.
 - Expected bundle:
