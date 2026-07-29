@@ -3,6 +3,72 @@
 Purpose: track what must be validated on cloud GPUs and what local work must
 finish before spending cloud time.
 
+## 2026-07-29 [codex] Gram-recurrence benchmark queued behind PR #21
+
+Context:
+
+- Implemented the M2.2 Gram Newton-Schulz experiment as a stacked,
+  benchmark-only draft. It does not change production selection or make a GPU
+  performance claim.
+- The canonical matrix now compares each non-square transport's standard
+  five-step path against restart-at-2 Gram recurrence. Duplicated standard and
+  recurrence candidates are included so the crossover can move honestly.
+- HLO evidence is a hard candidate gate: distributed standard/restart
+  candidates require five/two Gram reductions respectively, exchange requires
+  one forward/reverse pair per leaf, and duplicated recurrence requires one
+  logical-matrix gather with no Gram reduction.
+- PR `#21` remains the frozen production prerequisite. Its smoke/profile
+  workflow must pass and merge before spending on the recurrence matrix.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+# Prerequisite: complete and merge PR #21 using its smoke-gated workflow.
+
+git fetch origin
+git switch codex/distributed-muon-gram-recurrence-bench
+git pull --ff-only
+tmux new -s dist-muon-gram-recurrence
+scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh
+```
+
+Optional non-canonical trace pass:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+scripts/jaxtitan/cloud_dist_muon_leaf_bench.sh --with-trace
+```
+
+Artifacts:
+
+- Implementation commit: `7debd09`.
+- Expected capture:
+  `cloud_results/dist_muon_gram_recurrence_bench_<timestamp>/`.
+- Expected bundle:
+  `cloud_results/dist_muon_gram_recurrence_bench_<timestamp>.tgz`
+  plus `.sha256`.
+- Required retained evidence: provenance, benchmark/selection JSON, optimized
+  HLO, memory and timing summaries, and optional profiler traces.
+
+Result:
+
+- Local four-device suite: `817 passed, 1 skipped`.
+- Frozen production selector: `63/63` decisions reproduced.
+- Archived 76-case candidate-schema compatibility: `overall_gate=True`.
+- No four-H100 recurrence run has been launched.
+
+Next:
+
+- Do not rent GPUs for this branch until PR `#21` passes its four-H100
+  smoke/profile gate and merges. Then refresh this branch from `master` and run
+  the canonical recurrence matrix on the same H100 class.
+- Promote no candidate from local timing. A recurrence candidate needs all
+  numerical/HLO gates, at least `1.05x` speedup over the same transport's
+  standard path, at most `5%` MAD, and placement within the `3%` simplicity
+  tie band of the fastest passing candidate.
+
 ## 2026-07-24 [codex] Shape-policy H100 spend is gated by local replay and smoke
 
 Context:
