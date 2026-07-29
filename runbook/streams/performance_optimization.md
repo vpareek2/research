@@ -3,6 +3,65 @@
 Purpose: turn measured Jaxtitan profiles into an ordered optimization program
 without weakening correctness or adding speculative kernel surfaces.
 
+## 2026-07-29 [codex] Distributed projection dtype fix refreshed
+
+Context:
+
+- Refreshed PR `#17` by merging current `master` at `eaa81e8` without
+  rewriting the published branch.
+- The shared TP/CP projection helper had bypassed NNX dtype promotion, causing
+  BF16 activations with FP32 master weights to produce FP32 outputs.
+- The helper now reuses each NNX linear's `promote_dtype`, `dot_general`,
+  precision, and preferred-element-type contract. KV-cache writes explicitly
+  convert K/V values to the declared cache dtype before scatter.
+- No precision abstraction, TOML setting, or GPU performance claim was added.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+    tests/jaxtitan/test_model.py::test_distributed_model_preserves_bfloat16_compute_dtype \
+    tests/jaxtitan/test_infer.py::test_tensor_parallel_bfloat16_generation_has_dtype_safe_cache_writes
+
+JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+    tests/jaxtitan/test_model.py \
+    tests/jaxtitan/test_infer.py \
+    tests/jaxtitan/test_train_step.py \
+    tests/jaxtitan/test_checkpoint_sample.py -x
+
+JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q tests/jaxtitan -x
+git diff --check
+```
+
+Artifacts:
+
+- Branch: `codex/distributed-linear-dtype`.
+- Production paths:
+  `src/jaxtitan/models/execution.py` and
+  `src/jaxtitan/models/components/attention.py`.
+- Regression paths:
+  `tests/jaxtitan/test_model.py` and `tests/jaxtitan/test_infer.py`.
+- No cloud run or retained performance artifact was produced.
+
+Result:
+
+- TP and CP return BF16 logits with FP32 master parameters under BF16 compute.
+- TP prefill/decode completes with the incompatible-scatter FutureWarning
+  promoted to an error; cache keys and values remain BF16.
+- Focused regressions: `3 passed`.
+- Model/inference/train-step/checkpoint-sampling gate: `130 passed`.
+- Complete four-device Jaxtitan suite: `709 passed, 1 skipped`.
+
+Next:
+
+- Mark PR `#17` ready for user-owned review and merge. Later FP8/FP4 work can
+  replace the single projection boundary without changing today's TOML
+  surface.
+
 ## 2026-07-24 [codex] H100 policy replay is now a local merge gate
 
 Context:

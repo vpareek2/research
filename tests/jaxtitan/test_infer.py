@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -208,6 +209,33 @@ def test_data_parallel_generation_pads_device_batch_and_returns_prompt_batch() -
     assert actual.cache.values.shape[1] == 2
     assert actual.cache.lengths.shape == (2,)
     assert "data" in getattr(actual.cache.keys, "sharding", None).spec
+
+
+def test_tensor_parallel_bfloat16_generation_has_dtype_safe_cache_writes() -> None:
+    if jax.local_device_count() < 2:
+        pytest.skip("tensor-parallel inference test requires at least two local devices")
+    spec = _tiny_spec(max_seq_len=8, param_dtype="float32", compute_dtype="bfloat16")
+    built = build_model(spec, seed=0)
+    state = initialize_inference_state(built.state, seed=1)
+    prompt = jnp.asarray([[1, 2, 3], [4, 5, 6]], dtype=jnp.int32)
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "error",
+            message="scatter inputs have incompatible types",
+            category=FutureWarning,
+        )
+        actual = generate_tokens(
+            built.graph,
+            state,
+            spec,
+            prompt,
+            GenerationSpec(max_new_tokens=2, top_k=1),
+            sharding=_tensor_parallel_plan(),
+        )
+
+    assert actual.cache.keys.dtype == jnp.bfloat16
+    assert actual.cache.values.dtype == jnp.bfloat16
 
 
 def test_dense_trinity_prefill_decode_matches_full_forward_logits() -> None:
@@ -507,6 +535,14 @@ def _data_parallel_plan():
         devices=tuple(jax.local_devices()[:2]),
     )
     return build_sharding_plan(context, parallelism=ParallelismSpec())
+
+
+def _tensor_parallel_plan():
+    context = build_mesh_context(
+        MeshSpec(axis_names=("data", "tp"), axis_sizes=(1, 2)),
+        devices=tuple(jax.local_devices()[:2]),
+    )
+    return build_sharding_plan(context, parallelism=ParallelismSpec(tensor_parallel=True))
 
 
 def _trees_equal(left, right) -> bool:

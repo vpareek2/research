@@ -296,6 +296,8 @@ def _cache_write(
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     batch_indices = jnp.arange(k.shape[0])[:, None]
     valid = attention_mask.astype(jnp.bool_)
+    k = k.astype(cache.keys.dtype)
+    v = v.astype(cache.values.dtype)
     existing_k = cache.keys[layer_index, batch_indices, positions]
     existing_v = cache.values[layer_index, batch_indices, positions]
     next_k = jnp.where(valid[..., None, None], k, existing_k)

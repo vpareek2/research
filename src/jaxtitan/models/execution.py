@@ -252,10 +252,24 @@ def feature_parallel_activation(x: jax.Array, execution: ModelExecutionContext |
 
 def _linear(linear: Any, x: jax.Array) -> jax.Array:
     kernel = linear.kernel.get_value()
-    out = jnp.einsum("...h,ho->...o", x, kernel)
     bias = getattr(linear, "bias", None)
-    if bias is not None:
-        out = out + bias.get_value()
+    bias_value = None if bias is None else bias.get_value()
+    x, kernel, bias_value = linear.promote_dtype(
+        (x, kernel, bias_value),
+        dtype=linear.dtype,
+    )
+    dot_general_kwargs = {}
+    if linear.preferred_element_type is not None:
+        dot_general_kwargs["preferred_element_type"] = linear.preferred_element_type
+    out = linear.dot_general(
+        x,
+        kernel,
+        (((x.ndim - 1,), (0,)), ((), ())),
+        precision=linear.precision,
+        **dot_general_kwargs,
+    )
+    if bias_value is not None:
+        out = out + jnp.reshape(bias_value, (1,) * (out.ndim - 1) + (-1,))
     return out
 
 
