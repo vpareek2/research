@@ -832,7 +832,7 @@ def test_run_training_auto_resolves_sharded_muon_to_dion2(
         ),
         pytest.param(
             "distributed",
-            {"distributed_direct", "distributed_exchange"},
+            {"distributed_direct", "distributed_large_gram"},
             False,
             "local_fake_device_acceptance_passed",
             id="distributed",

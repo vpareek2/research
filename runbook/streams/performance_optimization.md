@@ -20,7 +20,6 @@ Commands:
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-
 JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 \
   uv run pytest -q \
     tests/jaxtitan/test_model.py::test_distributed_model_preserves_bfloat16_compute_dtype \
@@ -35,7 +34,6 @@ JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 \
 
 JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 \
   uv run pytest -q tests/jaxtitan -x
-
 git diff --check
 ```
 
@@ -63,6 +61,276 @@ Next:
 - Mark PR `#17` ready for user-owned review and merge. Later FP8/FP4 work can
   replace the single projection boundary without changing today's TOML
   surface.
+
+## 2026-07-24 [codex] H100 policy replay is now a local merge gate
+
+Context:
+
+- Added a tracked, sanitized replay fixture extracted from the
+  checksum-verified 76-case H100 selector artifact. It contains the 63
+  production/calibration samples, portable shape/topology inputs, accepted
+  executions, candidate timing summaries, correctness/stability gates, and
+  collective operand models.
+- Added a local replay command that invokes the real `shape_topology_v1`
+  selector. It rejects provenance drift, decision mismatches, missing or
+  nonfinite candidates, correctness/stability failures, speed/MAD failures,
+  invalid duplicated fallback, and selections outside the original 3%
+  simplicity tie band.
+- The replay output explicitly records `performance_claim=false`. Its aggregate
+  summaries are regression evidence from the archived microbenchmark, not
+  predictions of training-step latency.
+- Split the cloud workflow into an explicit eight-step smoke phase and a
+  separately authorized 64-step profile phase. No selector, Muon numerics,
+  optimizer state, or training hot path changed.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+uv run python scripts/jaxtitan/replay_dist_muon_shape_policy.py \
+  --json-out /tmp/dist_muon_shape_policy_replay.json
+
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_dist_muon_shape_policy_replay.py \
+  tests/jaxtitan/test_dist_muon_shape_policy_staging.py \
+  tests/jaxtitan/test_dist_muon_shape_policy_analysis.py
+
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_dist_muon_shape_policy_replay.py \
+  tests/jaxtitan/test_dist_muon_shape_policy_staging.py \
+  tests/jaxtitan/test_dist_muon_shape_policy_analysis.py \
+  tests/jaxtitan/test_dist_muon_checkpoint_audit.py \
+  tests/jaxtitan/test_config.py \
+  tests/jaxtitan/test_checkpoints.py \
+  tests/jaxtitan/test_checkpoint_eval.py \
+  tests/jaxtitan/test_checkpoint_sample.py \
+  tests/jaxtitan/test_resume_compat.py \
+  tests/jaxtitan/test_optim.py
+
+uv run pytest -q tests/jaxtitan
+uv run python -m py_compile \
+  scripts/jaxtitan/replay_dist_muon_shape_policy.py \
+  scripts/jaxtitan/analyze_dist_muon_shape_policy_results.py \
+  scripts/jaxtitan/audit_dist_muon_checkpoint.py
+bash -n scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh
+git diff --check
+```
+
+Artifacts:
+
+- Replay fixture:
+  `scripts/jaxtitan/dist_muon_shape_policy_h100_v1.json`.
+- Replay command:
+  `scripts/jaxtitan/replay_dist_muon_shape_policy.py`.
+- Source artifact:
+  `cloud_results/dist_muon_leaf_bench_20260724T215030Z.tgz`.
+- Source SHA-256:
+  `27fddd04d51cdb9f3262a3a074a2f319e8bf0f880ba80851d3a546a5bef6b1e6`.
+- Local replay output:
+  `/tmp/dist_muon_shape_policy_replay.json`.
+
+Result:
+
+- Replay gate: `63/63` decisions matched, `overall_gate=True`.
+- Informational archived-calibration summaries: `1.444x` geometric mean versus
+  duplicated, `1.009x` versus the previous execution, and `1.041x` worst
+  measured regret. These are not end-to-end performance claims.
+- Final replay/staging/analyzer tests: `61 passed`.
+- Broader optimizer/config/checkpoint/resume gate: `323 passed`.
+- Full Jaxtitan suite: `791 passed, 1 skipped`.
+- Fixture regeneration is byte-identical, all eight smoke/profile configs
+  validate, Python compilation, shell syntax, and `git diff --check` pass.
+- No cloud command was run and no new GPU throughput claim exists.
+
+Next:
+
+- Run only the smoke phase first. Launch the 64-step profiles only when the
+  smoke comparison passes and matches the exact current commit. PR #21 remains
+  draft until the H100 profile acceptance gates pass.
+
+## 2026-07-24 [codex] Shape-policy acceptance harness hardened
+
+Context:
+
+- Hardened the draft shape-policy PR's validation tooling without changing the
+  selector, Muon numerics, acceptance configs, or runtime hot path.
+- Replaced the analyzer's artifact-existence boolean with structured gates for
+  every training row and optimizer group, final/eval/sample completion,
+  checkpoint identity, replica audit, and the compiled HLO signature implied by
+  each runtime bucket plan.
+- Added a post-training checkpoint audit that reconstructs the exact training
+  state, restores the latest retained checkpoint, checks complete model and
+  optimizer state for finiteness, and compares physical replicas grouped by
+  logical shard index with an exact-zero-difference requirement.
+- Updated the cloud runner to preserve `checkpoints/index.json`, run the audit
+  after checkpoint eval/sample, and package audit evidence even when its gate
+  fails. The final analyzer remains the single acceptance decision.
+
+Commands:
+
+```bash
+cd /home/veer/Master/projects/research
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_dist_muon_shape_policy_analysis.py \
+  tests/jaxtitan/test_dist_muon_checkpoint_audit.py
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_dist_muon_shape_policy_analysis.py \
+  tests/jaxtitan/test_dist_muon_checkpoint_audit.py \
+  tests/jaxtitan/test_config.py \
+  tests/jaxtitan/test_checkpoints.py \
+  tests/jaxtitan/test_checkpoint_eval.py \
+  tests/jaxtitan/test_checkpoint_sample.py \
+  tests/jaxtitan/test_resume_compat.py \
+  tests/jaxtitan/test_optim.py
+uv run pytest -q tests/jaxtitan
+bash -n scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh
+uv run python -m py_compile \
+  scripts/jaxtitan/analyze_dist_muon_shape_policy_results.py \
+  scripts/jaxtitan/audit_dist_muon_checkpoint.py
+git diff --check
+```
+
+Artifacts:
+
+- Checkpoint audit:
+  `scripts/jaxtitan/audit_dist_muon_checkpoint.py`.
+- Per-run audit output:
+  `replica_audit_<run_id>.json`.
+- Structured comparison schema:
+  `scripts/jaxtitan/analyze_dist_muon_shape_policy_results.py`, schema version
+  `2`.
+- Runner:
+  `scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh`.
+- Archived H100 HLO inspected locally:
+  `cloud_results/dist_muon_m2_20260724T192739Z_lightweight.tgz`.
+- Frozen baseline SHA-256 remains
+  `65fb879f2636778aa5a25d6566b1538a9ea533cfceb1439428bcdbd433d2db72`.
+
+Result:
+
+- Hardened analyzer/audit tests: `24 passed`.
+- Focused optimizer/config/checkpoint/resume gate: `280 passed`.
+- Full Jaxtitan suite: `748 passed, 1 skipped`.
+- The HLO parser matched all six expected buckets in the archived dense-TP
+  H100 compilation dump with no planning or signature failures.
+- Synthetic negative coverage rejects missing/malformed artifacts, nonfinite
+  rows and optimizer groups, checkpoint mismatches, invalid HLO signatures,
+  nonfinite state, missing physical replica evidence, and unequal replicas.
+- No GPU run was launched and no new throughput claim is made.
+
+Next:
+
+- Run the unchanged four-layout shape-policy matrix on four H100 80GB GPUs.
+  Acceptance additionally requires every structured artifact, HLO, and replica
+  gate to pass before applying the frozen performance thresholds. Keep PR #21
+  draft until that evidence exists.
+
+## 2026-07-24 [codex] Shape/topology Muon policy ready for H100 acceptance
+
+Context:
+
+- Replaced the global distributed-Muon direct/exchange decision with the
+  host-static `shape_topology_v1` selector. It uses only canonical matrix
+  geometry, TP size, compatible-cohort population, and modeled collective
+  bytes.
+- Production can now select duplicated, direct small-Gram, partition-aligned
+  large/right-Gram, or exchange-plus-small-Gram per compatible cohort. JAX
+  execution remains one statically specialized `shard_map` per deterministic
+  32 MiB-capped bucket.
+- Promoted the benchmarked large/right-Gram kernel without adding a TOML
+  setting, runtime autotuning, model-role rules, or accelerator-name rules.
+- Added per-leaf policy/cost/sharding metadata and a narrow inference-only
+  compatibility exception for legacy distributed-Muon checkpoints. Training
+  resume across the policy fingerprint remains rejected.
+- Added four matched 64-step acceptance configs, an HLO/evidence runner, and
+  a same-node performance analyzer. No H100 production run was launched.
+
+Commands:
+
+```bash
+cd /home/veer/Master/projects/research
+
+uv run pytest -q tests/jaxtitan/test_optim.py \
+  tests/jaxtitan/test_dist_muon_shape_policy_analysis.py
+uv run pytest -q \
+  tests/jaxtitan/test_config.py \
+  tests/jaxtitan/test_preflight.py \
+  tests/jaxtitan/test_resume_compat.py \
+  tests/jaxtitan/test_checkpoints.py \
+  tests/jaxtitan/test_checkpoint_eval.py \
+  tests/jaxtitan/test_infer.py \
+  tests/jaxtitan/test_profile_analysis.py
+uv run pytest -q tests/jaxtitan/test_train_step.py
+uv run pytest -q tests/jaxtitan/test_runtime_training.py -k muon
+uv run pytest -q tests/jaxtitan
+
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q tests/jaxtitan/test_optim.py \
+  -k 'shape_policy or bucketed_distributed or large_gram_bucket' \
+  tests/jaxtitan/test_dist_muon_shape_policy_analysis.py \
+  tests/jaxtitan/test_resume_compat.py
+
+for cfg in configs/jaxtitan/cloud_4gpu_profile64_*_muon_shape_policy.toml; do
+  uv run jaxtitan config check "$cfg"
+done
+bash -n scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh
+uv run python -m py_compile \
+  src/jaxtitan/optim/muon_policy.py \
+  scripts/jaxtitan/analyze_dist_muon_shape_policy_results.py
+git diff --check
+```
+
+Artifacts:
+
+- Branch: `codex/distributed-muon-shape-policy`, base commit `eaa81e8`.
+- Calibration source:
+  `cloud_results/dist_muon_leaf_bench_20260724T215030Z.tgz`.
+- Calibration SHA-256:
+  `27fddd04d51cdb9f3262a3a074a2f319e8bf0f880ba80851d3a546a5bef6b1e6`.
+- Same-node baseline:
+  `cloud_results/dist_muon_m2_20260724T192739Z_lightweight.tgz`.
+- Baseline SHA-256:
+  `65fb879f2636778aa5a25d6566b1538a9ea533cfceb1439428bcdbd433d2db72`.
+- Runner: `scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh`.
+- Analyzer:
+  `scripts/jaxtitan/analyze_dist_muon_shape_policy_results.py`.
+- Expected candidate bundle:
+  `cloud_results/dist_muon_shape_policy_YYYYMMDDTHHMMSSZ_lightweight.tgz`.
+
+Result:
+
+- The policy reproduces all 63 accepted production/calibration decisions with
+  zero mismatches. The durable regression table covers 36 unique feature
+  combinations with their 63 topology-distinct sample counts.
+- Boundary tests cover both direct-pressure limits, non-divisible exchange,
+  and equality favoring the redistribution-free direct/large-Gram execution.
+- Full Jaxtitan gate: `730 passed, 1 skipped`.
+- Final policy/bucket/analyzer/resume regression: `19 passed, 114 deselected`.
+- Earlier focused gates also passed: optimizer/analyzer `86 passed`,
+  compatibility/config/checkpoint/profile `251 passed`, train step `51
+  passed`, and runtime-training Muon `8 passed, 60 deselected`.
+- All four acceptance TOMLs pass config validation; shell syntax, Python
+  compilation, and `git diff --check` pass.
+- The candidate production selector has no measured training throughput yet.
+  The draft PR must not claim the modeled or benchmarked selector deltas as a
+  production speedup.
+
+Next:
+
+- On the same class of four H100 80GB NVLink node, run:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh --overwrite
+```
+
+- Copy back and checksum the lightweight bundle. Keep the PR draft unless all
+  correctness, HLO, per-layout, and geometric-mean performance gates pass.
 
 ## 2026-07-24 [codex] Distributed Muon leaf selector implemented
 

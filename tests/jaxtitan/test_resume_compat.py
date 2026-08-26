@@ -10,6 +10,7 @@ from jaxtitan.runtime.resume import (
     _hash,
     build_resume_compat,
     checkpoint_metadata,
+    validate_inference_metadata,
     validate_resume_compat,
     validate_resume_metadata,
 )
@@ -491,6 +492,68 @@ def test_resume_metadata_names_mismatched_field(tmp_path: Path, prepared_dataset
 
     with pytest.raises(ContractError, match=r"compatibility\.model\.hidden_size"):
         validate_resume_metadata(metadata, current_spec)
+
+
+def test_inference_accepts_only_legacy_to_shape_policy_transition(
+    tmp_path: Path,
+    prepared_dataset_factory,
+) -> None:
+    manifest = _manifest(prepared_dataset_factory, "shape-policy-inference")
+    spec = _runtime_spec(
+        tmp_path,
+        manifest,
+        optimizer_name="muon",
+        muon_tp_mode="distributed",
+    )
+    metadata = checkpoint_metadata(
+        spec,
+        {"step": 1, "tokens_seen": 128, "loss": 1.0},
+        reason="interval",
+    )
+    dist_muon = metadata["compatibility"]["optimizer"]["policy"]["dist_muon"]
+    dist_muon.pop("shape_topology_policy")
+    dist_muon.update(
+        {
+            "distributed_policy": "sharded_gram_collectives",
+            "execution": "distributed",
+            "performance": "one_norm_plus_five_gram_reductions_with_optional_exchange",
+        }
+    )
+    metadata["runtime_fingerprint"] = _hash(metadata["compatibility"])
+
+    with pytest.raises(
+        ContractError,
+        match=r"compatibility\.optimizer\.policy\.dist_muon",
+    ):
+        validate_resume_metadata(metadata, spec)
+    validate_inference_metadata(metadata, spec)
+
+    metadata["compatibility"]["model"]["hidden_size"] += 8
+    metadata["runtime_fingerprint"] = _hash(metadata["compatibility"])
+    with pytest.raises(ContractError, match=r"compatibility\.model\.hidden_size"):
+        validate_inference_metadata(metadata, spec)
+
+
+def test_inference_policy_transition_still_verifies_stored_fingerprint(
+    tmp_path: Path,
+    prepared_dataset_factory,
+) -> None:
+    manifest = _manifest(prepared_dataset_factory, "shape-policy-fingerprint")
+    spec = _runtime_spec(
+        tmp_path,
+        manifest,
+        optimizer_name="muon",
+        muon_tp_mode="distributed",
+    )
+    metadata = checkpoint_metadata(
+        spec,
+        {"step": 1, "tokens_seen": 128, "loss": 1.0},
+        reason="interval",
+    )
+    metadata["runtime_fingerprint"] = "tampered"
+
+    with pytest.raises(ContractError, match="does not match compatibility payload"):
+        validate_inference_metadata(metadata, spec)
 
 
 def test_resume_restore_rejects_counter_mismatch(tmp_path: Path, prepared_dataset_factory) -> None:

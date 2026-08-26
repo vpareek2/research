@@ -3,6 +3,238 @@
 Purpose: track what must be validated on cloud GPUs and what local work must
 finish before spending cloud time.
 
+## 2026-07-24 [codex] Shape-policy H100 spend is gated by local replay and smoke
+
+Context:
+
+- Added a free local replay gate over 63 checksum-derived H100
+  shape/topology samples. It runs the production selector without timing fake
+  CPU devices and makes no end-to-end performance claim.
+- Added four matched eight-step smoke configs for dense TP, FSDP+TP, ZeRO2+TP,
+  and Trinity TP+EP. They differ from the profile configs only in run ID,
+  schedule/token budget, checkpoint/eval cadence, and disabled profiling.
+- The cloud runner now requires `--phase smoke` or `--phase profile`; there is
+  no combined phase. Profile mode refuses to start unless supplied a passing
+  four-layout smoke comparison whose full Git SHA equals current `HEAD`.
+- Smoke reuses the complete metrics, optimizer-group, HLO, checkpoint,
+  eval/sample, and exact replica-audit gates. It applies no performance
+  threshold. No cloud command was run in this entry.
+
+Commands:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+uv run python scripts/jaxtitan/replay_dist_muon_shape_policy.py \
+  --json-out /tmp/dist_muon_shape_policy_replay.json
+
+scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh \
+  --phase smoke \
+  --overwrite
+```
+
+Only after the smoke command reports `overall_gate=True`, run:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+
+scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh \
+  --phase profile \
+  --smoke-gate \
+  cloud_results/dist_muon_shape_policy_smoke_<timestamp>/comparison.json \
+  --overwrite
+```
+
+Artifacts:
+
+- Local fixture:
+  `scripts/jaxtitan/dist_muon_shape_policy_h100_v1.json`.
+- Source SHA-256:
+  `27fddd04d51cdb9f3262a3a074a2f319e8bf0f880ba80851d3a546a5bef6b1e6`.
+- Smoke capture:
+  `cloud_results/dist_muon_shape_policy_smoke_<timestamp>/`.
+- Smoke bundle:
+  `cloud_results/dist_muon_shape_policy_smoke_<timestamp>_lightweight.tgz`.
+- Required profile authorization:
+  `cloud_results/dist_muon_shape_policy_smoke_<timestamp>/comparison.json`.
+- Profile capture:
+  `cloud_results/dist_muon_shape_policy_profile_<timestamp>/`.
+
+Result:
+
+- Local replay: `63/63`, `overall_gate=True`,
+  `performance_claim=false`.
+- Final replay/staging/analyzer tests: `61 passed`.
+- Broader optimizer/config/checkpoint/resume gate: `323 passed`.
+- Full Jaxtitan suite: `791 passed, 1 skipped`.
+- The runner rejects an omitted phase, a profile phase without a smoke gate,
+  incomplete/failed four-layout evidence, a policy mismatch, and a stale or
+  abbreviated commit SHA.
+- No H100 smoke or profile result exists yet.
+
+Next:
+
+- Rent four H100 80GB GPUs for the smoke phase only. If it fails, bring back
+  the lightweight evidence and stop the instance; do not launch profiles.
+- If smoke passes, the same-commit profile command may run. The existing
+  per-layout and geometric-mean H100 thresholds remain the final PR gate.
+
+## 2026-07-24 [codex] Shape-policy cloud gate now audits restored state
+
+Context:
+
+- Hardened the pending four-H100 workflow without changing its four configs,
+  frozen selector, training numerics, or performance thresholds.
+- The analyzer now reports structured per-run failures for metrics, optimizer
+  groups, final/eval/sample artifacts, retained-checkpoint identity, restored
+  checkpoint state, runtime-plan/HLO agreement, and exact physical-replica
+  equality.
+- The runner invokes a post-training checkpoint audit after eval and sampling,
+  retains `checkpoints/index.json`, and packages the audit JSON even when the
+  audit command exits nonzero. No cloud command was run in this entry.
+
+Commands:
+
+```bash
+cd /home/veer/Master/projects/research
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_dist_muon_shape_policy_analysis.py \
+  tests/jaxtitan/test_dist_muon_checkpoint_audit.py
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+  uv run pytest -q \
+  tests/jaxtitan/test_dist_muon_shape_policy_analysis.py \
+  tests/jaxtitan/test_dist_muon_checkpoint_audit.py \
+  tests/jaxtitan/test_config.py \
+  tests/jaxtitan/test_checkpoints.py \
+  tests/jaxtitan/test_checkpoint_eval.py \
+  tests/jaxtitan/test_checkpoint_sample.py \
+  tests/jaxtitan/test_resume_compat.py \
+  tests/jaxtitan/test_optim.py
+uv run pytest -q tests/jaxtitan
+bash -n scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh
+uv run python -m py_compile \
+  scripts/jaxtitan/analyze_dist_muon_shape_policy_results.py \
+  scripts/jaxtitan/audit_dist_muon_checkpoint.py
+git diff --check
+```
+
+Cloud launch:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+git fetch origin
+git switch codex/distributed-muon-shape-policy
+git pull --ff-only
+tmux new -s dist-muon-shape-policy
+scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh --overwrite
+```
+
+Artifacts:
+
+- Audit script: `scripts/jaxtitan/audit_dist_muon_checkpoint.py`.
+- Per-run evidence: `replica_audit_<run_id>.json` plus the retained
+  `checkpoints/index.json`.
+- Structured final comparison:
+  `dist_muon_shape_policy_comparison.json`, schema version `2`.
+- Frozen baseline:
+  `cloud_results/dist_muon_m2_20260724T192739Z_lightweight.tgz`.
+- Frozen baseline SHA-256:
+  `65fb879f2636778aa5a25d6566b1538a9ea533cfceb1439428bcdbd433d2db72`.
+
+Result:
+
+- Hardened analyzer/audit gate: `24 passed`.
+- Focused optimizer/config/checkpoint/resume gate: `280 passed`.
+- Full Jaxtitan suite: `748 passed, 1 skipped`.
+- Archived H100 validation found six expected dense-TP buckets and no HLO
+  planning/signature mismatch.
+- The config-drift test proves each candidate config differs from its
+  current-distributed baseline only by run ID.
+- No candidate H100 result exists, so PR #21 remains draft and makes no new
+  performance claim.
+
+Next:
+
+- Run the matrix on exactly four H100 80GB GPUs, bring back the lightweight
+  bundle and checksum, and require all artifact/HLO/replica gates plus the
+  existing per-layout and geometric-mean performance gates before making the
+  PR ready.
+
+## 2026-07-24 [codex] Shape-policy four-H100 acceptance queued
+
+Context:
+
+- The host-static `shape_topology_v1` production selector is locally complete.
+  It reproduces the checksum-verified leaf-benchmark decisions without
+  inspecting parameter tags, model variants, or device names.
+- Prepared four new 64-step runs for dense TP, FSDP+TP, ZeRO2+TP, and Trinity
+  TP+EP. Each config differs from its accepted current-distributed baseline
+  only in run ID.
+- The runner captures hardware/topology, HLO, metrics, optimizer diagnostics,
+  checkpoints, eval, sampling, and lightweight run evidence. Its analyzer
+  applies the frozen same-node baseline medians and fails the requested
+  per-layout/geometric-mean gates.
+- No cloud command was run in this entry.
+
+Commands:
+
+```bash
+cd /home/veer/Master/projects/research
+for cfg in configs/jaxtitan/cloud_4gpu_profile64_*_muon_shape_policy.toml; do
+  uv run jaxtitan config check "$cfg"
+done
+bash -n scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh
+uv run pytest -q tests/jaxtitan/test_dist_muon_shape_policy_analysis.py
+git diff --check
+```
+
+Cloud launch:
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+git fetch origin
+git switch codex/distributed-muon-shape-policy
+git pull --ff-only
+tmux new -s dist-muon-shape-policy
+scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh --overwrite
+```
+
+Artifacts:
+
+- Runner: `scripts/jaxtitan/cloud_dist_muon_shape_policy_matrix.sh`.
+- Analyzer:
+  `scripts/jaxtitan/analyze_dist_muon_shape_policy_results.py`.
+- Configs:
+  `configs/jaxtitan/cloud_4gpu_profile64_{dense_tp,dense_fsdp_tp,dense_zero2_tp,trinity_moe_tp_ep}_muon_shape_policy.toml`.
+- Calibration SHA-256:
+  `27fddd04d51cdb9f3262a3a074a2f319e8bf0f880ba80851d3a546a5bef6b1e6`.
+- Frozen baseline SHA-256:
+  `65fb879f2636778aa5a25d6566b1538a9ea533cfceb1439428bcdbd433d2db72`.
+- Expected output:
+  `cloud_results/dist_muon_shape_policy_YYYYMMDDTHHMMSSZ_lightweight.tgz`
+  plus `.sha256`.
+
+Result:
+
+- Local implementation gate: `730 passed, 1 skipped`; final focused
+  policy/bucket/analyzer/resume gate: `19 passed, 114 deselected`.
+- All four configs are valid. The clean calibration match is `63/63`.
+- Accepted current-distributed median baselines for steps 16-63 are:
+  TP `72.535 ms`, FSDP+TP `107.775 ms`, ZeRO2+TP `105.967 ms`, and TP+EP
+  `218.850 ms`.
+- No candidate H100 run exists, so no production throughput claim exists.
+
+Next:
+
+- Run the matrix on exactly four H100 80GB GPUs with NVLink where possible.
+- Require complete train/checkpoint/eval/sample artifacts, finite optimizer
+  groups, expected policy/HLO evidence, no layout more than 1% slower than the
+  current distributed baseline, at least 2% geometric-mean improvement, and
+  at least 5% speedup over duplicated in every layout.
+- Keep the implementation PR draft if any gate fails; revise only the portable
+  geometry/cost breakpoint and rerun.
+
 ## 2026-07-24 [codex] Distributed Muon leaf benchmark queue is ready
 
 Context:

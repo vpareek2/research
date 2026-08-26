@@ -17,7 +17,7 @@ from jaxtitan.mesh import (
 from jaxtitan.models import build_model
 from jaxtitan.optim import build_optimizer
 from jaxtitan.runtime.checkpoint_index import CheckpointRecord, load_checkpoint_index
-from jaxtitan.runtime.resume import validate_resume_compat, validate_resume_metadata
+from jaxtitan.runtime.resume import validate_inference_compat, validate_inference_metadata
 from jaxtitan.runtime.training import _moe_balance_spec, _with_runtime_schedule_steps
 from jaxtitan.services import LocalOrbaxCheckpointService
 from jaxtitan.specs.run import RunSpec
@@ -46,7 +46,7 @@ def restore_inference_checkpoint(run_dir: str | Path, checkpoint: str) -> Infere
     service = LocalOrbaxCheckpointService(run_dir)
     try:
         metadata = service.restore_metadata(record.step)
-        validate_resume_metadata(metadata, runtime_spec)
+        validate_inference_metadata(metadata, runtime_spec)
 
         context = build_mesh_context(runtime_spec.mesh)
         model = build_model(runtime_spec.model, seed=runtime_spec.seed)
@@ -67,7 +67,7 @@ def restore_inference_checkpoint(run_dir: str | Path, checkpoint: str) -> Infere
             moe_balance_spec=_moe_balance_spec(runtime_spec),
         )
         restored = service.restore(record.step, template_train_state)
-        validate_resume_compat(restored, runtime_spec)
+        validate_inference_compat(restored, runtime_spec)
     finally:
         service.close()
 

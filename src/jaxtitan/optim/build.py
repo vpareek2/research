@@ -5,6 +5,7 @@ compiled steps need an object with ``init`` and ``update`` plus opaque state.
 Optax is the first backend adapter, not the public training abstraction.
 """
 
+from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 import math
@@ -22,6 +23,10 @@ from jaxtitan.optim.muon import (
     distributed_muon_transform,
     muon_policy_constants,
     muon_transform,
+)
+from jaxtitan.optim.muon_policy import (
+    muon_shape_policy_constants,
+    select_muon_execution,
 )
 from jaxtitan.specs.optimizer import OptimizerSpec, ScheduleSpec
 
@@ -349,12 +354,13 @@ def _dist_muon_policy_payload(spec: OptimizerSpec) -> dict[str, Any]:
         }
     return {
         **common,
-        "distributed_policy": "sharded_gram_collectives",
+        "distributed_policy": "hybrid_shape_topology_sharded_gram_collectives",
+        "shape_topology_policy": muon_shape_policy_constants(),
         "exact": False,
         "correctness_status": "local_fake_device_acceptance_passed",
         "approximation": "floating_point_reduction_order",
-        "execution": "distributed",
-        "performance": "one_norm_plus_five_gram_reductions_with_optional_exchange",
+        "execution": "host_static_per_cohort",
+        "performance": "duplicated_or_one_norm_plus_five_gram_reductions_with_optional_exchange",
         "numerical_contract": "deterministic_close_not_bitwise",
     }
 
@@ -380,6 +386,18 @@ def _execution_plan_payload(plan: MuonLeafExecutionPlan) -> dict[str, Any]:
         "fallback_reason": plan.fallback_reason,
         "bucket_id": plan.bucket_id,
         "weight_decay": plan.weight_decay,
+        "selection": {
+            "policy_version": plan.policy_version,
+            "eligible_executions": list(plan.eligible_executions),
+            "selected_execution": plan.execution,
+            "selection_reason": plan.selection_reason,
+            "short_dimension": plan.short_dimension,
+            "long_dimension": plan.long_dimension,
+            "tp_size": plan.tp_size,
+            "cohort_size": plan.cohort_size,
+            "gram_side": plan.gram_side,
+            "modeled_costs": dict(plan.modeled_costs),
+        },
         "roles": {
             "parameter": role_payload(plan.parameter_sharding, plan.parameter_replica_axes),
             "gradient": role_payload(plan.gradient_sharding, plan.gradient_replica_axes),
@@ -498,7 +516,7 @@ def _route_distributed_policy(backend: str, *, muon_tp_mode: str) -> str:
         return (
             "duplicated_full_logical_matrix"
             if muon_tp_mode == "duplicated"
-            else "sharded_gram_collectives"
+            else "hybrid_shape_topology_sharded_gram_collectives"
         )
     return "unknown"
 
@@ -801,12 +819,6 @@ def _build_muon_execution_plans(
         rows, columns = assignment.logical_shape
         transpose_for_shape = rows > columns
         canonical_tp_dim = 1 - tp_partition_dim if transpose_for_shape else tp_partition_dim
-        execution, fallback_reason = _resolve_muon_tp_execution(
-            requested_mode=requested_mode,
-            canonical_tp_dim=canonical_tp_dim,
-            logical_shape=(rows, columns),
-            tp_size=int(momentum_sharding.mesh.shape["tp"]),
-        )
         plans.append(
             MuonLeafExecutionPlan(
                 path=assignment.path,
@@ -823,13 +835,77 @@ def _build_muon_execution_plans(
                 transpose_for_shape=transpose_for_shape,
                 canonical_tp_dim=canonical_tp_dim,
                 requested_mode=requested_mode,
-                execution=execution,
-                fallback_reason=fallback_reason,
+                execution="duplicated",
+                fallback_reason=None,
                 bucket_id=-1,
                 weight_decay=assignment.weight_decay,
             )
         )
-    return _assign_muon_bucket_ids(tuple(plans))
+    planned = _select_muon_shape_policy(tuple(plans))
+    return _assign_muon_bucket_ids(planned)
+
+
+def _select_muon_shape_policy(
+    plans: tuple[MuonLeafExecutionPlan, ...],
+) -> tuple[MuonLeafExecutionPlan, ...]:
+    """Bind host-static execution decisions after compatible cohorts are known."""
+
+    cohort_counts = Counter(_muon_policy_cohort_key(plan) for plan in plans)
+    selected = []
+    for plan in plans:
+        tp_size = int(plan.momentum_sharding.mesh.shape["tp"])
+        decision = select_muon_execution(
+            requested_mode=plan.requested_mode,
+            canonical_tp_dim=plan.canonical_tp_dim,
+            logical_shape=plan.logical_shape,
+            tp_size=tp_size,
+            cohort_size=cohort_counts[_muon_policy_cohort_key(plan)],
+        )
+        fallback_reason = (
+            decision.selection_reason
+            if plan.requested_mode == "distributed"
+            and decision.execution == "duplicated"
+            else None
+        )
+        selected.append(
+            replace(
+                plan,
+                execution=decision.execution,
+                fallback_reason=fallback_reason,
+                policy_version=decision.policy_version,
+                eligible_executions=decision.eligible_executions,
+                selection_reason=decision.selection_reason,
+                short_dimension=decision.short_dimension,
+                long_dimension=decision.long_dimension,
+                tp_size=decision.tp_size,
+                cohort_size=decision.cohort_size,
+                gram_side=decision.gram_side,
+                modeled_costs=decision.modeled_costs,
+            )
+        )
+    return tuple(selected)
+
+
+def _muon_policy_cohort_key(plan: MuonLeafExecutionPlan) -> tuple[Any, ...]:
+    """Return the role-free compatibility key used for policy population."""
+
+    mesh = plan.gradient_sharding.mesh
+    return (
+        tuple(sorted(plan.logical_shape)),
+        plan.canonical_tp_dim,
+        int(mesh.shape["tp"]),
+        tuple(mesh.axis_names),
+        tuple(mesh.shape.items()),
+        repr(plan.gradient_sharding.spec),
+        repr(plan.parameter_sharding.spec),
+        repr(plan.momentum_sharding.spec),
+        repr(plan.update_sharding.spec),
+        plan.parameter_replica_axes,
+        plan.gradient_replica_axes,
+        plan.momentum_replica_axes,
+        plan.update_replica_axes,
+        plan.transpose_for_shape,
+    )
 
 
 def _assign_muon_bucket_ids(
@@ -861,7 +937,11 @@ def _assign_muon_bucket_ids(
             "bfloat16",
             "float32",
         )
-        gram_dimension = min(plan.logical_shape)
+        gram_dimension = (
+            max(plan.logical_shape)
+            if plan.execution == "distributed_large_gram"
+            else min(plan.logical_shape)
+        )
         payload_bytes = gram_dimension * gram_dimension * jnp.dtype(jnp.bfloat16).itemsize
         bucket_id, bucket_bytes = bucket_states.get(key, (-1, 0))
         if bucket_id < 0 or bucket_bytes + payload_bytes > _MUON_GRAM_BUCKET_MAX_BYTES:
@@ -871,25 +951,6 @@ def _assign_muon_bucket_ids(
         bucket_states[key] = (bucket_id, bucket_bytes + payload_bytes)
         assigned_by_path[plan.path] = replace(plan, bucket_id=bucket_id)
     return tuple(assigned_by_path[plan.path] for plan in plans)
-
-
-def _resolve_muon_tp_execution(
-    *,
-    requested_mode: str,
-    canonical_tp_dim: int,
-    logical_shape: tuple[int, int],
-    tp_size: int,
-) -> tuple[str, str | None]:
-    if requested_mode == "duplicated":
-        return "duplicated", None
-    if requested_mode != "distributed":
-        raise ContractError(f"unsupported Muon TP mode {requested_mode!r}")
-    if canonical_tp_dim == 1:
-        return "distributed_direct", None
-    long_dimension = max(logical_shape)
-    if long_dimension % tp_size:
-        return "duplicated", "exchange_long_dimension_not_divisible_by_tp"
-    return "distributed_exchange", None
 
 
 def _require_named_sharding(value: Any, path: tuple[str, ...], role: str) -> jax.sharding.NamedSharding:

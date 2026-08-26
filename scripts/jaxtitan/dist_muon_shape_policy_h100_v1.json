@@ -1,0 +1,3406 @@
+{
+  "contract": {
+    "maximum_mad_fraction": 0.05,
+    "minimum_speedup": 1.05,
+    "tie_fraction": 0.03,
+    "timing_scope": "calibration_replay_only_not_end_to_end_acceptance"
+  },
+  "hardware": {
+    "backend": "gpu",
+    "device_count": 4,
+    "device_kind": "NVIDIA H100 80GB HBM3"
+  },
+  "sample_count": 63,
+  "samples": [
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 262144,
+            "gram_dimension": 256,
+            "gram_operand_bytes_per_rank_per_step": 131072,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.016536251117346103,
+          "median_ms": 5.148476499925891,
+          "p95_ms": 5.453409700203338,
+          "speedup_vs_duplicated": 2.274530533478479,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.013299797409897438,
+          "median_ms": 6.633672500356624,
+          "p95_ms": 6.8738363986994955,
+          "speedup_vs_duplicated": 1.7652916991829646,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 262144,
+            "gather_result_bytes_per_rank": 524288,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.0058062228802878355,
+          "median_ms": 11.71036699997785,
+          "p95_ms": 12.107656201351347,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 24,
+        "long_dimension": 1024,
+        "short_dimension": 256,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "fsdp2_tp2_attention_kv_bucket24",
+      "source_kind": "production_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_large_gram",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 1048576,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.010579972763432614,
+          "median_ms": 5.532481000955158,
+          "p95_ms": 5.693211700508982,
+          "speedup_vs_duplicated": 1.898485507197201,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.009218649930204792,
+          "median_ms": 4.956202999892412,
+          "p95_ms": 5.117913199592294,
+          "speedup_vs_duplicated": 2.1192301847574115,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 2097152,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.007198713557927208,
+          "median_ms": 10.503334999157232,
+          "p95_ms": 10.726618950775446,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 1024,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "fsdp2_tp2_attention_o_bucket12",
+      "source_kind": "production_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.007042202332064367,
+          "median_ms": 5.033794500377553,
+          "p95_ms": 5.1757243002612086,
+          "speedup_vs_duplicated": 1.191356639511947,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 2097152,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.008277243794286316,
+          "median_ms": 5.997044499963522,
+          "p95_ms": 6.089017750946368,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 1024,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "fsdp2_tp2_attention_q_gate_bucket12",
+      "source_kind": "production_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.007526831299303837,
+          "median_ms": 5.006156999115774,
+          "p95_ms": 5.111315099748026,
+          "speedup_vs_duplicated": 1.2036613116839625,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 2097152,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.00813438396765792,
+          "median_ms": 6.025717500051542,
+          "p95_ms": 6.1273316986444115,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 1024,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "fsdp2_tp2_calibration_w1024_r1_column_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_large_gram",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 1048576,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.010899478509708276,
+          "median_ms": 5.513429000529868,
+          "p95_ms": 5.636374399182387,
+          "speedup_vs_duplicated": 1.9084408268202966,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.009795876173668084,
+          "median_ms": 4.946213999573956,
+          "p95_ms": 5.09107465049965,
+          "speedup_vs_duplicated": 2.127294330834158,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 2097152,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.008005186827171005,
+          "median_ms": 10.522053000386222,
+          "p95_ms": 10.73856380135112,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 1024,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "fsdp2_tp2_calibration_w1024_r1_row_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "duplicated",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.014886124463727382,
+          "median_ms": 1.3459850006256602,
+          "p95_ms": 1.3891417512240878,
+          "speedup_vs_duplicated": 1.0385461204622168,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.01696405482831146,
+          "median_ms": 1.397867500600114,
+          "p95_ms": 1.4378029997715203,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 1,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "fsdp2_tp2_calibration_w1024_r2_column_bucket1",
+      "source_kind": "calibration_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.006592251351771933,
+          "median_ms": 5.9245314996587695,
+          "p95_ms": 6.0238215990466415,
+          "speedup_vs_duplicated": 1.1421411971671034,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.007149326367249592,
+          "median_ms": 6.766651499674481,
+          "p95_ms": 6.86683990079473,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "fsdp2_tp2_calibration_w1024_r2_column_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.009209026679218198,
+          "median_ms": 10.89295349902386,
+          "p95_ms": 11.096810599701712,
+          "speedup_vs_duplicated": 1.1704156729472375,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.009929459939643621,
+          "median_ms": 12.749283499942976,
+          "p95_ms": 12.9286098997909,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 24,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "fsdp2_tp2_calibration_w1024_r2_column_bucket24",
+      "source_kind": "calibration_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 2097152,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.01643791292064378,
+          "median_ms": 1.427553500434442,
+          "p95_ms": 1.4790259504479764,
+          "speedup_vs_duplicated": 1.376059811578631,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 2048,
+            "gram_operand_bytes_per_rank_per_step": 8388608,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.016098814780426823,
+          "median_ms": 1.6272004995698808,
+          "p95_ms": 1.6890342003534897,
+          "speedup_vs_duplicated": 1.207226153965344,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.016241608988654604,
+          "median_ms": 1.9643990008262335,
+          "p95_ms": 2.055361948987411,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 1,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "fsdp2_tp2_calibration_w1024_r2_row_bucket1",
+      "source_kind": "calibration_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 2097152,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.009973971785033106,
+          "median_ms": 6.5955669997492805,
+          "p95_ms": 6.734824450359156,
+          "speedup_vs_duplicated": 2.166490083535882,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 2048,
+            "gram_operand_bytes_per_rank_per_step": 8388608,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.007878219363418596,
+          "median_ms": 9.17390050017275,
+          "p95_ms": 9.342794799886178,
+          "speedup_vs_duplicated": 1.5575959756686102,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.006301109080116765,
+          "median_ms": 14.289230500253325,
+          "p95_ms": 14.593130699813628,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "fsdp2_tp2_calibration_w1024_r2_row_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 2097152,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.011261448234781365,
+          "median_ms": 12.068429999999353,
+          "p95_ms": 12.619241149150184,
+          "speedup_vs_duplicated": 2.3573033111999755,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 2048,
+            "gram_operand_bytes_per_rank_per_step": 8388608,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.006701337022061736,
+          "median_ms": 17.511207000097784,
+          "p95_ms": 17.958806648675818,
+          "speedup_vs_duplicated": 1.6246138829736143,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.0066980679041512585,
+          "median_ms": 28.448949999983597,
+          "p95_ms": 29.157767099241028,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 24,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "fsdp2_tp2_calibration_w1024_r2_row_bucket24",
+      "source_kind": "calibration_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.006727103669715395,
+          "median_ms": 8.034438499635144,
+          "p95_ms": 8.155329548662849,
+          "speedup_vs_duplicated": 1.097466176441093,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 4194304,
+            "gather_result_bytes_per_rank": 8388608,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.0069533688109801196,
+          "median_ms": 8.817524500045693,
+          "p95_ms": 8.964172600099118,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 4096,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "fsdp2_tp2_calibration_w1024_r4_column_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 4194304,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.013198210610960794,
+          "median_ms": 9.09267200040631,
+          "p95_ms": 9.430760399118299,
+          "speedup_vs_duplicated": 2.1518797224152686,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 4096,
+            "gram_operand_bytes_per_rank_per_step": 33554432,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.004157279962526091,
+          "median_ms": 26.692212500165624,
+          "p95_ms": 26.94404834846864,
+          "speedup_vs_duplicated": 0.7330353937548642,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 4194304,
+            "gather_result_bytes_per_rank": 8388608,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.014354373410681595,
+          "median_ms": 19.566336500247417,
+          "p95_ms": 20.094338500348385,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 4096,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "fsdp2_tp2_calibration_w1024_r4_row_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "duplicated",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 2048,
+            "gram_operand_bytes_per_rank_per_step": 8388608,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.00399649527467744,
+          "median_ms": 15.35195099950215,
+          "p95_ms": 15.46764269915002,
+          "speedup_vs_duplicated": 1.038460030307196,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 8388608,
+            "gather_result_bytes_per_rank": 16777216,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.006412245375981653,
+          "median_ms": 15.942387500217592,
+          "p95_ms": 16.161911250310368,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 4096,
+        "short_dimension": 2048,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "fsdp2_tp2_calibration_w2048_r2_column_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 8388608,
+            "gram_dimension": 2048,
+            "gram_operand_bytes_per_rank_per_step": 8388608,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.0077013767489948525,
+          "median_ms": 16.94099699943763,
+          "p95_ms": 17.279607300861244,
+          "speedup_vs_duplicated": 1.842447643511848,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 4096,
+            "gram_operand_bytes_per_rank_per_step": 33554432,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.0025237467417163896,
+          "median_ms": 32.177356500142196,
+          "p95_ms": 32.418143901122676,
+          "speedup_vs_duplicated": 0.970026857247183,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 8388608,
+            "gather_result_bytes_per_rank": 16777216,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.005712093408061265,
+          "median_ms": 31.212900000355148,
+          "p95_ms": 31.555154949001007,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 4096,
+        "short_dimension": 2048,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "fsdp2_tp2_calibration_w2048_r2_row_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 256,
+            "gram_operand_bytes_per_rank_per_step": 131072,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.01316387047589611,
+          "median_ms": 2.1788044996355893,
+          "p95_ms": 2.818388750620215,
+          "speedup_vs_duplicated": 1.3281056196770955,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 131072,
+            "gather_result_bytes_per_rank": 262144,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.012512775355232826,
+          "median_ms": 2.8936825001437683,
+          "p95_ms": 4.181199800223112,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 512,
+        "short_dimension": 256,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "fsdp2_tp2_calibration_w256_r2_column_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_large_gram",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 131072,
+            "gram_dimension": 256,
+            "gram_operand_bytes_per_rank_per_step": 131072,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.016390488291919778,
+          "median_ms": 2.5886964995152084,
+          "p95_ms": 2.672950048417988,
+          "speedup_vs_duplicated": 2.0495859599084794,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 512,
+            "gram_operand_bytes_per_rank_per_step": 524288,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.012947276647314702,
+          "median_ms": 2.620666999973764,
+          "p95_ms": 2.748285500547354,
+          "speedup_vs_duplicated": 2.0245822914257,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 131072,
+            "gather_result_bytes_per_rank": 262144,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.008105254027127421,
+          "median_ms": 5.305755999870598,
+          "p95_ms": 5.421579601079428,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 512,
+        "short_dimension": 256,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "fsdp2_tp2_calibration_w256_r2_row_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.005899883028195881,
+          "median_ms": 7.992615999683039,
+          "p95_ms": 8.10607505027292,
+          "speedup_vs_duplicated": 1.076941767289853,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 4194304,
+            "gather_result_bytes_per_rank": 8388608,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.006235839479380222,
+          "median_ms": 8.607581999967806,
+          "p95_ms": 8.727730351256469,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 4096,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "fsdp2_tp2_dense_mlp_down_bucket12",
+      "source_kind": "production_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.010724424446780482,
+          "median_ms": 15.328374999626249,
+          "p95_ms": 15.531568650476402,
+          "speedup_vs_duplicated": 1.113051318275907,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 4194304,
+            "gather_result_bytes_per_rank": 8388608,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.011391152218776991,
+          "median_ms": 17.06126800036145,
+          "p95_ms": 17.269058000238147,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 24,
+        "long_dimension": 4096,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "fsdp2_tp2_dense_mlp_gate_up_bucket24",
+      "source_kind": "production_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.007418001458754397,
+          "median_ms": 4.808775001038157,
+          "p95_ms": 4.909270799453225,
+          "speedup_vs_duplicated": 1.1595906439977484,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.005935303262375067,
+          "median_ms": 5.57621050029411,
+          "p95_ms": 5.691133450181951,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 10,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "fsdp2_tp2_shared_mlp_down_bucket10",
+      "source_kind": "production_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.008684406209332711,
+          "median_ms": 9.197174499604444,
+          "p95_ms": 9.352190600384347,
+          "speedup_vs_duplicated": 1.151327943202897,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.007569956791504256,
+          "median_ms": 10.588963999907719,
+          "p95_ms": 10.725040350553172,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 20,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "fsdp2_tp2_shared_mlp_gate_up_bucket20",
+      "source_kind": "production_bucket",
+      "topology": "fsdp2_tp2"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 262144,
+            "gram_dimension": 256,
+            "gram_operand_bytes_per_rank_per_step": 131072,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.029381611378648313,
+          "median_ms": 5.20623250031349,
+          "p95_ms": 5.869926249397395,
+          "speedup_vs_duplicated": 2.2632974996259163,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.01808886434101347,
+          "median_ms": 6.68317250074324,
+          "p95_ms": 6.9604858988896,
+          "speedup_vs_duplicated": 1.7631226785063954,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 262144,
+            "gather_result_bytes_per_rank": 524288,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.006744529727405822,
+          "median_ms": 11.783253000430705,
+          "p95_ms": 12.322133699308324,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 24,
+        "long_dimension": 1024,
+        "short_dimension": 256,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp2_ep2_attention_kv_bucket24",
+      "source_kind": "production_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_large_gram",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 1048576,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.011769983276730156,
+          "median_ms": 5.594527999164711,
+          "p95_ms": 5.729687599705358,
+          "speedup_vs_duplicated": 1.885864991949154,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.010427522953800476,
+          "median_ms": 5.01528499989945,
+          "p95_ms": 5.175423549189873,
+          "speedup_vs_duplicated": 2.10367396874068,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 2097152,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.006296606373107178,
+          "median_ms": 10.550524500104075,
+          "p95_ms": 10.778572898925631,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 1024,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp2_ep2_attention_o_bucket12",
+      "source_kind": "production_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.007592598979507547,
+          "median_ms": 5.100625000522996,
+          "p95_ms": 5.214042898933258,
+          "speedup_vs_duplicated": 1.1827812275387184,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 2097152,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.006439166652546053,
+          "median_ms": 6.032923499333265,
+          "p95_ms": 6.154419850099657,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 1024,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp2_ep2_attention_q_gate_bucket12",
+      "source_kind": "production_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.01235115754139933,
+          "median_ms": 5.086122499960766,
+          "p95_ms": 5.247667150433699,
+          "speedup_vs_duplicated": 1.1840644812750762,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 2097152,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.008944925699628997,
+          "median_ms": 6.022296999617538,
+          "p95_ms": 6.20178820036017,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 1024,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp2_ep2_calibration_w1024_r1_column_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_large_gram",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 1048576,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.00904995896900309,
+          "median_ms": 5.322786500983057,
+          "p95_ms": 5.407266900147079,
+          "speedup_vs_duplicated": 1.9495788526328215,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.009437011469518072,
+          "median_ms": 4.7413315005542245,
+          "p95_ms": 4.860145599650423,
+          "speedup_vs_duplicated": 2.188666200239955,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 2097152,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.006205869558681292,
+          "median_ms": 10.377191999396018,
+          "p95_ms": 10.623927899450791,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 1024,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp2_ep2_calibration_w1024_r1_row_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "duplicated",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.0172658777957123,
+          "median_ms": 1.3561429996116203,
+          "p95_ms": 1.400003550133988,
+          "speedup_vs_duplicated": 1.0392882607197158,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.016889884224855177,
+          "median_ms": 1.4094234993535792,
+          "p95_ms": 1.4484020489362592,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 1,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp2_ep2_calibration_w1024_r2_column_bucket1",
+      "source_kind": "calibration_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.010054636577647852,
+          "median_ms": 5.8800235001399415,
+          "p95_ms": 6.026699550147896,
+          "speedup_vs_duplicated": 1.1376255554157926,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.008485984694416412,
+          "median_ms": 6.689265000204614,
+          "p95_ms": 6.882426149877574,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp2_ep2_calibration_w1024_r2_column_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.011195942754185827,
+          "median_ms": 10.934541500319028,
+          "p95_ms": 11.096247799559933,
+          "speedup_vs_duplicated": 1.1582078223236965,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.011430599229960583,
+          "median_ms": 12.664471499192587,
+          "p95_ms": 12.92303764994358,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 24,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp2_ep2_calibration_w1024_r2_column_bucket24",
+      "source_kind": "calibration_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 2097152,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.01744175630477707,
+          "median_ms": 1.4215884993973305,
+          "p95_ms": 1.469255499978317,
+          "speedup_vs_duplicated": 1.380752587811181,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 2048,
+            "gram_operand_bytes_per_rank_per_step": 8388608,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.013762290591753523,
+          "median_ms": 1.6221500009123702,
+          "p95_ms": 1.6745446001550588,
+          "speedup_vs_duplicated": 1.2100372950969243,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.01619242773180791,
+          "median_ms": 1.9628619993454777,
+          "p95_ms": 2.0294347008530167,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 1,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp2_ep2_calibration_w1024_r2_row_bucket1",
+      "source_kind": "calibration_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 2097152,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.010832421655345566,
+          "median_ms": 6.5600289999565575,
+          "p95_ms": 6.738429299730342,
+          "speedup_vs_duplicated": 2.19505744556928,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 2048,
+            "gram_operand_bytes_per_rank_per_step": 8388608,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.008050397546297815,
+          "median_ms": 9.148243999334227,
+          "p95_ms": 9.333374948528217,
+          "speedup_vs_duplicated": 1.5740332790154032,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.008577262783630584,
+          "median_ms": 14.39964049950504,
+          "p95_ms": 14.702943249722011,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp2_ep2_calibration_w1024_r2_row_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 2097152,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.008403450276265066,
+          "median_ms": 12.01143550042616,
+          "p95_ms": 12.652959849310719,
+          "speedup_vs_duplicated": 2.3772587797112923,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 2048,
+            "gram_operand_bytes_per_rank_per_step": 8388608,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.008249970321617891,
+          "median_ms": 17.471578000368027,
+          "p95_ms": 17.862612200951844,
+          "speedup_vs_duplicated": 1.634328078420994,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.010109864234370464,
+          "median_ms": 28.554290500323987,
+          "p95_ms": 29.286199951093295,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 24,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp2_ep2_calibration_w1024_r2_row_bucket24",
+      "source_kind": "calibration_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.006145800903536042,
+          "median_ms": 8.048503499594517,
+          "p95_ms": 8.16115065053964,
+          "speedup_vs_duplicated": 1.099780039968761,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 4194304,
+            "gather_result_bytes_per_rank": 8388608,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.005919392814944535,
+          "median_ms": 8.85158350047277,
+          "p95_ms": 8.986938648740761,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 4096,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp2_ep2_calibration_w1024_r4_column_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 4194304,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.013118109285536255,
+          "median_ms": 9.028168500663014,
+          "p95_ms": 9.409352750844846,
+          "speedup_vs_duplicated": 2.1634227361101,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 4096,
+            "gram_operand_bytes_per_rank_per_step": 33554432,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.0041428776165214195,
+          "median_ms": 26.677954499973566,
+          "p95_ms": 26.858911449016887,
+          "speedup_vs_duplicated": 0.7321305312139561,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 4194304,
+            "gather_result_bytes_per_rank": 8388608,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.01482875702578382,
+          "median_ms": 19.531744999767398,
+          "p95_ms": 20.054556251034228,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 4096,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp2_ep2_calibration_w1024_r4_row_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "duplicated",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 2048,
+            "gram_operand_bytes_per_rank_per_step": 8388608,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.004296521977429584,
+          "median_ms": 15.367779000371229,
+          "p95_ms": 15.517905949945998,
+          "speedup_vs_duplicated": 1.0407447621076416,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 8388608,
+            "gather_result_bytes_per_rank": 16777216,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.005546414765229024,
+          "median_ms": 15.993935499864165,
+          "p95_ms": 16.179625448967272,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 4096,
+        "short_dimension": 2048,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp2_ep2_calibration_w2048_r2_column_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 8388608,
+            "gram_dimension": 2048,
+            "gram_operand_bytes_per_rank_per_step": 8388608,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.007941467068941062,
+          "median_ms": 16.983952499685984,
+          "p95_ms": 17.26115195078819,
+          "speedup_vs_duplicated": 1.8478234380835123,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 4096,
+            "gram_operand_bytes_per_rank_per_step": 33554432,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.0026463461885205225,
+          "median_ms": 32.126938000146765,
+          "p95_ms": 32.31605955015766,
+          "speedup_vs_duplicated": 0.9768545480454269,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 8388608,
+            "gather_result_bytes_per_rank": 16777216,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.0062344691470175686,
+          "median_ms": 31.38334550021682,
+          "p95_ms": 31.740068750696082,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 4096,
+        "short_dimension": 2048,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp2_ep2_calibration_w2048_r2_row_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 256,
+            "gram_operand_bytes_per_rank_per_step": 131072,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.013920630781039134,
+          "median_ms": 2.1396659994934453,
+          "p95_ms": 2.8297362996454467,
+          "speedup_vs_duplicated": 1.3397219476005018,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 131072,
+            "gather_result_bytes_per_rank": 262144,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.012713856484411189,
+          "median_ms": 2.866557500055933,
+          "p95_ms": 4.176248800831672,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 512,
+        "short_dimension": 256,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp2_ep2_calibration_w256_r2_column_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_large_gram",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 131072,
+            "gram_dimension": 256,
+            "gram_operand_bytes_per_rank_per_step": 131072,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.014004849015385377,
+          "median_ms": 2.5851760001387447,
+          "p95_ms": 2.6694991491240216,
+          "speedup_vs_duplicated": 2.0767464186375175,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 512,
+            "gram_operand_bytes_per_rank_per_step": 524288,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.017362059024378554,
+          "median_ms": 2.6138604998777737,
+          "p95_ms": 2.722996800275723,
+          "speedup_vs_duplicated": 2.0539562077191373,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 131072,
+            "gather_result_bytes_per_rank": 262144,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.010075520220968597,
+          "median_ms": 5.368754999835801,
+          "p95_ms": 5.49714304979716,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 512,
+        "short_dimension": 256,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp2_ep2_calibration_w256_r2_row_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.006452414295976441,
+          "median_ms": 7.986700499714061,
+          "p95_ms": 8.151289349098079,
+          "speedup_vs_duplicated": 1.0769389062247088,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 4194304,
+            "gather_result_bytes_per_rank": 8388608,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.008029529945555381,
+          "median_ms": 8.601188500506396,
+          "p95_ms": 8.823514950654499,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 4096,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp2_ep2_dense_mlp_down_bucket12",
+      "source_kind": "production_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.008770667751230152,
+          "median_ms": 15.218681499391096,
+          "p95_ms": 15.474011000242172,
+          "speedup_vs_duplicated": 1.1205551873982122,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 4194304,
+            "gather_result_bytes_per_rank": 8388608,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.0132586971048697,
+          "median_ms": 17.053372499503894,
+          "p95_ms": 17.278683100630587,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 24,
+        "long_dimension": 4096,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp2_ep2_dense_mlp_gate_up_bucket24",
+      "source_kind": "production_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.009998197679973642,
+          "median_ms": 4.80751649956801,
+          "p95_ms": 4.940472001180751,
+          "speedup_vs_duplicated": 1.1576614454934728,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.006743627488199305,
+          "median_ms": 5.565476500123623,
+          "p95_ms": 5.691381600354362,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 10,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp2_ep2_shared_mlp_down_bucket10",
+      "source_kind": "production_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.009592096339426995,
+          "median_ms": 9.243495499504206,
+          "p95_ms": 9.360285700950044,
+          "speedup_vs_duplicated": 1.1500750988594484,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.009581905771195191,
+          "median_ms": 10.630714000399166,
+          "p95_ms": 10.831910450997384,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 20,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 2
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp2_ep2_shared_mlp_gate_up_bucket20",
+      "source_kind": "production_bucket",
+      "topology": "tp2_ep2"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 131072,
+            "gram_dimension": 256,
+            "gram_operand_bytes_per_rank_per_step": 131072,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.019646027669506898,
+          "median_ms": 3.878494000673527,
+          "p95_ms": 5.0658674494115985,
+          "speedup_vs_duplicated": 1.6522945500395885,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.011242971946530721,
+          "median_ms": 5.121599499943841,
+          "p95_ms": 5.495496000366984,
+          "speedup_vs_duplicated": 1.2512525627480982,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 131072,
+            "gather_result_bytes_per_rank": 524288,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.012998612946512432,
+          "median_ms": 6.408414499674109,
+          "p95_ms": 8.56114849957521,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 24,
+        "long_dimension": 1024,
+        "short_dimension": 256,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp4_attention_kv_bucket24",
+      "source_kind": "production_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_large_gram",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 524288,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.012539031361357969,
+          "median_ms": 4.770344500684587,
+          "p95_ms": 4.919312900528894,
+          "speedup_vs_duplicated": 1.514180998689868,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.011480171225132023,
+          "median_ms": 4.112351500225486,
+          "p95_ms": 4.251590148942341,
+          "speedup_vs_duplicated": 1.7564561297217056,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 524288,
+            "gather_result_bytes_per_rank": 2097152,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.006305200028404043,
+          "median_ms": 7.223165000141307,
+          "p95_ms": 7.388042249476712,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 1024,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp4_attention_o_bucket12",
+      "source_kind": "production_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.011208439956003508,
+          "median_ms": 4.064972500600561,
+          "p95_ms": 4.151785099202243,
+          "speedup_vs_duplicated": 1.1826595383287613,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 524288,
+            "gather_result_bytes_per_rank": 2097152,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.006771221078718579,
+          "median_ms": 4.80747850087937,
+          "p95_ms": 4.905001450697455,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 1024,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp4_attention_q_gate_bucket12",
+      "source_kind": "production_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.010376396855046233,
+          "median_ms": 4.013146500255971,
+          "p95_ms": 4.201423600443377,
+          "speedup_vs_duplicated": 1.1757582236564406,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 524288,
+            "gather_result_bytes_per_rank": 2097152,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.005437226630257678,
+          "median_ms": 4.718490000414022,
+          "p95_ms": 4.80744634887742,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 1024,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp4_calibration_w1024_r1_column_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_large_gram",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 524288,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.010206560943808,
+          "median_ms": 4.69418649936415,
+          "p95_ms": 4.827781400035747,
+          "speedup_vs_duplicated": 1.5302775038890644,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.010975476668753713,
+          "median_ms": 4.052762499668461,
+          "p95_ms": 4.207597599088331,
+          "speedup_vs_duplicated": 1.7724719866077425,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 524288,
+            "gather_result_bytes_per_rank": 2097152,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.007030019552118932,
+          "median_ms": 7.183407999036717,
+          "p95_ms": 7.317401651198452,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 1024,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp4_calibration_w1024_r1_row_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.02529794145394753,
+          "median_ms": 1.06967200008512,
+          "p95_ms": 1.131819249167165,
+          "speedup_vs_duplicated": 1.0561611413829628,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.02260862094833509,
+          "median_ms": 1.129746000515297,
+          "p95_ms": 1.1852358999931312,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 1,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp4_calibration_w1024_r2_column_bucket1",
+      "source_kind": "calibration_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.00935328221892473,
+          "median_ms": 4.068411499247304,
+          "p95_ms": 4.1520329007653345,
+          "speedup_vs_duplicated": 1.2949572580166961,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.005716705489029493,
+          "median_ms": 5.268418999548885,
+          "p95_ms": 5.3473951983505685,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp4_calibration_w1024_r2_column_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.016525273602646454,
+          "median_ms": 7.2007279995887075,
+          "p95_ms": 7.3601881990725815,
+          "speedup_vs_duplicated": 1.372005580700539,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.007537219554581756,
+          "median_ms": 9.879439000542334,
+          "p95_ms": 10.055699049917166,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 24,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp4_calibration_w1024_r2_column_bucket24",
+      "source_kind": "calibration_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 1048576,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.018169314911422384,
+          "median_ms": 1.1575560001801932,
+          "p95_ms": 1.2064269498296196,
+          "speedup_vs_duplicated": 1.1717091875189622,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 2048,
+            "gram_operand_bytes_per_rank_per_step": 8388608,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.018830503765815562,
+          "median_ms": 1.3588589999926626,
+          "p95_ms": 1.4207892995727889,
+          "speedup_vs_duplicated": 0.9981307850823062,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.017646660447150284,
+          "median_ms": 1.356319000478834,
+          "p95_ms": 1.4123044013103936,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 1,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp4_calibration_w1024_r2_row_bucket1",
+      "source_kind": "calibration_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 1048576,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.012232284547366624,
+          "median_ms": 4.875418000665377,
+          "p95_ms": 5.052809948392678,
+          "speedup_vs_duplicated": 1.7251637701982756,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 2048,
+            "gram_operand_bytes_per_rank_per_step": 8388608,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.007010617243788971,
+          "median_ms": 7.304064500203822,
+          "p95_ms": 7.484918200225366,
+          "speedup_vs_duplicated": 1.1515361753836801,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.006264969719314915,
+          "median_ms": 8.41089449932042,
+          "p95_ms": 8.584707250429346,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp4_calibration_w1024_r2_row_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 1048576,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.012552924833377162,
+          "median_ms": 8.93437200011249,
+          "p95_ms": 9.541596400958952,
+          "speedup_vs_duplicated": 1.8484980814269565,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 2048,
+            "gram_operand_bytes_per_rank_per_step": 8388608,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.006729709893227706,
+          "median_ms": 14.141991499855067,
+          "p95_ms": 14.568810999844573,
+          "speedup_vs_duplicated": 1.1678107359300782,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.011194253963901286,
+          "median_ms": 16.515169500962656,
+          "p95_ms": 17.042781400232343,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 24,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp4_calibration_w1024_r2_row_bucket24",
+      "source_kind": "calibration_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.008615395209583585,
+          "median_ms": 4.266954500053544,
+          "p95_ms": 4.364214599991101,
+          "speedup_vs_duplicated": 1.2216252832203522,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 8388608,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.006986986234930141,
+          "median_ms": 5.212619499616267,
+          "p95_ms": 5.316792949724913,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 4096,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp4_calibration_w1024_r4_column_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 2097152,
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.023102569797394907,
+          "median_ms": 5.288264498631179,
+          "p95_ms": 5.511223750454519,
+          "speedup_vs_duplicated": 1.9910215350561713,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 4096,
+            "gram_operand_bytes_per_rank_per_step": 33554432,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.0027251580116876093,
+          "median_ms": 26.301593999050965,
+          "p95_ms": 26.489059801224357,
+          "speedup_vs_duplicated": 0.40031978671055535,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 8388608,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.015794399681607316,
+          "median_ms": 10.529048499847704,
+          "p95_ms": 10.774292300175148,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 4096,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp4_calibration_w1024_r4_row_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 2048,
+            "gram_operand_bytes_per_rank_per_step": 8388608,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.0085178015735853,
+          "median_ms": 8.255709998593375,
+          "p95_ms": 8.39632765037095,
+          "speedup_vs_duplicated": 1.3010045777261772,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 4194304,
+            "gather_result_bytes_per_rank": 16777216,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.004550022337219745,
+          "median_ms": 10.740716500549752,
+          "p95_ms": 10.879575899434712,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 4096,
+        "short_dimension": 2048,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp4_calibration_w2048_r2_column_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 4194304,
+            "gram_dimension": 2048,
+            "gram_operand_bytes_per_rank_per_step": 8388608,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.011225657716799679,
+          "median_ms": 9.495167500062962,
+          "p95_ms": 9.813544650842232,
+          "speedup_vs_duplicated": 1.68940837536304,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 4096,
+            "gram_operand_bytes_per_rank_per_step": 33554432,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.0034288255155889825,
+          "median_ms": 24.786621499515604,
+          "p95_ms": 24.982936751166562,
+          "speedup_vs_duplicated": 0.6471723264259631,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 4194304,
+            "gather_result_bytes_per_rank": 16777216,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.013607229462279656,
+          "median_ms": 16.041215500081307,
+          "p95_ms": 16.562200000953453,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 4096,
+        "short_dimension": 2048,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp4_calibration_w2048_r2_row_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 256,
+            "gram_operand_bytes_per_rank_per_step": 131072,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.019994129145318763,
+          "median_ms": 2.0659565007008496,
+          "p95_ms": 2.3267205005140568,
+          "speedup_vs_duplicated": 1.552008718020438,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 65536,
+            "gather_result_bytes_per_rank": 262144,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.014982772540644559,
+          "median_ms": 3.206382500138716,
+          "p95_ms": 3.8264630508820114,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 512,
+        "short_dimension": 256,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp4_calibration_w256_r2_column_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_exchange",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "exchange_directions": 2,
+            "exchange_operand_bytes_per_rank_each_direction": 65536,
+            "gram_dimension": 256,
+            "gram_operand_bytes_per_rank_per_step": 131072,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_exchange",
+          "mad_fraction": 0.018865874943195384,
+          "median_ms": 1.9373605000509997,
+          "p95_ms": 2.7870376012288034,
+          "speedup_vs_duplicated": 1.3935705310670605,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gram_dimension": 512,
+            "gram_operand_bytes_per_rank_per_step": 524288,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_large_gram",
+          "mad_fraction": 0.012844679317112195,
+          "median_ms": 2.074283000183641,
+          "p95_ms": 2.528608998909476,
+          "speedup_vs_duplicated": 1.3015815588737862,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 65536,
+            "gather_result_bytes_per_rank": 262144,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.011846405402146518,
+          "median_ms": 2.6998485009244177,
+          "p95_ms": 4.285095048544463,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 0,
+        "cohort_size": 12,
+        "long_dimension": 512,
+        "short_dimension": 256,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_exchange",
+      "source_case": "tp4_calibration_w256_r2_row_bucket12",
+      "source_kind": "calibration_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.00896274560387921,
+          "median_ms": 4.236424999362498,
+          "p95_ms": 4.352191650741588,
+          "speedup_vs_duplicated": 1.2274053004336414,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 8388608,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.005560971846358527,
+          "median_ms": 5.199810499107116,
+          "p95_ms": 5.29919200025688,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 12,
+        "long_dimension": 4096,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp4_dense_mlp_down_bucket12",
+      "source_kind": "production_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.01179102174862465,
+          "median_ms": 7.3598795006546425,
+          "p95_ms": 7.54224859911119,
+          "speedup_vs_duplicated": 1.3418388847279992,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 2097152,
+            "gather_result_bytes_per_rank": 8388608,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.007648211982137174,
+          "median_ms": 9.87577250089089,
+          "p95_ms": 10.00731585027097,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 24,
+        "long_dimension": 4096,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp4_dense_mlp_gate_up_bucket24",
+      "source_kind": "production_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.010528409861758048,
+          "median_ms": 3.4738864997052588,
+          "p95_ms": 3.55761635082672,
+          "speedup_vs_duplicated": 1.243932264412624,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.0074598276164992055,
+          "median_ms": 4.321279499890807,
+          "p95_ms": 4.440891650301637,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 10,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp4_shared_mlp_down_bucket10",
+      "source_kind": "production_bucket",
+      "topology": "tp4"
+    },
+    {
+      "accepted_execution": "distributed_direct",
+      "candidates": [
+        {
+          "collective_operand_model": {
+            "gram_dimension": 1024,
+            "gram_operand_bytes_per_rank_per_step": 2097152,
+            "gram_steps": 5,
+            "kind": "scalar_norm_plus_five_gram_reductions",
+            "norm_operand_bytes_per_rank": 4
+          },
+          "correctness_gate": true,
+          "execution": "distributed_direct",
+          "mad_fraction": 0.014618760596640327,
+          "median_ms": 6.169195999973454,
+          "p95_ms": 6.311767200077156,
+          "speedup_vs_duplicated": 1.346487613629445,
+          "stability_gate": true
+        },
+        {
+          "collective_operand_model": {
+            "gather_local_operand_bytes_per_rank": 1048576,
+            "gather_result_bytes_per_rank": 4194304,
+            "kind": "logical_matrix_gather"
+          },
+          "correctness_gate": true,
+          "execution": "duplicated",
+          "mad_fraction": 0.00890980668671526,
+          "median_ms": 8.306746000016574,
+          "p95_ms": 8.441730650247337,
+          "speedup_vs_duplicated": 1.0,
+          "stability_gate": true
+        }
+      ],
+      "features": {
+        "canonical_tp_dim": 1,
+        "cohort_size": 20,
+        "long_dimension": 2048,
+        "short_dimension": 1024,
+        "tp_size": 4
+      },
+      "previous_execution": "distributed_direct",
+      "source_case": "tp4_shared_mlp_gate_up_bucket20",
+      "source_kind": "production_bucket",
+      "topology": "tp4"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "artifact": "dist_muon_leaf_bench_20260724T215030Z.tgz",
+    "selection_schema_version": 1,
+    "sha256": "27fddd04d51cdb9f3262a3a074a2f319e8bf0f880ba80851d3a546a5bef6b1e6"
+  }
+}
