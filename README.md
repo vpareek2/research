@@ -1,5 +1,5 @@
 # Jaxtitan
-
+**Note: In progress, readme not fully updated yet. Verified training on 1 node with correct distributed algorithms, working on performance.**
 Jaxtitan is a JAX-native language-model pretraining stack inspired by TorchTitan, but designed around JAX contracts instead of a PyTorch trainer hierarchy.
 
 The goal is production-quality research infrastructure for small and mid-scale pretraining experiments: reproducible configs, deterministic data and resume behavior, clear local artifacts, honest diagnostics, and a narrow command surface that is easy to trust.
